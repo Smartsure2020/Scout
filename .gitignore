@@ -1,0 +1,33 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Wrangler, dependency, and local tool state
+.wrangler/
+.codex/
+.agents/
+node_modules/
+supabase/.temp/
+
+# Historical/local baselines and recovery material
+.phase2-baseline/
+rollback/
+phase6-version-proof/
+phase6-production-upload-*/
+SCOUT_SOURCE_MANIFEST_*.md
+
+# Generated acceptance and evidence artifacts
+baseline.json
+acceptance.json
+authenticated-v10-acceptance.json
+evidence.json
+browser-proof.pdf
+*.pdf
+
+# Nested repository metadata and local editor/system files
+**/.git/
+.DS_Store
+Thumbs.db
+.vscode/
+

@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "scout-backend",
+  "main": "scout backend.js",
+  "compatibility_date": "2026-04-13",
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "redact_query_string": false,
+  },
+  "browser": {
+    "binding": "BROWSER",
+  },
+  "vars": {
+    "AZURE_CLIENT_ID": "c148ea21-63f3-4058-aa82-08fbaebf19df",
+    "AZURE_TENANT_ID": "0728ffc8-457f-4ae5-8c44-30c3ef0ecd5a",
+    "SUPABASE_URL": "https://vsuoesiwifktyutmzxhx.supabase.co",
+  },
+}

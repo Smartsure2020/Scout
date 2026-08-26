@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "my-worker",
+  "main": "worker.js",
+  "compatibility_date": "2026-05-28",
+  "observability": {
+    "enabled": true,
+  },
+  "triggers": {
+    "crons": ["*/15 * * * *"],
+  },
+  "vars": {
+    "EMAIL_PROVIDER": "graph",
+    "SUPABASE_EXTRACTS_TABLE": "claim_extracts",
+    "SUPABASE_CLAIMS_TABLE": "claims",
+    "SUPABASE_BRIEFING_RUNS_TABLE": "briefing_runs",
+    "SUPABASE_BRIEFING_DELIVERIES_TABLE": "briefing_deliveries",
+    "SUPABASE_DIGEST_LOG_TABLE": "digest_log",
+    "SUPABASE_SETTINGS_TABLE": "scout_settings",
+    "DIGEST_HISTORY_RETENTION_DAYS": "90",
+  },
+  "assets": {
+    "directory": "scout-smartsure",
+  },
+  "compatibility_flags": ["nodejs_compat"],
+}
