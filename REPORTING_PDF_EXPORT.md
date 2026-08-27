@@ -1,7 +1,9 @@
 # Scout management PDF export - Phase 6
 
-Status: implementation complete in the repository. No production migration was
-applied and no Worker was deployed.
+Status: implementation complete in the repository. The reporting-enabled
+`scout-backend` v10 is live and accepted through the approved Cloudflare
+Version Upload flow. Final PDF acceptance remains pending a genuine
+Finalised/Archived report with eligible production data.
 
 ## Architecture
 
@@ -90,11 +92,17 @@ The reporting API has its own configuration:
 - `wrangler.reporting.jsonc`
 - `main`: `scout backend.js`
 - Browser Run binding: `env.BROWSER` from `"browser": { "binding": "BROWSER" }`
-- Compatibility date remains `2026-05-28`, which is already within the
+- Compatibility date remains `2026-04-13`, matching the accepted production
+  Claims Worker configuration.
+- Production releases must follow
+  [`SCOUT_PRODUCTION_DEPLOYMENT.md`](SCOUT_PRODUCTION_DEPLOYMENT.md). Ordinary
+  `wrangler deploy` is not approved for `scout-backend` while Wrangler cannot
+  model the live `observability.redact_query_string` setting.
+- The reporting configuration intentionally declares no static assets. The
+  dedicated `scout-smartsure` frontend Worker remains the sole frontend asset
+  Worker.
+- The compatibility date is within the
   Browser Run Quick Actions compatibility requirement.
-
-The static site `.git` directory is excluded from asset collection by
-`scout-smartsure/.assetsignore` so the dry-run can safely package the dashboard.
 
 ## Storage decision
 
@@ -110,8 +118,10 @@ report snapshot.
 - `node --test`: 67 passing, 0 failing.
 - `node --check`: backend, UI, template, and test modules pass.
 - Prettier check: all touched files pass.
-- Wrangler dry-run for `wrangler.reporting.jsonc`: passes and reports
-  `env.BROWSER` as a Browser Run binding.
+- Wrangler dry-run for `wrangler.reporting.jsonc`: confirms `env.BROWSER` as a
+  Browser Run binding and no static asset upload. It is not a production
+  deployment gate while the installed Wrangler cannot model the live
+  `observability.redact_query_string` setting.
 - Wrangler dry-run for the existing `wrangler.jsonc`: passes and still reports
   only the briefing/history bindings.
 - Template tests cover deterministic output, Weekly/Monthly periods, escaping,
@@ -121,15 +131,17 @@ report snapshot.
 
 Actual PDF page rendering could not be run in this local environment because
 no Chromium/Chrome/Edge executable, Poppler renderer, or Python PDF renderer
-is installed. Therefore the HTML/template contract is verified, but a rendered
-PDF page screenshot and PDF text extraction remain pending the configured
-Browser Run binding or a local PDF renderer. No fake PDF artifact was created.
+is installed. The production v10 Browser Run binding is accepted, but a
+rendered PDF page screenshot, downloaded PDF byte-size/page-count evidence,
+and PDF text extraction remain pending a genuine eligible production report.
+No fake PDF artifact was created.
 
 ## Not included
 
-Phase 6 does not apply the existing Phase 5 migrations, deploy either Worker,
-send email or Teams messages, add AI-generated narrative, or create durable
-export storage.
+Phase 6 does not apply the existing Phase 5 migrations, send email or Teams
+messages, add AI-generated narrative, or create durable export storage. The
+reporting-enabled production Worker release is managed separately through the
+Phase 6.5 procedure in `SCOUT_PRODUCTION_DEPLOYMENT.md`.
 
 The smallest Phase 7 boundary is optional export history and distribution:
 persist a generated-export metadata record and/or store the PDF in an approved
