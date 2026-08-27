@@ -53,6 +53,12 @@ import {
   validateAttentionInput,
   workflowSnapshot,
 } from "./reporting-domain/management-workflow.mjs";
+import {
+  buildClaimNoteNotification,
+  notificationIdentityValue,
+  resolveClaimNoteRecipient,
+  resolveNotificationActor,
+} from "./reporting-domain/notifications.mjs";
 
 const CORS = {
   // The Claims portal is served by the dedicated frontend Worker. Keep the
@@ -60,7 +66,7 @@ const CORS = {
   "Access-Control-Allow-Origin":
     "https://scout-smartsure.marketing-854.workers.dev",
   Vary: "Origin",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
@@ -1681,9 +1687,7 @@ async function verifyMsToken(token, env) {
 async function getUserRole(env, email) {
   const rows = await supabase(
     env,
-    "/scout_users?email=eq." +
-      encodeURIComponent(email) +
-      "&select=role,display_name,active,portal",
+    "/scout_users?email=eq." + encodeURIComponent(email) + "&select=*",
     "GET",
     null,
     true,
@@ -1691,6 +1695,42 @@ async function getUserRole(env, email) {
   if (!rows || rows.length === 0) return null;
   if (!rows[0].active) return null;
   return rows[0];
+}
+
+async function getClaimNoteNotificationContext(env, claimNo, currentUser) {
+  const [claimRows, users] = await Promise.all([
+    supabase(
+      env,
+      "/scout_claims?claim_no=eq." +
+        encodeURIComponent(claimNo) +
+        "&select=claim_no,handler_email,handler_name,extract_date&order=extract_date.desc&limit=1",
+      "GET",
+      null,
+      true,
+    ),
+    supabaseAll(env, "/scout_users?active=eq.true&select=*", true),
+  ]);
+  const actor = resolveNotificationActor(users, currentUser);
+  const recipient = resolveClaimNoteRecipient(
+    users,
+    claimRows?.[0] || null,
+    actor,
+  );
+  return { actor, recipient, claim: claimRows?.[0] || null };
+}
+
+async function getCurrentNotificationIdentity(env, currentUser) {
+  if (currentUser?.scout_user_id) return currentUser.scout_user_id;
+  const rows = await supabase(
+    env,
+    "/scout_users?email=eq." +
+      encodeURIComponent(currentUser?.email || "") +
+      "&active=eq.true&select=*",
+    "GET",
+    null,
+    true,
+  );
+  return notificationIdentityValue(rows?.[0] || currentUser);
 }
 
 async function canAccessClaimNote(env, claimNo, currentUser) {
@@ -1764,7 +1804,16 @@ export default {
       const msUser = await verifyMsToken(msToken, env);
       const dbUser = await getUserRole(env, msUser.email);
       if (!dbUser) return err("Access denied", 403);
-      currentUser = { ...msUser, ...dbUser };
+      const {
+        id: scoutUserId,
+        user_id: scoutUserIdAlias,
+        ...dbUserFields
+      } = dbUser;
+      currentUser = {
+        ...msUser,
+        ...dbUserFields,
+        scout_user_id: scoutUserId ?? scoutUserIdAlias ?? null,
+      };
     } catch (e) {
       return err("Unauthorised: " + e.message, 401);
     }
@@ -1861,6 +1910,63 @@ export default {
         return json({ ok: true, settings, retention_days: 90 });
       } catch (e) {
         return err("Settings could not be saved: " + e.message, 400);
+      }
+    }
+
+    if (path === "/notifications" && request.method === "GET") {
+      try {
+        const recipientUserId = await getCurrentNotificationIdentity(
+          env,
+          currentUser,
+        );
+        if (!recipientUserId) return json({ notifications: [] });
+        const notifications = await supabase(
+          env,
+          "/scout_notifications?recipient_user_id=eq." +
+            encodeURIComponent(recipientUserId) +
+            "&select=id,type,claim_number,actor_display_name,title,message,created_at,read_at&order=read_at.asc.nullsfirst,created_at.desc&limit=50",
+          "GET",
+          null,
+          true,
+        );
+        return json({ notifications: notifications || [] });
+      } catch (e) {
+        return err("Notifications unavailable: " + e.message, 503);
+      }
+    }
+
+    const notificationReadMatch = path.match(
+      /^\/notifications\/([0-9a-f-]+)\/read$/i,
+    );
+    if (notificationReadMatch && request.method === "PATCH") {
+      try {
+        const recipientUserId = await getCurrentNotificationIdentity(
+          env,
+          currentUser,
+        );
+        if (!recipientUserId) return err("Notification not found", 404);
+        const rows = await supabase(
+          env,
+          "/scout_notifications?id=eq." +
+            encodeURIComponent(notificationReadMatch[1]) +
+            "&recipient_user_id=eq." +
+            encodeURIComponent(recipientUserId),
+          "PATCH",
+          { read_at: new Date().toISOString() },
+          true,
+          "return=representation",
+        );
+        if (!rows?.length) return err("Notification not found", 404);
+        await audit(
+          env,
+          currentUser.email,
+          currentUser.name,
+          "read_notification",
+          { notification_id: notificationReadMatch[1] },
+        );
+        return json({ notification: rows[0] });
+      } catch (e) {
+        return err("Notification could not be marked read: " + e.message, 500);
       }
     }
 
@@ -1974,10 +2080,79 @@ export default {
           await audit(env, currentUser.email, currentUser.name, "save_note", {
             claim_no: claimNo,
           });
+
+          // Note, audit and notification are separate service-role REST writes.
+          // A notification failure never loses a legitimate note; the response
+          // makes the non-fatal notification outcome explicit for the caller.
+          let notification = { status: "unresolved", reason: "not_attempted" };
+          try {
+            const context = await getClaimNoteNotificationContext(
+              env,
+              claimNo,
+              currentUser,
+            );
+            if (context.recipient.status === "resolved") {
+              const record = buildClaimNoteNotification({
+                claimNumber: claimNo,
+                actor: context.actor,
+                recipient: context.recipient.user,
+              });
+              if (record) {
+                const rows = await supabase(
+                  env,
+                  "/scout_notifications",
+                  "POST",
+                  record,
+                  true,
+                  "return=representation",
+                );
+                notification = {
+                  status: "created",
+                  id: rows?.[0]?.id || null,
+                };
+                await audit(
+                  env,
+                  currentUser.email,
+                  currentUser.name,
+                  "create_claim_note_notification",
+                  {
+                    claim_number: claimNo,
+                    notification_id: rows?.[0]?.id || null,
+                    recipient_user_id: record.recipient_user_id,
+                  },
+                );
+              } else {
+                notification = {
+                  status: "unresolved",
+                  reason: "invalid_identity",
+                };
+              }
+            } else {
+              notification = {
+                status: "not_created",
+                reason: context.recipient.status,
+              };
+            }
+          } catch (notificationError) {
+            notification = { status: "unavailable" };
+            await audit(
+              env,
+              currentUser.email,
+              currentUser.name,
+              "claim_note_notification_failure",
+              {
+                claim_number: claimNo,
+                error: String(
+                  notificationError?.message || notificationError,
+                ).slice(0, 300),
+              },
+            );
+          }
           return json({
             ok: true,
             savedBy: record.saved_by,
             savedAt: record.saved_at,
+            notification,
           });
         } catch (e) {
           return err("Failed to save note: " + e.message, 500);

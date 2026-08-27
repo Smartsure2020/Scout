@@ -34,6 +34,18 @@ export const SCOUT_API_CONTRACT = Object.freeze([
   },
   {
     method: "GET",
+    path: "/notifications",
+    auth: "authenticated-recipient-only",
+    frontend: ["claims/index.html"],
+  },
+  {
+    method: "PATCH",
+    path: "/notifications/:id/read",
+    auth: "authenticated-recipient-only",
+    frontend: ["claims/index.html"],
+  },
+  {
+    method: "GET",
     path: "/history/latest",
     auth: "manager-or-admin",
     frontend: [],

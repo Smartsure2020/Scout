@@ -182,6 +182,95 @@ body {
   background: var(--amber-bg);
 }
 
+.notification-wrapper { position: relative; }
+.notification-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--ws-border);
+  border-radius: 50%;
+  color: var(--ws-text-2);
+  background: var(--ws-surface);
+  cursor: pointer;
+}
+.notification-button:hover { border-color: var(--brand-teal); color: var(--brand-teal); }
+.notification-button svg { width: 16px; height: 16px; }
+.notification-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border: 2px solid var(--nav-bg);
+  border-radius: 10px;
+  color: white;
+  background: var(--red);
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
+}
+.notification-popover {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 120;
+  width: min(360px, calc(100vw - 24px));
+  max-height: min(480px, calc(100vh - 90px));
+  overflow: auto;
+  border: 1px solid var(--ws-border);
+  border-radius: var(--r-lg);
+  background: var(--ws-surface);
+  box-shadow: var(--shadow-md);
+}
+.notification-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 13px 15px;
+  border-bottom: 1px solid var(--ws-border);
+  color: var(--ws-text);
+  font-size: 12px;
+  font-weight: 800;
+}
+.notification-refresh {
+  padding: 3px 6px;
+  border: 0;
+  border-radius: var(--r-sm);
+  color: var(--ws-text-muted);
+  background: transparent;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.notification-refresh:hover { color: var(--brand-teal); background: var(--ws-surface2); }
+.notification-item {
+  display: flex;
+  width: 100%;
+  gap: 10px;
+  padding: 12px 15px;
+  border: 0;
+  border-bottom: 1px solid var(--ws-border);
+  color: var(--ws-text);
+  background: var(--ws-surface);
+  text-align: left;
+  cursor: pointer;
+}
+.notification-item:last-child { border-bottom: 0; }
+.notification-item:hover, .notification-item:focus-visible { background: var(--ws-surface2); }
+.notification-item.unread { background: var(--accent-lt); }
+.notification-dot { width: 7px; height: 7px; margin-top: 5px; flex: 0 0 7px; border-radius: 50%; background: var(--ws-border2); }
+.notification-item.unread .notification-dot { background: var(--brand-teal); }
+.notification-copy { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.notification-message { font-size: 12px; line-height: 1.45; }
+.notification-meta { color: var(--ws-text-muted); font-family: var(--mono); font-size: 10px; }
+.notification-empty { padding: 22px 15px; color: var(--ws-text-muted); font-size: 12px; text-align: center; }
+
 /* BUTTON SYSTEM */
 .btn-primary {
   display: inline-flex;
@@ -2334,6 +2423,19 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input type="text" id="global-search-input" placeholder="Search claims, insured, peril…" oninput="doGlobalSearch(this.value)" onkeydown="if(event.key==='Escape'){clearSearch();}">
       <button class="search-clear" id="search-clear-btn" onclick="clearSearch()" title="Clear search">✕</button>
+    </div>
+    <div class="notification-wrapper" id="notification-wrapper">
+      <button class="notification-button" id="notification-button" type="button" aria-label="Notifications" aria-expanded="false" aria-controls="notification-popover" onclick="toggleNotifications()">
+        <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM10 21h4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="notification-badge" id="notification-badge" hidden aria-live="polite"></span>
+      </button>
+      <div class="notification-popover" id="notification-popover" role="dialog" aria-label="Notifications" hidden>
+        <div class="notification-popover-header">
+          <span>Notifications</span>
+          <button class="notification-refresh" type="button" onclick="loadNotifications()" aria-label="Refresh notifications">Refresh</button>
+        </div>
+        <div id="notification-list" role="list" aria-live="polite"><div class="notification-empty">No new notifications</div></div>
+      </div>
     </div>
     <div class="date-badge" id="today-date"></div>
     <div class="user-menu-wrapper" id="user-menu-wrapper">
@@ -7574,6 +7676,7 @@ async function initAuth() {
     document.getElementById("today-date").textContent = "No live extract";
   }
   await loadServerHistory();
+  await loadNotifications();
 
   // Render everything
   renderAll();
@@ -7734,6 +7837,103 @@ function showScoutToast(message, tone = "") {
   scoutToastTimer = setTimeout(() => { toast.className = "scout-toast"; }, 3200);
 }
 
+let scoutNotifications = [];
+let notificationsLoadError = null;
+
+function renderNotifications() {
+  const badge = document.getElementById("notification-badge");
+  const button = document.getElementById("notification-button");
+  const list = document.getElementById("notification-list");
+  if (!badge || !button || !list) return;
+
+  const unreadCount = scoutNotifications.filter((item) => !item.read_at).length;
+  badge.hidden = unreadCount === 0;
+  badge.textContent = unreadCount > 99 ? "99+" : String(unreadCount);
+  button.setAttribute(
+    "aria-label",
+    unreadCount ? `${unreadCount} unread notification${unreadCount === 1 ? "" : "s"}` : "Notifications, none unread",
+  );
+
+  if (!scoutNotifications.length) {
+    list.innerHTML = `<div class="notification-empty">${notificationsLoadError ? "Notifications unavailable" : "No new notifications"}</div>`;
+    return;
+  }
+
+  list.innerHTML = scoutNotifications.map((item) => {
+    const actor = item.actor_display_name || "A Scout user";
+    const claim = item.claim_number || "";
+    const label = `${actor} added a note to claim ${claim}`;
+    return `<button type="button" class="notification-item${item.read_at ? "" : " unread"}" data-notification-id="${esc(item.id)}" data-claim-number="${esc(claim)}" aria-label="${esc(label)}">
+      <span class="notification-dot" aria-hidden="true"></span>
+      <span class="notification-copy"><span class="notification-message">${esc(label)}</span><span class="notification-meta">${esc(fmtAckTime(item.created_at))} · ${item.read_at ? "Read" : "Unread"}</span></span>
+    </button>`;
+  }).join("");
+
+  list.querySelectorAll("[data-notification-id]").forEach((item) => {
+    item.addEventListener("click", () => openNotification(item.dataset.notificationId, item.dataset.claimNumber));
+  });
+}
+
+async function loadNotifications() {
+  if (!currentUser?.msToken) return;
+  try {
+    const res = await fetch(CONFIG.backendUrl + "/notifications", {
+      headers: { Authorization: "Bearer " + currentUser.msToken },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || "Notifications unavailable");
+    scoutNotifications = Array.isArray(data.notifications) ? data.notifications : [];
+    notificationsLoadError = null;
+  } catch (err) {
+    scoutNotifications = [];
+    notificationsLoadError = err;
+  }
+  renderNotifications();
+}
+
+function toggleNotifications() {
+  const popover = document.getElementById("notification-popover");
+  const button = document.getElementById("notification-button");
+  if (!popover || !button) return;
+  const opening = popover.hidden;
+  popover.hidden = !opening;
+  button.setAttribute("aria-expanded", opening ? "true" : "false");
+  if (opening) loadNotifications();
+}
+
+function closeNotifications() {
+  const popover = document.getElementById("notification-popover");
+  const button = document.getElementById("notification-button");
+  if (!popover || !button) return;
+  popover.hidden = true;
+  button.setAttribute("aria-expanded", "false");
+}
+
+async function openNotification(notificationId, claimNumber) {
+  const item = scoutNotifications.find((notification) => notification.id === notificationId);
+  if (!item) return;
+  if (!item.read_at) {
+    try {
+      const res = await fetch(CONFIG.backendUrl + "/notifications/" + encodeURIComponent(notificationId) + "/read", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer " + currentUser.msToken },
+      });
+      if (res.ok) item.read_at = new Date().toISOString();
+    } catch { /* Claim navigation remains available if read acknowledgement is unavailable. */ }
+  }
+  renderNotifications();
+  closeNotifications();
+  if (claimNumber) {
+    switchViewById("all-claims");
+    setTimeout(() => openClaimDetail(claimNumber), 0);
+  }
+}
+
+document.addEventListener("click", function(e) {
+  const wrapper = document.getElementById("notification-wrapper");
+  if (wrapper && !wrapper.contains(e.target)) closeNotifications();
+});
+
 async function loadDetailNote(claimNo) {
   if (!currentUser) return;
   try {
@@ -7788,6 +7988,7 @@ async function saveDetailNote(claimNo) {
 
 document.addEventListener("keydown", function(e) {
   if (e.key === "Escape") closeClaimDetail();
+  if (e.key === "Escape") closeNotifications();
 });
 
 function toggleSidebar() {

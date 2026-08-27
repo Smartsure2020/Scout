@@ -24,6 +24,14 @@ const sourceAssertions = new Map([
   ["GET /notes/:claimNo", 'request.method === "GET"'],
   ["PUT /notes/:claimNo", 'request.method === "PUT"'],
   [
+    "GET /notifications",
+    'path === "/notifications" && request.method === "GET"',
+  ],
+  [
+    "PATCH /notifications/:id/read",
+    'notificationReadMatch && request.method === "PATCH"',
+  ],
+  [
     "GET /history/latest",
     'path === "/history/latest" && request.method === "GET"',
   ],
@@ -150,7 +158,7 @@ test("CORS permits all methods used by the portal", () => {
   );
   assert.match(
     backend,
-    /"Access-Control-Allow-Methods":\s*"GET, POST, PUT, DELETE, OPTIONS"/,
+    /"Access-Control-Allow-Methods":\s*"GET, POST, PUT, PATCH, DELETE, OPTIONS"/,
   );
   assert.doesNotMatch(backend, /"Access-Control-Allow-Origin":\s*"\*"/);
   assert.match(backend, /if \(request\.method === "OPTIONS"\)/);
@@ -160,6 +168,23 @@ test("claim notes enforce role-aware claim access before read or write", () => {
   assert.match(backend, /canAccessClaimNote\(env, claimNo, currentUser\)/);
   assert.match(backend, /currentUser\?\.role !== "handler"/);
   assert.match(backend, /handler_email=eq\./);
+});
+
+test("claim-note notifications are recipient-scoped and auditable", () => {
+  assert.match(
+    backend,
+    /path === "\/notifications" && request\.method === "GET"/,
+  );
+  assert.match(backend, /recipient_user_id=eq\./);
+  assert.match(backend, /notificationReadMatch/);
+  assert.match(backend, /read_notification/);
+  assert.match(backend, /claim_note_notification_failure/);
+  assert.match(frontend, /CONFIG\.backendUrl \+ "\/notifications"/);
+  assert.match(
+    frontend,
+    /\/notifications\/" \+ encodeURIComponent\(notificationId\) \+ "\/read/,
+  );
+  assert.match(frontend, /Claim note saved/);
 });
 
 test("frontend consumers map to implemented endpoints", () => {
