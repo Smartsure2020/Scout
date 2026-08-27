@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 import { SCOUT_API_CONTRACT, contractKey } from "./api-contract.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const backend = fs.readFileSync(path.join(root, "scout backend.js"), "utf8");
+const backend = fs
+  .readFileSync(path.join(root, "scout backend.js"), "utf8")
+  .replace(/\r\n/g, "\n");
 const claimsUi = fs.readFileSync(
   path.join(root, "scout-smartsure", "claims", "index.html"),
   "utf8",
