@@ -152,6 +152,9 @@ body {
   box-shadow: var(--shadow-lg);
   transform: translateY(-4px);
 }
+.portal-card[aria-disabled="true"] { cursor: not-allowed; opacity: .78; }
+.portal-card[aria-disabled="true"]:hover { border-color: var(--ws-border); box-shadow: var(--shadow-sm); transform: none; }
+.portal-card[aria-disabled="true"]:hover::before { opacity: 0; }
 .portal-card:hover::before { opacity: 1; }
 
 .portal-card-icon {
@@ -293,7 +296,7 @@ const CONFIG = {
   azureTenantId: "0728ffc8-457f-4ae5-8c44-30c3ef0ecd5a",
   backendUrl:    "https://scout-backend.marketing-854.workers.dev",
   claimsUrl:     "/claims/",        // relative — same domain
-  uwUrl:         "/underwriting/",  // proxied to Vercel
+  uwUrl:         "",                // Atlas target is not configured in Scout
 };
 
 let currentUser = null;
@@ -339,16 +342,22 @@ async function signIn() {
     "&response_mode=query";
 }
 
+function cleanOAuthCallbackUrl() {
+  const clean = new URL(window.location.href);
+  ["code", "state", "session_state", "error", "error_description", "error_uri"].forEach((key) => clean.searchParams.delete(key));
+  window.history.replaceState({}, document.title, clean.pathname + clean.search + clean.hash);
+}
+
 async function handleOAuthCallback() {
   const params = new URLSearchParams(window.location.search);
   const code = params.get("code");
   const state = params.get("state");
   const error = params.get("error");
 
-  if (error) { showAuthError("Sign-in failed: " + (params.get("error_description") || error)); return false; }
-  if (!code) return false;
+  if (error) { cleanOAuthCallbackUrl(); showAuthError("Sign-in failed: " + (params.get("error_description") || error)); return false; }
+  if (!code) { cleanOAuthCallbackUrl(); return false; }
 
-  if (state !== sessionStorage.getItem("oauth_state")) { showAuthError("Invalid state — please try again."); return false; }
+  if (state !== sessionStorage.getItem("oauth_state")) { cleanOAuthCallbackUrl(); showAuthError("Invalid state — please try again."); return false; }
 
   document.getElementById("auth-loading").style.display = "block";
   document.getElementById("auth-loading").textContent = "Completing sign-in...";
@@ -356,33 +365,47 @@ async function handleOAuthCallback() {
   const verifier = sessionStorage.getItem("pkce_verifier");
   const redirectUri = window.location.origin + window.location.pathname;
 
-  const tokenRes = await fetch(
-    "https://login.microsoftonline.com/" + CONFIG.azureTenantId + "/oauth2/v2.0/token",
-    {
+  let tokenRes;
+  try {
+    tokenRes = await fetch(
+      "https://login.microsoftonline.com/" + CONFIG.azureTenantId + "/oauth2/v2.0/token",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: [
+          "client_id=" + encodeURIComponent(CONFIG.azureClientId),
+          "grant_type=authorization_code",
+          "code=" + encodeURIComponent(code),
+          "redirect_uri=" + encodeURIComponent(redirectUri),
+          "code_verifier=" + encodeURIComponent(verifier),
+          "scope=" + encodeURIComponent("openid profile email User.Read"),
+        ].join("&"),
+      }
+    );
+  } catch {
+    cleanOAuthCallbackUrl();
+    showAuthError("Token exchange failed. Please try again.");
+    return false;
+  }
+
+  const tokenData = await tokenRes.json().catch(() => ({}));
+  if (!tokenData.access_token) { cleanOAuthCallbackUrl(); showAuthError("Token exchange failed. Please try again."); return false; }
+
+  let meRes;
+  try {
+    meRes = await fetch(CONFIG.backendUrl + "/auth/me", {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: [
-        "client_id=" + encodeURIComponent(CONFIG.azureClientId),
-        "grant_type=authorization_code",
-        "code=" + encodeURIComponent(code),
-        "redirect_uri=" + encodeURIComponent(redirectUri),
-        "code_verifier=" + encodeURIComponent(verifier),
-        "scope=" + encodeURIComponent("openid profile email User.Read"),
-      ].join("&"),
-    }
-  );
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: tokenData.access_token }),
+    });
+  } catch {
+    cleanOAuthCallbackUrl();
+    showAuthError("Access verification failed. Please try again.");
+    return false;
+  }
 
-  const tokenData = await tokenRes.json();
-  if (!tokenData.access_token) { showAuthError("Token exchange failed. Please try again."); return false; }
-
-  const meRes = await fetch(CONFIG.backendUrl + "/auth/me", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token: tokenData.access_token }),
-  });
-
-  const meData = await meRes.json();
-  if (!meRes.ok || meData.error) { showAuthError(meData.error || "Access denied. Contact your administrator."); return false; }
+  const meData = await meRes.json().catch(() => ({}));
+  if (!meRes.ok || meData.error) { cleanOAuthCallbackUrl(); showAuthError(meData.error || "Access denied. Contact your administrator."); return false; }
 
   currentUser = {
     email: meData.email,
@@ -399,7 +422,9 @@ async function handleOAuthCallback() {
     portal: currentUser.portal,
   }));
 
-  window.history.replaceState({}, document.title, window.location.pathname);
+  sessionStorage.removeItem("oauth_state");
+  sessionStorage.removeItem("pkce_verifier");
+  cleanOAuthCallbackUrl();
   return true;
 }
 
@@ -454,13 +479,13 @@ function renderPortal() {
 
   if (portal === "underwriting" || portal === "both") {
     html += `
-      <div class="portal-card uw" onclick="window.location.href='${CONFIG.uwUrl}'">
+      <div class="portal-card uw" aria-disabled="true">
         <div class="portal-card-icon uw">
           <svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
         </div>
         <div class="portal-card-title">Underwriting</div>
-        <div class="portal-card-desc">Policy administration, insurer books, renewals, broker performance, compliance and reporting.</div>
-        <div class="portal-card-btn">Open Underwriting Portal</div>
+        <div class="portal-card-desc">Underwriting is managed in Atlas. The Atlas destination is not configured in this Scout deployment.</div>
+        <div class="portal-card-btn">Coming soon in Atlas</div>
       </div>`;
   }
 
@@ -469,21 +494,21 @@ function renderPortal() {
   // If user only has access to one portal, redirect automatically after a brief flash
   if (portal === "claims") {
     setTimeout(() => { window.location.href = CONFIG.claimsUrl; }, 800);
-  } else if (portal === "underwriting") {
-    setTimeout(() => { window.location.href = CONFIG.uwUrl; }, 800);
   }
 }
 
 // ── INIT ─────────────────────────────────────────────────────
 async function init() {
-  const hasCode = window.location.search.includes("code=");
+  const params = new URLSearchParams(window.location.search);
+  const hasOAuthCallback = ["code", "state", "session_state", "error", "error_description", "error_uri"]
+    .some((key) => params.has(key));
 
-  if (hasCode) {
+  if (hasOAuthCallback) {
     // Sub-apps (e.g. /claims/) that can't register their own Azure redirect URI
     // send users through here with the client's origin as redirect_uri, then
     // ask us to relay the returned code back to them to finish the exchange.
     const relayTarget = sessionStorage.getItem("oauth_relay_target");
-    if (relayTarget) {
+    if (params.has("code") && relayTarget) {
       sessionStorage.removeItem("oauth_relay_target");
       window.location.href = relayTarget + window.location.search;
       return;

@@ -53,12 +53,86 @@ import {
   validateAttentionInput,
   workflowSnapshot,
 } from "./reporting-domain/management-workflow.mjs";
+import {
+  buildClaimNoteNotification,
+  notificationIdentityValue,
+  resolveClaimNoteRecipient,
+  resolveNotificationActor,
+} from "./reporting-domain/notifications.mjs";
 
 const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+  // The Claims portal is served by the dedicated frontend Worker. Keep the
+  // API readable from that origin only; do not reintroduce wildcard CORS.
+  "Access-Control-Allow-Origin":
+    "https://scout-smartsure.marketing-854.workers.dev",
+  Vary: "Origin",
+  "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
+
+const DIGEST_SETTINGS_DEFAULTS = Object.freeze({
+  send_time: "07:30",
+  handler_emails: {},
+  manager_email: "",
+  zero_estimate_email: "",
+  include_terminal_claims: false,
+});
+
+function normaliseDigestSettings(value = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  const handlerEmails =
+    source.handler_emails && typeof source.handler_emails === "object"
+      ? Object.fromEntries(
+          Object.entries(source.handler_emails)
+            .map(([name, email]) => [
+              String(name).trim(),
+              String(email || "").trim(),
+            ])
+            .filter(([name]) => name),
+        )
+      : {};
+  return {
+    ...DIGEST_SETTINGS_DEFAULTS,
+    ...source,
+    send_time: String(
+      source.send_time || DIGEST_SETTINGS_DEFAULTS.send_time,
+    ).slice(0, 5),
+    handler_emails: handlerEmails,
+    manager_email: String(source.manager_email || "").trim(),
+    zero_estimate_email: String(source.zero_estimate_email || "").trim(),
+    include_terminal_claims: Boolean(source.include_terminal_claims),
+  };
+}
+
+async function getDigestSettings(env) {
+  const rows = await supabase(
+    env,
+    "/scout_settings?id=eq.digest&select=value&limit=1",
+    "GET",
+    null,
+    true,
+  );
+  return normaliseDigestSettings(rows?.[0]?.value || {});
+}
+
+async function saveDigestSettings(env, patch) {
+  const current = await getDigestSettings(env);
+  const definedPatch = Object.fromEntries(
+    Object.entries(patch || {}).filter(([, value]) => value !== undefined),
+  );
+  const next = normaliseDigestSettings({ ...current, ...definedPatch });
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(next.send_time))
+    throw new Error("Send time must be HH:mm");
+  const rows = await supabase(
+    env,
+    "/scout_settings?on_conflict=id",
+    "POST",
+    { id: "digest", value: next, updated_at: new Date().toISOString() },
+    true,
+    "resolution=merge-duplicates,return=representation",
+  );
+  return normaliseDigestSettings(rows?.[0]?.value || next);
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -1613,9 +1687,7 @@ async function verifyMsToken(token, env) {
 async function getUserRole(env, email) {
   const rows = await supabase(
     env,
-    "/scout_users?email=eq." +
-      encodeURIComponent(email) +
-      "&select=role,display_name,active,portal",
+    "/scout_users?email=eq." + encodeURIComponent(email) + "&select=*",
     "GET",
     null,
     true,
@@ -1623,6 +1695,59 @@ async function getUserRole(env, email) {
   if (!rows || rows.length === 0) return null;
   if (!rows[0].active) return null;
   return rows[0];
+}
+
+async function getClaimNoteNotificationContext(env, claimNo, currentUser) {
+  const [claimRows, users] = await Promise.all([
+    supabase(
+      env,
+      "/scout_claims?claim_no=eq." +
+        encodeURIComponent(claimNo) +
+        "&select=claim_no,handler_email,handler_name,extract_date&order=extract_date.desc&limit=1",
+      "GET",
+      null,
+      true,
+    ),
+    supabaseAll(env, "/scout_users?active=eq.true&select=*", true),
+  ]);
+  const actor = resolveNotificationActor(users, currentUser);
+  const recipient = resolveClaimNoteRecipient(
+    users,
+    claimRows?.[0] || null,
+    actor,
+  );
+  return { actor, recipient, claim: claimRows?.[0] || null };
+}
+
+async function getCurrentNotificationIdentity(env, currentUser) {
+  if (currentUser?.scout_user_id) return currentUser.scout_user_id;
+  const rows = await supabase(
+    env,
+    "/scout_users?email=eq." +
+      encodeURIComponent(currentUser?.email || "") +
+      "&active=eq.true&select=*",
+    "GET",
+    null,
+    true,
+  );
+  return notificationIdentityValue(rows?.[0] || currentUser);
+}
+
+async function canAccessClaimNote(env, claimNo, currentUser) {
+  if (["manager", "admin"].includes(currentUser?.role)) return true;
+  if (currentUser?.role !== "handler" || !currentUser.email) return false;
+  const rows = await supabase(
+    env,
+    "/scout_claims?claim_no=eq." +
+      encodeURIComponent(claimNo) +
+      "&handler_email=eq." +
+      encodeURIComponent(currentUser.email) +
+      "&select=claim_no&limit=1",
+    "GET",
+    null,
+    true,
+  );
+  return Boolean(rows?.length);
 }
 
 // ── ROUTER ───────────────────────────────────────────────────
@@ -1679,9 +1804,170 @@ export default {
       const msUser = await verifyMsToken(msToken, env);
       const dbUser = await getUserRole(env, msUser.email);
       if (!dbUser) return err("Access denied", 403);
-      currentUser = { ...msUser, ...dbUser };
+      const {
+        id: scoutUserId,
+        user_id: scoutUserIdAlias,
+        ...dbUserFields
+      } = dbUser;
+      currentUser = {
+        ...msUser,
+        ...dbUserFields,
+        scout_user_id: scoutUserId ?? scoutUserIdAlias ?? null,
+      };
     } catch (e) {
       return err("Unauthorised: " + e.message, 401);
+    }
+
+    // ── Briefing history/settings read model ─────────────────
+    // These routes read and update the existing briefing tables without
+    // sending a briefing. The briefing scheduler remains a separate concern.
+    if (path === "/briefing-runs" && request.method === "GET") {
+      if (!reportActionAllowed(currentUser.role, "view_workflow"))
+        return err("Not authorised", 403);
+      try {
+        const runs = await supabaseAll(
+          env,
+          "/briefing_runs?select=*&order=started_at.desc&limit=20",
+          true,
+        );
+        return json({ runs });
+      } catch (e) {
+        return err("Briefing history unavailable: " + e.message, 503);
+      }
+    }
+
+    if (path === "/digest-log" && request.method === "GET") {
+      if (!reportActionAllowed(currentUser.role, "view_workflow"))
+        return err("Not authorised", 403);
+      try {
+        const digests = await supabaseAll(
+          env,
+          "/digest_log?select=id,generated_at,type,recipient,subject,claims_count,critical_count,sent_ok&order=generated_at.desc&limit=100",
+          true,
+        );
+        return json({ digests });
+      } catch (e) {
+        return err("Digest history unavailable: " + e.message, 503);
+      }
+    }
+
+    const digestMatch = path.match(/^\/digest-log\/([0-9a-f-]+)$/i);
+    if (digestMatch && request.method === "GET") {
+      if (!reportActionAllowed(currentUser.role, "view_workflow"))
+        return err("Not authorised", 403);
+      try {
+        const rows = await supabase(
+          env,
+          "/digest_log?id=eq." +
+            encodeURIComponent(digestMatch[1]) +
+            "&select=*&limit=1",
+          "GET",
+          null,
+          true,
+        );
+        if (!rows?.[0]) return err("Digest not found", 404);
+        return json({ digest: rows[0] });
+      } catch (e) {
+        return err("Digest history unavailable: " + e.message, 503);
+      }
+    }
+
+    if (
+      path === "/settings" &&
+      (request.method === "GET" || request.method === "PATCH")
+    ) {
+      if (
+        request.method === "GET" &&
+        !reportActionAllowed(currentUser.role, "view_workflow")
+      )
+        return err("Not authorised", 403);
+      if (request.method === "PATCH" && currentUser.role !== "admin")
+        return err("Admin only", 403);
+      if (request.method === "GET") {
+        try {
+          const settings = await getDigestSettings(env);
+          return json({ settings, retention_days: 90 });
+        } catch (e) {
+          return err("Settings unavailable: " + e.message, 503);
+        }
+      }
+      try {
+        const body = await request.json();
+        const settings = await saveDigestSettings(env, {
+          send_time: body.send_time,
+          handler_emails: body.handler_emails,
+          manager_email: body.manager_email,
+          zero_estimate_email: body.zero_estimate_email,
+          include_terminal_claims: body.include_terminal_claims,
+        });
+        await audit(
+          env,
+          currentUser.email,
+          currentUser.name,
+          "update_digest_settings",
+          {},
+        );
+        return json({ ok: true, settings, retention_days: 90 });
+      } catch (e) {
+        return err("Settings could not be saved: " + e.message, 400);
+      }
+    }
+
+    if (path === "/notifications" && request.method === "GET") {
+      try {
+        const recipientUserId = await getCurrentNotificationIdentity(
+          env,
+          currentUser,
+        );
+        if (!recipientUserId) return json({ notifications: [] });
+        const notifications = await supabase(
+          env,
+          "/scout_notifications?recipient_user_id=eq." +
+            encodeURIComponent(recipientUserId) +
+            "&select=id,type,claim_number,actor_display_name,title,message,created_at,read_at&order=read_at.asc.nullsfirst,created_at.desc&limit=50",
+          "GET",
+          null,
+          true,
+        );
+        return json({ notifications: notifications || [] });
+      } catch (e) {
+        return err("Notifications unavailable: " + e.message, 503);
+      }
+    }
+
+    const notificationReadMatch = path.match(
+      /^\/notifications\/([0-9a-f-]+)\/read$/i,
+    );
+    if (notificationReadMatch && request.method === "PATCH") {
+      try {
+        const recipientUserId = await getCurrentNotificationIdentity(
+          env,
+          currentUser,
+        );
+        if (!recipientUserId) return err("Notification not found", 404);
+        const rows = await supabase(
+          env,
+          "/scout_notifications?id=eq." +
+            encodeURIComponent(notificationReadMatch[1]) +
+            "&recipient_user_id=eq." +
+            encodeURIComponent(recipientUserId),
+          "PATCH",
+          { read_at: new Date().toISOString() },
+          true,
+          "return=representation",
+        );
+        if (!rows?.length) return err("Notification not found", 404);
+        await audit(
+          env,
+          currentUser.email,
+          currentUser.name,
+          "read_notification",
+          { notification_id: notificationReadMatch[1] },
+        );
+        return json({ notification: rows[0] });
+      } catch (e) {
+        return err("Notification could not be marked read: " + e.message, 500);
+      }
     }
 
     // ── /claims — get latest extract ─────────────────────────
@@ -1742,6 +2028,15 @@ export default {
     const notesMatch = path.match(/^\/notes\/(.+)$/);
     if (notesMatch) {
       const claimNo = decodeURIComponent(notesMatch[1]);
+      try {
+        if (!(await canAccessClaimNote(env, claimNo, currentUser)))
+          return err("Not authorised", 403);
+      } catch (e) {
+        return err(
+          "Claim note access could not be verified: " + e.message,
+          503,
+        );
+      }
 
       if (request.method === "GET") {
         try {
@@ -1785,10 +2080,79 @@ export default {
           await audit(env, currentUser.email, currentUser.name, "save_note", {
             claim_no: claimNo,
           });
+
+          // Note, audit and notification are separate service-role REST writes.
+          // A notification failure never loses a legitimate note; the response
+          // makes the non-fatal notification outcome explicit for the caller.
+          let notification = { status: "unresolved", reason: "not_attempted" };
+          try {
+            const context = await getClaimNoteNotificationContext(
+              env,
+              claimNo,
+              currentUser,
+            );
+            if (context.recipient.status === "resolved") {
+              const record = buildClaimNoteNotification({
+                claimNumber: claimNo,
+                actor: context.actor,
+                recipient: context.recipient.user,
+              });
+              if (record) {
+                const rows = await supabase(
+                  env,
+                  "/scout_notifications",
+                  "POST",
+                  record,
+                  true,
+                  "return=representation",
+                );
+                notification = {
+                  status: "created",
+                  id: rows?.[0]?.id || null,
+                };
+                await audit(
+                  env,
+                  currentUser.email,
+                  currentUser.name,
+                  "create_claim_note_notification",
+                  {
+                    claim_number: claimNo,
+                    notification_id: rows?.[0]?.id || null,
+                    recipient_user_id: record.recipient_user_id,
+                  },
+                );
+              } else {
+                notification = {
+                  status: "unresolved",
+                  reason: "invalid_identity",
+                };
+              }
+            } else {
+              notification = {
+                status: "not_created",
+                reason: context.recipient.status,
+              };
+            }
+          } catch (notificationError) {
+            notification = { status: "unavailable" };
+            await audit(
+              env,
+              currentUser.email,
+              currentUser.name,
+              "claim_note_notification_failure",
+              {
+                claim_number: claimNo,
+                error: String(
+                  notificationError?.message || notificationError,
+                ).slice(0, 300),
+              },
+            );
+          }
           return json({
             ok: true,
             savedBy: record.saved_by,
             savedAt: record.saved_at,
+            notification,
           });
         } catch (e) {
           return err("Failed to save note: " + e.message, 500);
@@ -1899,12 +2263,13 @@ export default {
         // Handler names that couldn't be resolved to an email — these claims
         // will be invisible to that handler's portal login and daily report.
         const unresolvedHandlers = new Set();
+        const handlerDirectory = (await getActiveHistoryUsers(env)).users;
 
         // Insert new claims in batches of 200
         const batchSize = 200;
         for (let i = 0; i < claims.length; i += batchSize) {
           const batch = claims.slice(i, i + batchSize).map((c) => {
-            const handlerEmail = resolveEmail(c.handler);
+            const handlerEmail = resolveEmail(c.handler, handlerDirectory);
             if (c.handler && !handlerEmail) unresolvedHandlers.add(c.handler);
             return {
               extract_date: date,
@@ -3033,37 +3398,60 @@ export default {
   },
 };
 
-// ── Handler email map ─────────────────────────────────────────
-// Exact-match only (previous behaviour) silently returned "" for any
-// spelling/spacing variant the Cardinal extract used — a claim then gets
-// stored with handler_email = "" and never shows up for that handler's
-// portal login or their daily report, with no error anywhere. Normalising
-// case/whitespace and falling back to a first-name match closes that gap.
-function resolveEmail(handlerName) {
-  if (!handlerName) return "";
-  const map = {
-    "Sarah Dzumba": "sarah@smartsure2020.co.za",
-    "Naledi Moletsane": "naledi@smartsure2020.co.za",
-    Lucky: "lucky@smartsure2020.co.za",
-    "Juan-Paul Van Der Merwe": "juan-paul@smartsure2020.co.za",
-    "Juan-Paul": "juan-paul@smartsure2020.co.za",
-    "Beverly De Beer": "bev@smartsure2020.co.za",
-    "De Beer Bev": "bev@smartsure2020.co.za",
-  };
+// ── Handler email resolution ─────────────────────────────────
+// Handler identity is sourced from the active Scout user directory. No
+// individual production names or email addresses are embedded in the Worker.
+function handlerIdentityKey(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
 
-  const normalise = (s) => s.trim().replace(/\s+/g, " ").toLowerCase();
-  const target = normalise(handlerName);
+function handlerIdentityTokens(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
 
-  const normalisedMap = {};
-  for (const [name, email] of Object.entries(map))
-    normalisedMap[normalise(name)] = email;
-  if (normalisedMap[target]) return normalisedMap[target];
+function handlerIdentityFirstToken(value) {
+  return (
+    String(value || "")
+      .normalize("NFKC")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean)[0] || ""
+  );
+}
 
-  // Fallback: match on first name/token (e.g. "Lucky Mahlangu" -> "lucky")
-  const firstToken = target.split(" ")[0];
-  for (const [name, email] of Object.entries(normalisedMap)) {
-    if (name.split(" ")[0] === firstToken) return email;
-  }
+function resolveEmail(handlerName, users = []) {
+  const targetKey = handlerIdentityKey(handlerName);
+  const targetTokens = handlerIdentityTokens(handlerName);
+  if (!targetKey) return "";
+  const candidates = users.filter(
+    (user) => user?.active !== false && user?.email,
+  );
+  const exact = candidates.filter((user) =>
+    [user.display_name, user.email].some(
+      (value) => handlerIdentityKey(value) === targetKey,
+    ),
+  );
+  if (exact.length === 1) return String(exact[0].email).toLowerCase();
 
-  return "";
+  const reordered = candidates.filter(
+    (user) => handlerIdentityTokens(user.display_name) === targetTokens,
+  );
+  if (reordered.length === 1) return String(reordered[0].email).toLowerCase();
+
+  const firstToken = handlerIdentityFirstToken(handlerName);
+  const firstNameMatches = candidates.filter(
+    (user) => handlerIdentityFirstToken(user.display_name) === firstToken,
+  );
+  return firstNameMatches.length === 1
+    ? String(firstNameMatches[0].email).toLowerCase()
+    : "";
 }

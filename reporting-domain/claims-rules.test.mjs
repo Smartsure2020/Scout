@@ -38,6 +38,12 @@ import {
 
 test("status normalization, terminal/open, mapped, and unmapped states", () => {
   assert.equal(normalizeStatus("  REGISTERED  "), "registered");
+  assert.equal(
+    normalizeStatus("SETTLED – Recovery   Pending"),
+    "settled - awaiting recovery",
+  );
+  assert.equal(normalizeStatus("reopen"), "registered");
+  assert.equal(isTerminalStatus("reopen"), false);
   assert.equal(getStatusRule("registered").category, "active");
   assert.equal(isTerminalStatus(" Closed Paid "), true);
   assert.equal(getStatusEvaluation("Closed Paid").open, false);
