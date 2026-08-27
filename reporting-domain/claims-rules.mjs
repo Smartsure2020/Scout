@@ -4,17 +4,14 @@ import {
   toDateOnly,
   workingDaysBetween,
 } from "./date-periods.mjs";
+import { normalizeSourceStatus } from "./claims-qa.mjs";
 
 export const CLAIMS_RULE_VERSION = "claims-operations-rules-v1";
 export const MANDATE_THRESHOLD = 100000;
 export const REPUDIATION_EXPIRY_DAYS = 270;
 
 export function normalizeStatus(status) {
-  // This intentionally matches the current claims page: trim and lowercase,
-  // without collapsing or otherwise rewriting source status text.
-  return String(status ?? "")
-    .trim()
-    .toLowerCase();
+  return normalizeSourceStatus(status);
 }
 
 const STATUS_RULE_ENTRIES = [

@@ -1643,6 +1643,17 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   grid-template-columns: repeat(4,1fr);
   gap: 14px;
 }
+.manager-progressive { margin-top: 18px; }
+.manager-progressive > summary {
+  cursor: pointer; list-style: none; padding: 14px 16px;
+  background: var(--ws-surface); border: 1px solid var(--ws-border);
+  border-radius: var(--r-lg); color: var(--ws-text); font-weight: 650;
+}
+.manager-progressive > summary::-webkit-details-marker { display: none; }
+.manager-progressive > summary::before { content: "＋"; margin-right: 8px; color: var(--accent); }
+.manager-progressive[open] > summary::before { content: "−"; }
+.manager-progressive > summary span { float: right; color: var(--ws-text-muted); font-size: 11px; font-weight: 400; }
+.manager-progressive-body { display: flex; flex-direction: column; gap: 20px; padding-top: 20px; }
 
 /* SEND LOG */
 #teams-log {
@@ -1925,6 +1936,16 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
 .detail-note-status { font-size: 12px; color: var(--ws-text-muted); min-height: 16px; }
 .detail-note-status.ok { color: #2a9d8f; }
 .detail-note-status.err { color: var(--red); }
+.scout-toast {
+  position: fixed; right: 24px; bottom: 24px; z-index: 1000;
+  max-width: min(360px, calc(100vw - 48px)); padding: 12px 16px;
+  border: 1px solid var(--accent-mid); border-radius: var(--r-md);
+  background: var(--ws-text); color: #fff; box-shadow: var(--shadow-md);
+  font-size: 12.5px; opacity: 0; transform: translateY(8px);
+  pointer-events: none; transition: opacity .16s, transform .16s;
+}
+.scout-toast.show { opacity: 1; transform: translateY(0); }
+.scout-toast.error { background: var(--red); border-color: var(--red); }
 
 /* EXTRACT HISTORY GRID */
 .grid-history {
@@ -2263,10 +2284,13 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   .workflow-form-wide { grid-column: auto; }
   .workflow-card, .workflow-form-compact, .detail-management-action { align-items: stretch; flex-direction: column; }
   .workflow-card-actions { justify-content: flex-start; max-width: none; }
+  .manager-progressive > summary span { display: block; float: none; margin: 5px 0 0 24px; }
 }
 </style>
 
 <body>
+
+<div id="scout-toast" class="scout-toast" role="status" aria-live="polite"></div>
 
 <!-- AUTH OVERLAY -->
 <div class="auth-overlay" id="auth-overlay">
@@ -2700,6 +2724,9 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         </div>
       </div>
       <div class="stat-row" id="manager-stat-row" style="grid-template-columns:repeat(4,1fr);"></div>
+      <details class="manager-progressive">
+        <summary>Operational detail <span>Data quality, weekly movement, workload and exposure</span></summary>
+        <div class="manager-progressive-body">
       <div id="manager-data-quality-section">
         <div class="section-header">
           <div class="section-title">Data quality <span class="section-badge amber" id="badge-data-quality">0 issues</span></div>
@@ -2764,6 +2791,8 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         </div>
         <div class="claims-table aging-chart-wrap" id="manager-aging-chart"></div>
       </div>
+        </div>
+      </details>
     </div>
 
     <!-- CLAIMS REPORTS VIEW -->
@@ -2852,14 +2881,14 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
       <div class="page-header" style="margin-bottom:20px;">
         <div>
           <div class="page-title">Extract History</div>
-          <div class="page-sub" id="history-sub">Previous uploaded extracts saved in this browser.</div>
+          <div class="page-sub" id="history-sub">Immutable extract history from the Scout server.</div>
         </div>
       </div>
       <div class="claims-table">
         <div class="table-head" style="grid-template-columns:140px 1fr 90px 140px 110px;display:grid;gap:12px;">
           <span>Extract date</span><span>File</span><span>Claims</span><span>Uploaded</span><span style="text-align:right">Action</span>
         </div>
-        <div id="extract-history-body"><div class="empty-state">No extract history yet.</div></div>
+        <div id="extract-history-body"><div class="empty-state">Open this view to load server extract history.</div></div>
       </div>
     </div>
 
@@ -2876,7 +2905,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         <div class="table-head digest-row">
           <span>Generated</span><span>Type</span><span>Subject</span><span>Recipient</span><span>Claims</span><span>Critical</span><span>Sent</span>
         </div>
-        <div id="digest-history-body"><div class="empty-state">Open this view to load digest history.</div></div>
+        <div id="digest-history-body"><div class="empty-state">Open this view to load server digest history.</div></div>
       </div>
       <div id="digest-reader"></div>
     </div>
@@ -2900,11 +2929,11 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           </div>
           <div class="settings-field">
             <label class="settings-label" for="setting-manager-email">Manager email</label>
-            <input class="settings-input" id="setting-manager-email" type="email" value="bev@smartsure2020.co.za">
+            <input class="settings-input" id="setting-manager-email" type="email" value="">
           </div>
           <div class="settings-field">
             <label class="settings-label" for="setting-zero-email">Zero-estimate alert recipient</label>
-            <input class="settings-input" id="setting-zero-email" type="email" value="bev@smartsure2020.co.za">
+            <input class="settings-input" id="setting-zero-email" type="email" value="">
           </div>
           <label class="settings-toggle">
             <input id="setting-include-terminal" type="checkbox">
@@ -3004,7 +3033,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   </div>
 </div>
 
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script type="module" src="./reporting-ui.mjs"></script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script type="module" src="./claims-qa.mjs"></script><script type="module" src="./reporting-ui.mjs"></script>
 <script>
 
 // XSS SANITISER
@@ -3017,23 +3046,57 @@ function esc(str) {
     .replace(/'/g, "&#39;");
 }
 
-// HANDLER NAME NORMALISATION
-const HANDLER_MAP = {
-  "De Beer Bev":          "Beverly De Beer",
-  "Bev De Beer":          "Beverly De Beer",
-  "Beverly De Beer":      "Beverly De Beer",
-  "ABSA":                 "Unassigned",
-  "ABSA ":                "Unassigned",
+// HANDLER AND STATUS NORMALISATION
+let handlerDirectory = [];
+
+function handlerIdentityKey(value) {
+  return window.ScoutClaimsQA?.handlerIdentityKey?.(value) || String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
+
+function handlerIdentityTokens(value) {
+  return window.ScoutClaimsQA?.handlerIdentityTokens?.(value) || String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
+
+const STATUS_ALIASES = {
+  "reopen": "registered",
+  "settled - recovery pending": "settled - awaiting recovery",
 };
 
 function normaliseHandler(name) {
-  if (!name) return "Unassigned";
-  const trimmed = name.trim();
-  return HANDLER_MAP[trimmed] || trimmed;
+  const trimmed = String(name || "").trim().replace(/\s+/g, " ");
+  if (!trimmed) return "Unassigned";
+  if (handlerIdentityKey(trimmed) === "absa") return "Unassigned";
+  const exact = handlerDirectory.filter((user) =>
+    [user.display_name || user.displayName, user.email].some((value) => handlerIdentityKey(value) === handlerIdentityKey(trimmed)),
+  );
+  if (exact.length === 1) return exact[0].display_name || exact[0].displayName || exact[0].email || trimmed;
+  const reordered = handlerDirectory.filter((user) =>
+    handlerIdentityTokens(user.display_name || user.displayName) === handlerIdentityTokens(trimmed),
+  );
+  return reordered.length === 1
+    ? (reordered[0].display_name || reordered[0].displayName || reordered[0].email || trimmed)
+    : trimmed;
 }
 
 function normaliseStatus(s) {
-  return (s || "").trim().toLowerCase();
+  const normalized = String(s || "")
+    .normalize("NFKC")
+    .replace(/[‐‑‒–—−]/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/\s*\/\s*/g, " / ")
+    .replace(/\s*-\s*/g, " - ")
+    .trim()
+    .toLowerCase();
+  return window.ScoutClaimsQA?.normalizeSourceStatus?.(s) || STATUS_ALIASES[normalized] || normalized;
 }
 
 // MOTOR PERILS
@@ -3312,7 +3375,7 @@ const STATUS_RULES = {
 // Case-insensitive lookup map  -  built once so Cardinal status variants (different casing/spacing)
 // still resolve to the correct rule without modifying every key above.
 const STATUS_RULES_LC = Object.fromEntries(
-  Object.entries(STATUS_RULES).map(([k, v]) => [k.toLowerCase(), v])
+  Object.entries(STATUS_RULES).map(([k, v]) => [normaliseStatus(k), v])
 );
 
 function getStatusRule(status) {
@@ -3341,12 +3404,12 @@ const TERMINAL_STATUSES = new Set([
   "Settled, partial recovery made","Settled, repudiated","Settled, TP claim Paid",
   "Settled, Cash Payment","Settled, OD paid, TP claim repudiated","Settled & Recovery Abandoned",
   "Settled - TP Claim within Excess","Settled - Excess exceeds claim amount",
-  "Settled - Business decision","Settled, no claim from client","Settled, Duplicated",
+  "Settled - Business decision","Settled - TP approach pending","Settled, no claim from client","Settled, Duplicated",
   "Settled, no claim from client/claim withdrawn/NTU","Settled/Write Off",
   "Knock For Knock Settled","Recovery successful 100%","Recovery successful - apportionment",
   "Ex Gratia - Finalized","Not Taken Up","Knock for Knock Settled",
 ]);
-const TERMINAL_STATUSES_LC = new Set([...TERMINAL_STATUSES].map(s => s.toLowerCase()));
+const TERMINAL_STATUSES_LC = new Set([...TERMINAL_STATUSES].map(normaliseStatus));
 
 function isTerminalStatus(status) {
   return TERMINAL_STATUSES_LC.has(normaliseStatus(status));
@@ -3405,6 +3468,19 @@ function parseDateField(value) {
   }
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().split("T")[0];
+}
+
+function firstValidDate(...values) {
+  for (const value of values) {
+    if (typeof value === "boolean") continue;
+    const parsed = parseDateField(value);
+    if (parsed) return parsed;
+  }
+  return "";
+}
+
+function parseBooleanField(value) {
+  return value === true || ["true", "yes", "y", "1"].includes(String(value || "").trim().toLowerCase());
 }
 
 function calendarDaysBetween(startStr, endStr) {
@@ -3695,41 +3771,18 @@ function getClaimAgeLabel(c) {
   };
 }
 
-function sameClaimMovementState(a, b) {
-  if (!a || !b) return false;
-  const statusSame = normaliseStatus(a.status) === normaliseStatus(b.status);
-  const outstandingSame = Math.round(Number(a.outstanding || 0) * 100) === Math.round(Number(b.outstanding || 0) * 100);
-  return statusSame && outstandingSame;
-}
-
-function deriveLastUpdatedFromPreviousExtract(rawClaims, extractDate) {
-  const history = loadExtractHistory();
-  const previous = history[0];
-  if (!previous || !Array.isArray(previous.claims)) {
-    return rawClaims.map(c => ({
-      ...c,
-      lastUpdated: getClaimLastMovementDate(c) || "",
-      lastUpdatedSource: getClaimLastMovementDate(c) ? "cardinal" : "unavailable",
-    }));
-  }
-
-  const previousByNo = new Map((previous.claims || []).map(c => [c.claimNo, c]));
+function deriveLastUpdatedFromPreviousExtract(rawClaims) {
+  // Historical comparison is server-owned. The browser keeps only metadata,
+  // so it must never invent a movement date from a prior full extract.
   return rawClaims.map(c => {
     const directLastUpdated = getClaimLastMovementDate(c);
     if (directLastUpdated) {
       return { ...c, lastUpdated: directLastUpdated, lastUpdatedSource: "cardinal" };
     }
-
-    const prev = previousByNo.get(c.claimNo);
-    if (!prev) {
-      return { ...c, lastUpdated: extractDate, lastUpdatedSource: "new-claim" };
-    }
-
-    const changed = !sameClaimMovementState(c, prev);
     return {
       ...c,
-      lastUpdated: changed ? extractDate : (getClaimLastMovementDate(prev) || prev.registered || previous.extractDate || extractDate),
-      lastUpdatedSource: changed ? "derived-change" : "derived-carried-forward",
+      lastUpdated: "",
+      lastUpdatedSource: "unavailable",
     };
   });
 }
@@ -3849,7 +3902,7 @@ function getPreviousExtractClaimNos() {
   let idx = currentExtractId ? history.findIndex(h => h.id === currentExtractId) : 0;
   if (idx < 0) idx = 0;
   const previous = history[idx + 1];
-  if (!previous) return null;
+  if (!previous || !Array.isArray(previous.claims)) return null;
   return new Set((previous.claims || []).map(c => c.claimNo).filter(Boolean));
 }
 
@@ -3967,6 +4020,8 @@ let processedClaimsCache = null;
 let currentExtractId = null;
 let currentExtractFileName = "";
 let latestDataQualityReport = null;
+let serverHistoryCache = null;
+let serverHistoryError = null;
 let allClaimsPage = 1;
 let allClaimsSort = { col: 'age', dir: 'desc' };
 const ALL_CLAIMS_PAGE_SIZE = 50;
@@ -4000,8 +4055,25 @@ function getProcessedClaims() {
 function loadExtractHistory() {
   try {
     const history = JSON.parse(localStorage.getItem(EXTRACT_HISTORY_KEY) || "[]");
-    return Array.isArray(history) ? history : [];
-  } catch(e) {
+    if (!Array.isArray(history)) return [];
+    const entries = history.filter((entry) => entry && typeof entry === "object");
+    const metadata = entries.map(({ claims: _claims, ...entry }) => ({
+      ...entry,
+      claimCount: Number(entry.claimCount || 0),
+      schemaVersion: "scout-extract-metadata-v2",
+    }));
+    const hadFullExtract = entries.some((entry) =>
+      Object.prototype.hasOwnProperty.call(entry, "claims"),
+    );
+    if (metadata.length !== history.length || hadFullExtract) {
+      try {
+        localStorage.setItem(EXTRACT_HISTORY_KEY, JSON.stringify(metadata));
+      } catch {
+        /* metadata remains optional */
+      }
+    }
+    return metadata;
+  } catch (e) {
     console.warn("Extract history load failed:", e);
     return [];
   }
@@ -4009,26 +4081,24 @@ function loadExtractHistory() {
 
 function saveExtractHistoryEntry(rawClaims, fileName, extractDate) {
   const uploadedAt = new Date().toISOString();
-  const safeDate = extractDate || uploadedAt.split("T")[0];
-  const id = `${safeDate}-${uploadedAt.replace(/[-:.TZ]/g, "")}`;
-  const entry = {
-    id,
-    extractDate: safeDate,
+  const entry = window.ScoutClaimsQA?.historyMetadata?.(rawClaims, fileName, extractDate, uploadedAt) || {
+    id: `${extractDate || uploadedAt.split("T")[0]}-${uploadedAt.replace(/[-:.TZ]/g, "")}`,
+    extractDate: extractDate || uploadedAt.split("T")[0],
     uploadedAt,
     fileName: fileName || "Uploaded extract",
-    claimCount: rawClaims.length,
-    claims: rawClaims,
+    claimCount: Array.isArray(rawClaims) ? rawClaims.length : 0,
+    schemaVersion: "scout-extract-metadata-v2",
   };
   try {
-    const history = loadExtractHistory().filter(h => h.id !== id);
+    const history = loadExtractHistory().filter(h => h.id !== entry.id);
     history.unshift(entry);
     localStorage.setItem(EXTRACT_HISTORY_KEY, JSON.stringify(history.slice(0, MAX_EXTRACT_HISTORY)));
-    currentExtractId = id;
+    currentExtractId = entry.id;
     currentExtractFileName = entry.fileName;
     return { entry, saved: true };
   } catch(e) {
     console.warn("Extract history save failed:", e);
-    currentExtractId = id;
+    currentExtractId = entry.id;
     currentExtractFileName = entry.fileName;
     return { entry, saved: false, error: e };
   }
@@ -4040,7 +4110,7 @@ function getPrevExtractKPIs() {
   let idx = currentExtractId ? history.findIndex(h => h.id === currentExtractId) : 0;
   if (idx < 0) idx = 0;
   const prevEntry = history[idx + 1];
-  if (!prevEntry) return null;
+  if (!prevEntry || !Array.isArray(prevEntry.claims)) return null;
   const prevData = processData(prevEntry.claims || [], prevEntry.extractDate);
   const active = prevData.filter(c => !isTerminalStatus(c.status));
   return {
@@ -4064,7 +4134,7 @@ function deltaBadge(curr, prev, lowerIsBetter, fmtFn) {
 }
 
 function getExtractChangeSummary(entry, previous) {
-  if (!entry || !previous) return "";
+  if (!entry || !previous || !Array.isArray(entry.claims) || !Array.isArray(previous.claims)) return "";
   const currentByNo = new Map((entry.claims || []).map(c => [c.claimNo, c]));
   const previousByNo = new Map((previous.claims || []).map(c => [c.claimNo, c]));
   let added = 0, removed = 0, statusChanged = 0;
@@ -4108,7 +4178,7 @@ function getExtractChangeDetails(currentClaims = claims) {
 
   previousByNo.forEach((prev, claimNo) => {
     const current = currentByNo.get(claimNo);
-    if (!current || isTerminalStatus(current.status)) details.closedClaims.push(current || prev);
+    if (!current || (isTerminalStatus(current.status) && !isTerminalStatus(prev.status))) details.closedClaims.push(current || prev);
   });
 
   return details;
@@ -4131,13 +4201,15 @@ function processData(rawClaims, refDateStr) {
   const todayStr = `${ref.getFullYear()}-${String(ref.getMonth()+1).padStart(2,"0")}-${String(ref.getDate()).padStart(2,"0")}`;
   const enrichedClaims = rawClaims.map(c => {
     const cardinalAge = Number(c.age || 0);
-    const ageFromExtract = !c.registered && cardinalAge > 0;
+    const ageProvided = c.ageProvided ?? c.cardinalAgeProvided ?? cardinalAge > 0;
+    const ageFromExtract = !c.registered && ageProvided && cardinalAge > 0;
     const workingAge = c.registered ? workingDaysBetween(c.registered, todayStr) : (c.age || 0);
     const calendarAge = c.registered ? calendarDaysBetween(c.registered, todayStr) : (c.age || 0);
-    const ageDiscrepancyDays = c.registered && Number.isFinite(cardinalAge)
+    const ageDiscrepancyDays = c.registered && ageProvided && Number.isFinite(cardinalAge)
       ? Math.abs(cardinalAge - workingAge)
       : 0;
     const repudiationDate = parseDateField(c.repudiationDate || c.repudiation_date || "");
+    const settledDate = parseDateField(c.settledDate || c.settled_date || "");
     const repudiationAge = repudiationDate ? calendarDaysBetween(repudiationDate, todayStr) : null;
     const lastUpdated = getClaimLastMovementDate(c);
     const daysSinceMovement = lastUpdated ? calendarDaysBetween(lastUpdated, todayStr) : null;
@@ -4147,9 +4219,11 @@ function processData(rawClaims, refDateStr) {
       calculatedAge: workingAge,
       ageDiscrepancyDays,
       ageDiscrepancy: ageDiscrepancyDays > 2,
+      ageProvided,
       lastUpdated,
       daysSinceMovement,
       repudiationDate,
+      settledDate,
       workingAge,
       calendarAge,
       repudiationAge,
@@ -4192,13 +4266,15 @@ function isKnownHandlerName(rawName, normalisedName) {
   const raw = String(rawName || "").trim();
   const normalised = String(normalisedName || "").trim();
   if (!raw && normalised === "Unassigned") return true;
-  const knownNames = new Set([
-    ...DEFAULT_HANDLERS.map(h => h.name),
-    ...Object.keys(HANDLER_MAP),
-    ...Object.values(HANDLER_MAP),
-    "Unassigned",
-  ].map(n => normaliseStatus(n)));
-  return knownNames.has(normaliseStatus(raw)) || knownNames.has(normaliseStatus(normalised));
+  if (normaliseStatus(raw) === "absa") return false;
+  return handlerDirectory.some((user) =>
+    [user.display_name || user.displayName, user.email].some((value) =>
+      handlerIdentityKey(value) === handlerIdentityKey(raw) ||
+      handlerIdentityTokens(value) === handlerIdentityTokens(raw) ||
+      handlerIdentityKey(value) === handlerIdentityKey(normalised) ||
+      handlerIdentityTokens(value) === handlerIdentityTokens(normalised),
+    ),
+  );
 }
 
 function dataQualityFlagsForClaim(c) {
@@ -4207,9 +4283,12 @@ function dataQualityFlagsForClaim(c) {
   const outstanding = Number(c.outstanding || 0);
   if (c.duplicateClaimNoInExtract) flags.push("Duplicate claim number in extract");
   if (estimate > 0 && outstanding === 0) flags.push("Estimate present but outstanding is zero");
+  if (estimate === 0 && outstanding > 0) flags.push("Outstanding is present but estimate is zero");
   if (isPayment(c) && estimate === 0) flags.push("Payment status with zero estimate");
+  if (normaliseStatus(c.status).startsWith("settled") && !c.settledDate) flags.push("Settled status has no Settled Date");
+  if (getStatusRule(c.status)?.cat === "repudiated" && !c.repudiationDate) flags.push("Repudiated status has no repudiation date");
   if (c.ageDiscrepancy) flags.push(`Cardinal age differs by ${c.ageDiscrepancyDays}wd`);
-  if (!isKnownHandlerName(c.handlerRaw, c.handler)) flags.push("Unrecognised handler name");
+  if (!c.handlerEmail && !isKnownHandlerName(c.handlerRaw, c.handler)) flags.push("Unrecognised handler name");
   if (!getStatusRule(c.status) && !isTerminalStatus(c.status)) flags.push("Unmapped status");
   return flags;
 }
@@ -4218,14 +4297,20 @@ function buildDataQualityReport(data = getProcessedClaims()) {
   const changeDetails = getExtractChangeDetails(data);
   const duplicateClaimNos = data.filter(c => c.duplicateClaimNoInExtract);
   const estimateNoOutstanding = data.filter(c => Number(c.estimate || 0) > 0 && Number(c.outstanding || 0) === 0);
+  const outstandingNoEstimate = data.filter(c => Number(c.estimate || 0) === 0 && Number(c.outstanding || 0) > 0);
   const paymentZeroEstimate = data.filter(c => isPayment(c) && Number(c.estimate || 0) === 0);
+  const settledWithoutDate = data.filter(c => normaliseStatus(c.status).startsWith("settled") && !c.settledDate);
+  const repudiatedWithoutDate = data.filter(c => getStatusRule(c.status)?.cat === "repudiated" && !c.repudiationDate);
   const ageDiscrepancies = data.filter(c => c.ageDiscrepancy);
-  const unrecognisedHandlers = data.filter(c => !isKnownHandlerName(c.handlerRaw, c.handler));
+  const unrecognisedHandlers = data.filter(c => !c.handlerEmail && !isKnownHandlerName(c.handlerRaw, c.handler));
   const unmappedStatuses = data.filter(c => !getStatusRule(c.status) && !isTerminalStatus(c.status));
   const issueCount =
     duplicateClaimNos.length +
     estimateNoOutstanding.length +
+    outstandingNoEstimate.length +
     paymentZeroEstimate.length +
+    settledWithoutDate.length +
+    repudiatedWithoutDate.length +
     ageDiscrepancies.length +
     unrecognisedHandlers.length +
     unmappedStatuses.length;
@@ -4234,7 +4319,10 @@ function buildDataQualityReport(data = getProcessedClaims()) {
     issueCount,
     duplicateClaimNos,
     estimateNoOutstanding,
+    outstandingNoEstimate,
     paymentZeroEstimate,
+    settledWithoutDate,
+    repudiatedWithoutDate,
     ageDiscrepancies,
     unrecognisedHandlers,
     unmappedStatuses,
@@ -4247,7 +4335,10 @@ function dataQualityUploadSummary(report) {
   const parts = [];
   if (report.duplicateClaimNos.length) parts.push(`${report.duplicateClaimNos.length} duplicate claim number(s)`);
   if (report.estimateNoOutstanding.length) parts.push(`${report.estimateNoOutstanding.length} estimate/no outstanding mismatch(es)`);
+  if (report.outstandingNoEstimate.length) parts.push(`${report.outstandingNoEstimate.length} outstanding/no estimate mismatch(es)`);
   if (report.paymentZeroEstimate.length) parts.push(`${report.paymentZeroEstimate.length} payment zero-estimate claim(s)`);
+  if (report.settledWithoutDate.length) parts.push(`${report.settledWithoutDate.length} settled claim(s) missing Settled Date`);
+  if (report.repudiatedWithoutDate.length) parts.push(`${report.repudiatedWithoutDate.length} repudiated claim(s) missing repudiation date`);
   if (report.ageDiscrepancies.length) parts.push(`${report.ageDiscrepancies.length} age discrepancy/discrepancies`);
   if (report.unrecognisedHandlers.length) parts.push(`${report.unrecognisedHandlers.length} unrecognised handler name(s)`);
   if (report.unmappedStatuses.length) parts.push(`${report.unmappedStatuses.length} unmapped status(es)`);
@@ -4373,11 +4464,13 @@ function buildHandlerEmailHtml(handler, hClaims) {
 
 function getPreviousProcessedClaimsForCurrent() {
   const history = loadExtractHistory();
-  if (history.length < 2) return [];
+  if (history.length < 2) return null;
   let idx = currentExtractId ? history.findIndex(h => h.id === currentExtractId) : 0;
   if (idx < 0) idx = 0;
   const prevEntry = history[idx + 1];
-  return prevEntry ? processData(prevEntry.claims || [], prevEntry.extractDate) : [];
+  return prevEntry && Array.isArray(prevEntry.claims)
+    ? processData(prevEntry.claims, prevEntry.extractDate)
+    : null;
 }
 
 function isNoMovement30Claim(c) {
@@ -4395,7 +4488,7 @@ function digestClaimSet(data) {
 
 function buildManagerSummaryData(data) {
   const active = digestClaimSet(data);
-  const previousCriticalNos = new Set(getPreviousProcessedClaimsForCurrent().filter(isClaimCritical).map(c => c.claimNo));
+  const previousCriticalNos = new Set((getPreviousProcessedClaimsForCurrent() || []).filter(isClaimCritical).map(c => c.claimNo));
   const criticalClaims = active.filter(isClaimCritical);
   const zeroClaims = active.filter(isZeroEstimateAnomaly);
   const riskClaims = getRiskClaims(active);
@@ -4605,39 +4698,46 @@ function buildManagerEmailHtml(data) {
 
 
 // TEAMS BRIEFING
-// Emails loaded from backend after authentication  -  do not hardcode here
-const DEFAULT_HANDLERS = [
-  { name: "Sarah Dzumba",              email: "" },
-  { name: "Naledi Moletsane",          email: "" },
-  { name: "Lucky",                     email: "" },
-  { name: "Juan-Paul",                 email: "" },
-  { name: "Juan-Paul Van Der Merwe",   email: "" },
-  { name: "Beverly De Beer",           email: "" },
-];
+// Handler identities are loaded from the active Scout user directory and
+// current extract. No individual production names are embedded in the UI.
+function configuredHandlerNames() {
+  const names = [
+    ...claims.map((claim) => claim.handler),
+    ...Object.keys(scoutSettings?.handler_emails || {}),
+    ...handlerDirectory
+      .filter((user) => !user.role || user.role === "handler")
+      .map((user) => user.display_name || user.displayName || user.email),
+  ];
+  return [...new Set(names.map((name) => String(name || "").trim()))]
+    .filter((name) => name && handlerIdentityKey(name) !== "unassigned")
+    .sort((a, b) => a.localeCompare(b));
+}
 
 let scoutSettings = {
   send_time: "07:30",
   handler_emails: {},
-  manager_email: "bev@smartsure2020.co.za",
-  zero_estimate_email: "bev@smartsure2020.co.za",
+  manager_email: "",
+  zero_estimate_email: "",
   include_terminal_claims: false,
   retention_days: 90,
 };
+let settingsLoadError = null;
 
 // Fuzzy email lookup  -  matches on first name or partial name
 function getHandlerEmail(handlerName, savedEmails) {
-  const key = handlerName.replace(/\s+/g,"_");
+  const key = handlerIdentityKey(handlerName);
   const backendEmails = scoutSettings?.handler_emails || {};
-  if (savedEmails[key]) return savedEmails[key];
-  if (backendEmails[handlerName]) return backendEmails[handlerName];
-  if (backendEmails[key]) return backendEmails[key];
-  // Try matching by first name or partial
-  const first = handlerName.split(/[\s-]/)[0].toLowerCase();
-  const match = DEFAULT_HANDLERS.find(d => {
-    const dFirst = d.name.split(/[\s-]/)[0].toLowerCase();
-    return d.name === handlerName || dFirst === first || d.name.toLowerCase().includes(first);
-  });
-  return match ? match.email : "";
+  const all = { ...(savedEmails || {}), ...backendEmails };
+  const match = Object.entries(all).find(([name, email]) =>
+    email && (handlerIdentityKey(name) === key || handlerIdentityTokens(name) === handlerIdentityTokens(handlerName)),
+  );
+  if (match) return String(match[1]).trim();
+  const directoryMatch = handlerDirectory.find((user) =>
+    [user.display_name || user.displayName, user.email].some((value) =>
+      handlerIdentityKey(value) === key || handlerIdentityTokens(value) === handlerIdentityTokens(handlerName),
+    ),
+  );
+  return directoryMatch?.email || "";
 }
 
 function renderHandlerEmailMap() {
@@ -4646,12 +4746,12 @@ function renderHandlerEmailMap() {
   const backendEmails = scoutSettings?.handler_emails || {};
   const el = document.getElementById("handler-email-map");
   if (!el) return;
-  el.innerHTML = DEFAULT_HANDLERS.filter(h => h.name !== "Beverly De Beer").map(h => {
-    const key = h.name.replace(/\s+/g,"_");
-    const val = saved[key] || backendEmails[h.name] || backendEmails[key] || h.email || "";
+  el.innerHTML = configuredHandlerNames().map((name) => {
+    const key = handlerIdentityKey(name);
+    const val = getHandlerEmail(name, saved) || backendEmails[name] || "";
     return `<div class="handler-email-item">
-      <div class="handler-email-label">${h.name.toUpperCase()}</div>
-      <input type="email" data-handler="${key}" placeholder="${h.name.split(" ")[0].toLowerCase()}\x40example.com"
+      <div class="handler-email-label">${esc(name.toUpperCase())}</div>
+      <input type="email" data-handler="${key}" data-handler-name="${esc(name)}" placeholder="handler\x40example.com"
         value="${val}"
         oninput="saveTeamsConfig()">
     </div>`;
@@ -4685,7 +4785,7 @@ function loadTeamsConfig() {
       localStorage.setItem("scout_teams_config", JSON.stringify(cfg));
     }
     if (cfg.proxy) document.getElementById("teams-proxy").value = cfg.proxy;
-    const managerEmail = cfg.mgrEmail || scoutSettings.manager_email || "bev@smartsure2020.co.za";
+    const managerEmail = cfg.mgrEmail || scoutSettings.manager_email || "";
     if (managerEmail) document.getElementById("teams-mgr-email").value = managerEmail;
     renderHandlerEmailMap();
     // Restore saved emails into the rendered inputs
@@ -4704,7 +4804,23 @@ function getTeamsConfig() {
   catch(e) { return {}; }
 }
 
+async function loadHandlerDirectory() {
+  if (!currentUser?.msToken || !["manager", "admin"].includes(currentUser.role)) return;
+  try {
+    const res = await fetch(CONFIG.backendUrl + "/management-workflow/users", {
+      headers: { Authorization: "Bearer " + currentUser.msToken },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Handler directory unavailable");
+    handlerDirectory = Array.isArray(data.users) ? data.users : [];
+  } catch (err) {
+    handlerDirectory = [];
+    console.warn("Handler directory unavailable:", err.message);
+  }
+}
+
 async function loadSettings() {
+  settingsLoadError = null;
   if (!currentUser?.msToken || !["manager","admin"].includes(currentUser.role)) return scoutSettings;
   try {
     const res = await fetch(CONFIG.backendUrl + "/settings", {
@@ -4714,6 +4830,7 @@ async function loadSettings() {
     if (!res.ok) throw new Error(data.error || "Settings unavailable");
     scoutSettings = { ...scoutSettings, ...(data.settings || {}), retention_days: data.retention_days || 90 };
   } catch (err) {
+    settingsLoadError = err;
     console.warn("Settings unavailable:", err.message);
   }
   return scoutSettings;
@@ -4723,12 +4840,11 @@ function renderSettingsHandlerEmails(settings = scoutSettings) {
   const el = document.getElementById("settings-handler-emails");
   if (!el) return;
   const emails = settings.handler_emails || {};
-  el.innerHTML = DEFAULT_HANDLERS.filter(h => h.name !== "Beverly De Beer").map(h => {
-    const key = h.name.replace(/\s+/g, "_");
-    const val = emails[h.name] || emails[key] || h.email || "";
+  el.innerHTML = configuredHandlerNames().map((name) => {
+    const val = emails[name] || getHandlerEmail(name, emails) || "";
     return `<div class="settings-field">
-      <label class="settings-label">${esc(h.name)}</label>
-      <input class="settings-input" type="email" data-setting-handler="${esc(h.name)}" value="${esc(val)}" placeholder="${esc(h.name.split(" ")[0].toLowerCase())}@example.com">
+      <label class="settings-label">${esc(name)}</label>
+      <input class="settings-input" type="email" data-setting-handler="${esc(name)}" value="${esc(val)}" placeholder="handler@example.com">
     </div>`;
   }).join("");
 }
@@ -4748,9 +4864,14 @@ async function renderSettings() {
   status.style.color = "var(--ws-text-muted)";
   status.textContent = "Loading settings...";
   const settings = await loadSettings();
+  if (settingsLoadError) {
+    status.textContent = "Settings unavailable: " + settingsLoadError.message;
+    status.style.color = "var(--red)";
+    return;
+  }
   document.getElementById("setting-send-time").value = settings.send_time || "07:30";
-  document.getElementById("setting-manager-email").value = settings.manager_email || "bev@smartsure2020.co.za";
-  document.getElementById("setting-zero-email").value = settings.zero_estimate_email || settings.manager_email || "bev@smartsure2020.co.za";
+  document.getElementById("setting-manager-email").value = settings.manager_email || "";
+  document.getElementById("setting-zero-email").value = settings.zero_estimate_email || settings.manager_email || "";
   document.getElementById("setting-include-terminal").checked = !!settings.include_terminal_claims;
   document.getElementById("setting-retention-days").textContent = settings.retention_days || 90;
   renderSettingsHandlerEmails(settings);
@@ -4771,7 +4892,7 @@ async function saveSettings() {
 
   const payload = {
     send_time: document.getElementById("setting-send-time")?.value || "07:30",
-    manager_email: document.getElementById("setting-manager-email")?.value.trim() || "bev@smartsure2020.co.za",
+    manager_email: document.getElementById("setting-manager-email")?.value.trim() || "",
     zero_estimate_email: document.getElementById("setting-zero-email")?.value.trim() || "",
     handler_emails: handlerEmails,
     include_terminal_claims: !!document.getElementById("setting-include-terminal")?.checked,
@@ -5232,7 +5353,7 @@ async function sendTeamsBriefing(confirmed = false) {
     const mgrHtml = buildManagerEmailHtml(data);
     const mgrEmailAddr = cfg.mgrEmail || "";
     await callProxy(cfg, "sendBriefing", {
-      message: mgrMsg, toEmail: mgrEmailAddr, toName: "Beverly De Beer",
+        message: mgrMsg, toEmail: mgrEmailAddr, toName: mgrEmailAddr || "Manager",
       subject: "Scout - Manager Summary - " + new Date().toLocaleDateString("en-ZA",{day:"numeric",month:"short",year:"numeric"}),
       htmlBody: mgrHtml,
     });
@@ -5581,9 +5702,11 @@ function renderRiskList(active) {
 
 function previousCurrentClaimSets(currentClaims = getProcessedClaims()) {
   const prev = getPreviousProcessedClaimsForCurrent();
-  const prevByNo = new Map(prev.filter(c => c.claimNo).map(c => [c.claimNo, c]));
+  const previousAvailable = Array.isArray(prev);
+  const previousClaims = prev || [];
+  const prevByNo = new Map(previousClaims.filter(c => c.claimNo).map(c => [c.claimNo, c]));
   const curByNo = new Map(currentClaims.filter(c => c.claimNo).map(c => [c.claimNo, c]));
-  return { prev, prevByNo, curByNo };
+  return { prev: previousClaims, previousAvailable, prevByNo, curByNo };
 }
 
 function renderDataQualityReport(data = getProcessedClaims()) {
@@ -5608,7 +5731,10 @@ function renderDataQualityReport(data = getProcessedClaims()) {
   const rows = [
     ["Duplicate claim numbers", r.duplicateClaimNos.length, "Same claim number appears more than once in this extract", "red"],
     ["Estimate/no outstanding mismatch", r.estimateNoOutstanding.length, "Estimate is populated but outstanding is zero", "amber"],
+    ["Outstanding/no estimate mismatch", r.outstandingNoEstimate.length, "Outstanding is populated but estimate is zero", "amber"],
     ["Payment zero-estimate", r.paymentZeroEstimate.length, "Payment-category status has estimate of R0", "red"],
+    ["Settled date missing", r.settledWithoutDate.length, "Settled status has no trusted Settled Date", "amber"],
+    ["Repudiation date missing", r.repudiatedWithoutDate.length, "Repudiated status has no trusted repudiation date", "amber"],
     ["Age discrepancy", r.ageDiscrepancies.length, "Cardinal age differs from calculated registered-date age by more than 2 days", "amber"],
     ["Unrecognised handlers", r.unrecognisedHandlers.length, "Handler name is not in the known Scout handler list", "amber"],
     ["Unmapped statuses", r.unmappedStatuses.length, "Status has no Scout SLA rule yet", "amber"],
@@ -5638,13 +5764,13 @@ function renderWeeklySummary(active, allData = getProcessedClaims()) {
   const cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 7);
   const cutoffStr = cutoff.toISOString().split("T")[0];
   const openedByDate = allData.filter(c => (parseDateField(c.registered) || parseDateField(c.dol)) >= cutoffStr).length;
-  const { prev, prevByNo, curByNo } = previousCurrentClaimSets(allData);
+  const { prev, previousAvailable, prevByNo, curByNo } = previousCurrentClaimSets(allData);
   const openedVsPrevious = [...curByNo.keys()].filter(no => !prevByNo.has(no)).length;
   const closedVsPrevious = prev.filter(c => c.claimNo && !curByNo.has(c.claimNo)).length;
-  const netChange = prev.length ? openedVsPrevious - closedVsPrevious : openedByDate;
+  const netChange = previousAvailable ? openedVsPrevious - closedVsPrevious : null;
   const withinSla = active.filter(c => !isClaimCritical(c) && !isClaimStale(c)).length;
   const compliance = active.length ? Math.round((withinSla / active.length) * 100) : 100;
-  const openedSub = prev.length ? `${openedVsPrevious} new since previous extract` : "registered/DOL date";
+  const openedSub = previousAvailable ? `${openedVsPrevious} new since previous extract` : "previous extract unavailable";
 
   el.innerHTML = `
     <div class="stat-card">
@@ -5654,13 +5780,13 @@ function renderWeeklySummary(active, allData = getProcessedClaims()) {
     </div>
     <div class="stat-card">
       <div class="stat-label">Claims closed</div>
-      <div class="stat-value green">${closedVsPrevious}</div>
-      <div class="stat-sub">${prev.length ? "no longer in current extract" : "needs previous extract"}</div>
+      <div class="stat-value green">${previousAvailable ? closedVsPrevious : "—"}</div>
+      <div class="stat-sub">${previousAvailable ? "no longer in current extract" : "needs previous extract"}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">Net change</div>
-      <div class="stat-value ${netChange > 0 ? "amber" : "green"}">${netChange > 0 ? "+" : ""}${netChange}</div>
-      <div class="stat-sub">portfolio movement</div>
+      <div class="stat-value ${netChange === null ? "" : netChange > 0 ? "amber" : "green"}">${netChange === null ? "—" : `${netChange > 0 ? "+" : ""}${netChange}`}</div>
+      <div class="stat-sub">${previousAvailable ? "portfolio movement" : "comparison unavailable"}</div>
     </div>
     <div class="stat-card">
       <div class="stat-label">SLA compliance</div>
@@ -5990,56 +6116,64 @@ function renderAll() {
 
 function updateHistoryCount() {
   const el = document.getElementById("nav-history-count");
-  if (el) el.textContent = loadExtractHistory().length;
+  if (el) el.textContent = Array.isArray(serverHistoryCache) ? serverHistoryCache.length : "—";
 }
 
-function renderExtractHistory() {
-  const history = loadExtractHistory();
+async function loadServerHistory() {
+  if (!currentUser?.msToken || !["manager", "admin"].includes(currentUser.role)) return [];
+  try {
+    const res = await fetch(CONFIG.backendUrl + "/history/extracts", {
+      headers: { Authorization: "Bearer " + currentUser.msToken },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Server history unavailable");
+    serverHistoryCache = Array.isArray(data.extracts) ? data.extracts : [];
+    serverHistoryError = null;
+  } catch (err) {
+    serverHistoryCache = null;
+    serverHistoryError = err;
+  }
+  updateHistoryCount();
+  return serverHistoryCache || [];
+}
+
+async function renderExtractHistory() {
+  const history = await loadServerHistory();
   const body = document.getElementById("extract-history-body");
   const sub = document.getElementById("history-sub");
-  if (sub) sub.textContent = history.length
-    ? `${history.length} saved extract${history.length === 1 ? "" : "s"} in this browser`
-    : "Previous uploaded extracts saved in this browser.";
+  if (sub) sub.textContent = serverHistoryError
+    ? "Server history is currently unavailable. No browser copy is being used as a substitute."
+    : `${history.length} server-saved extract${history.length === 1 ? "" : "s"}`;
   if (!body) return;
+  if (serverHistoryError) {
+    body.innerHTML = `<div class="empty-state empty-state-error">Could not load server extract history: ${esc(serverHistoryError.message)}</div>`;
+    return;
+  }
   if (!history.length) {
-    body.innerHTML = `<div class="empty-state">No extract history yet. Uploads will appear here after they are loaded.</div>`;
+    body.innerHTML = `<div class="empty-state">No server extract history is available yet.</div>`;
     updateHistoryCount();
     return;
   }
-  body.innerHTML = history.map((entry, i) => {
-    const uploaded = entry.uploadedAt ? new Date(entry.uploadedAt).toLocaleString("en-ZA", { day:"numeric", month:"short", hour:"2-digit", minute:"2-digit" }) : "";
-    const previous = history[i + 1];
-    const summary = getExtractChangeSummary(entry, previous);
-    const active = entry.id === currentExtractId;
+  body.innerHTML = history.map((entry) => {
+    const uploaded = entry.received_at ? new Date(entry.received_at).toLocaleString("en-ZA", { day:"numeric", month:"short", hour:"2-digit", minute:"2-digit" }) : "";
+    const persisted = entry.historical_persisted && entry.current_state_updated;
+    const status = entry.status || (persisted ? "accepted" : "not accepted");
     return `<div class="table-row grid-history">
-      <span class="history-date">${esc(entry.extractDate || "")}</span>
+      <span class="history-date">${esc(entry.effective_date || "Not available")}</span>
       <span>
-        <span class="history-filename">${esc(entry.fileName || "Uploaded extract")}</span>
-        ${summary ? `<span class="history-summary">${esc(summary)}</span>` : ""}
+        <span class="history-filename">${esc(entry.source_file_name || "Uploaded extract")}</span>
+        <span class="history-summary">${esc(status.replaceAll("_", " "))}</span>
       </span>
-      <span class="history-count">${entry.claimCount || 0}</span>
+      <span class="history-count">${entry.claim_count ?? "—"}</span>
       <span class="history-uploaded">${esc(uploaded)}</span>
-      <span class="history-action">
-        ${active ? `<span class="section-badge green">Loaded</span>` : `<button class="btn-primary" onclick="restoreExtract('${esc(entry.id)}')">Load</button>`}
-      </span>
+      <span class="history-action"><span class="section-badge ${persisted ? "green" : "amber"}">${persisted ? "Server saved" : esc(status.replaceAll("_", " "))}</span></span>
     </div>`;
   }).join("");
   updateHistoryCount();
 }
 
 function restoreExtract(id) {
-  const entry = loadExtractHistory().find(h => h.id === id);
-  if (!entry || !Array.isArray(entry.claims)) return;
-  claims = entry.claims;
-  currentExtractId = entry.id;
-  currentExtractFileName = entry.fileName || "Restored extract";
-  extractUploadDate = entry.extractDate ? new Date(entry.extractDate) : new Date(entry.uploadedAt || Date.now());
-  invalidateProcessedClaims();
-  document.getElementById("today-date").textContent =
-    "Restored: " + extractUploadDate.toLocaleDateString("en-ZA",{day:"numeric",month:"short",year:"numeric"});
-  hideDataBanner();
-  pruneAcks(getProcessedClaims());
-  renderAll();
+  void id;
   renderExtractHistory();
 }
 
@@ -6820,7 +6954,7 @@ function handleFileUpload(file) {
   const status = document.getElementById("upload-status");
   status.innerHTML = `<span class="upload-spinner"></span>Reading file...`;
   const reader = new FileReader();
-  reader.onload = function(e) {
+  reader.onload = async function(e) {
     try {
       const wb = XLSX.read(e.target.result, { type: "array", cellDates: true });
       const ws = wb.Sheets[wb.SheetNames[0]];
@@ -6832,7 +6966,7 @@ function handleFileUpload(file) {
       const KNOWN_COLS = new Set([
         "Claim No.", "Claim No", "Claims Status", "Status", "Claim Handler", "Age", "Insurer",
         "Claim Registered", "DOL", "Description of Loss", "Insured",
-        "Repudiation Date", "Repudiation Notification Date", "Repudiation Letter Date", "Date Repudiated", "Manual Repudiation Date",
+        "Repudiation Date", "Repudiation Notification Date", "Repudiation Letter Date", "Date Repudiated", "Manual Repudiation Date", "Settled Date",
         "Last Updated", "Last Modified", "Status Updated", "Status Date", "Last Movement Date", "Modified Date", "Updated At",
         "Origional Estimate", "Original Estimate", "Own Damage Original Estimate", "Sum Insured", "Outstanding", "Nett Claim", "Claim Value", "Value",
         "Paid", "RepudiateAmount", "Mandate", "Peril", "Settled", "Comments"
@@ -6858,13 +6992,15 @@ function handleFileUpload(file) {
       // Map Cardinal columns to our internal format
       claims = deriveLastUpdatedFromPreviousExtract(json.map(row => ({
         age: Number(row["Age"]) || 0,
+        ageProvided: row["Age"] !== undefined && row["Age"] !== null && row["Age"] !== "",
         handler: normaliseHandler(String(row["Claim Handler"] || "")),
         handlerRaw: String(row["Claim Handler"] || "").trim(),
         claimNo: String(row["Claim No."] || row["Claim No"] || ""),
         status: normaliseStatus(String(row["Claims Status"] || row["Status"] || "")),
         registered: parseCardinalDate(row["Claim Registered"]),
         dol: parseCardinalDate(row["DOL"]),
-        repudiationDate: parseDateField(row["Repudiated"] || row["Repudiation Date"] || row["Repudiation Notification Date"] || row["Repudiation Letter Date"] || row["Date Repudiated"]),
+        repudiationDate: firstValidDate(row["Repudiation Date"], row["Repudiation Notification Date"], row["Repudiation Letter Date"], row["Date Repudiated"], row["Manual Repudiation Date"]),
+        settledDate: firstValidDate(row["Settled Date"]),
         lastUpdated: parseDateField(
           row["Last Updated"] ||
           row["Status Updated"] ||
@@ -6885,19 +7021,16 @@ function handleFileUpload(file) {
         repudiateAmount: parseCurrency(row["RepudiateAmount"] ?? 0),
         mandate: String(row["Mandate"] || ""),  // Cardinal's own per-claim mandate flag
         peril: String(row["Peril"] || ""),
-        settled: row["Settled"] === true || row["Settled"] === "TRUE",
+        settled: parseBooleanField(row["Settled"]),
         insurer: String(row["Insurer"] || ""),
         comments: String(row["Comments"] || ""),
-      })).filter(c => c.claimNo), extractDate);
+      })).filter(c => c.claimNo));
       invalidateProcessedClaims();
       const repudiatedWithoutDate = claims.filter(c => getStatusRule(c.status)?.cat === "repudiated" && !c.repudiationDate).length;
       if (repudiatedWithoutDate > 0) {
         uploadWarnings.push(`${repudiatedWithoutDate} repudiated claim(s) missing Repudiation Date / Manual Repudiation Date`);
       }
       const historyResult = saveExtractHistoryEntry(claims, file.name, extractDate);
-      if (!historyResult.saved) {
-        uploadWarnings.push("Extract loaded, but browser history could not be saved locally");
-      }
       if (uploadWarnings.length > 0) {
         status.innerHTML = `⚠ Loaded ${claims.length} claims  -  <strong>Column warning:</strong> ${uploadWarnings.join("; ")}. Affected fields will show as blank or zero.`;
       } else {
@@ -6918,8 +7051,13 @@ function handleFileUpload(file) {
       pruneAcks(processed);
       renderAll();
       // Save to backend for persistence
-      saveExtractToBackend(processed, file.name, historyResult.entry);
-      if (!uploadWarnings.length) {
+      const backendResult = await saveExtractToBackend(processed, file.name, historyResult.entry);
+      if (backendResult.ok) {
+        status.textContent = `Upload completed and server history saved (${backendResult.data.claimsStored || claims.length} claims).`;
+      } else {
+        status.textContent = "Upload failed: server history was not saved. No local browser copy is being treated as the source of truth.";
+      }
+      if (!uploadWarnings.length && backendResult.ok) {
         setTimeout(() => document.querySelector(".upload-overlay").classList.remove("show"), 1200);
       }
     } catch(err) {
@@ -7037,6 +7175,12 @@ async function silentSignIn(loginHint) {
     "&login_hint=" + encodeURIComponent(loginHint);
 }
 
+function cleanOAuthCallbackUrl() {
+  const clean = new URL(window.location.href);
+  ["code", "state", "session_state", "error", "error_description", "error_uri"].forEach((key) => clean.searchParams.delete(key));
+  window.history.replaceState({}, document.title, clean.pathname + clean.search + clean.hash);
+}
+
 async function handleOAuthCallback() {
   const params = new URLSearchParams(window.location.search);
   const code = params.get("code");
@@ -7049,17 +7193,18 @@ async function handleOAuthCallback() {
     // When silent re-auth can't proceed without user interaction, fall back to login screen
     if (wasSilent && (error === "interaction_required" || error === "login_required" || error === "consent_required")) {
       clearSession();
-      window.history.replaceState({}, document.title, window.location.pathname);
+      cleanOAuthCallbackUrl();
       return false;
     }
+    cleanOAuthCallbackUrl();
     showAuthError("Microsoft sign-in failed: " + (params.get("error_description") || error));
     return false;
   }
-  if (!code) return false;
+  if (!code) { cleanOAuthCallbackUrl(); return false; }
 
   // Validate state
   const savedState = sessionStorage.getItem("oauth_state");
-  if (state !== savedState) { showAuthError("Invalid state  -  please try again."); return false; }
+  if (state !== savedState) { cleanOAuthCallbackUrl(); showAuthError("Invalid state  -  please try again."); return false; }
 
   sessionStorage.removeItem("silent_auth");
   const verifier = sessionStorage.getItem("pkce_verifier");
@@ -7069,37 +7214,53 @@ async function handleOAuthCallback() {
   document.getElementById("auth-loading").style.display = "block";
   document.getElementById("auth-loading").textContent = "Completing sign-in...";
 
-  const tokenRes = await fetch(
-    "https://login.microsoftonline.com/" + CONFIG.azureTenantId + "/oauth2/v2.0/token",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: [
-        "client_id=" + encodeURIComponent(CONFIG.azureClientId),
-        "grant_type=authorization_code",
-        "code=" + encodeURIComponent(code),
-        "redirect_uri=" + encodeURIComponent(redirectUri),
-        "code_verifier=" + encodeURIComponent(verifier),
-        "scope=" + encodeURIComponent("openid profile email User.Read"),
-      ].join("&"),
-    }
-  );
+  let tokenRes;
+  try {
+    tokenRes = await fetch(
+      "https://login.microsoftonline.com/" + CONFIG.azureTenantId + "/oauth2/v2.0/token",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: [
+          "client_id=" + encodeURIComponent(CONFIG.azureClientId),
+          "grant_type=authorization_code",
+          "code=" + encodeURIComponent(code),
+          "redirect_uri=" + encodeURIComponent(redirectUri),
+          "code_verifier=" + encodeURIComponent(verifier),
+          "scope=" + encodeURIComponent("openid profile email User.Read"),
+        ].join("&"),
+      }
+    );
+  } catch {
+    cleanOAuthCallbackUrl();
+    showAuthError("Token exchange failed. Please try again.");
+    return false;
+  }
 
-  const tokenData = await tokenRes.json();
+  const tokenData = await tokenRes.json().catch(() => ({}));
   if (!tokenData.access_token) {
+    cleanOAuthCallbackUrl();
     showAuthError("Token exchange failed. Please try again.");
     return false;
   }
 
   // Verify with backend and get role
-  const meRes = await fetch(CONFIG.backendUrl + "/auth/me", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token: tokenData.access_token }),
-  });
+  let meRes;
+  try {
+    meRes = await fetch(CONFIG.backendUrl + "/auth/me", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: tokenData.access_token }),
+    });
+  } catch {
+    cleanOAuthCallbackUrl();
+    showAuthError("Access verification failed. Please try again.");
+    return false;
+  }
 
-  const meData = await meRes.json();
+  const meData = await meRes.json().catch(() => ({}));
   if (!meRes.ok || meData.error) {
+    cleanOAuthCallbackUrl();
     showAuthError(meData.error || "Access denied. Contact your administrator.");
     return false;
   }
@@ -7114,7 +7275,9 @@ async function handleOAuthCallback() {
   storeSession(currentUser);
 
   // Clean URL
-  window.history.replaceState({}, document.title, window.location.pathname);
+  sessionStorage.removeItem("oauth_state");
+  sessionStorage.removeItem("pkce_verifier");
+  cleanOAuthCallbackUrl();
   return true;
 }
 
@@ -7224,11 +7387,14 @@ async function loadClaimsFromBackend() {
       claims = data.claims.map(c => ({
         claimId:      c.claim_id || c.history_claim_id || null,
         age:         c.age_days || 0,
+        ageProvided: c.age_days !== undefined && c.age_days !== null && c.age_days !== "",
         handler:     c.handler_name || "Unassigned",
+        handlerEmail: c.handler_email || "",
         claimNo:     c.claim_no || "",
         status:      c.status || "",
         registered:  c.registered_date || c.registered || "",
         repudiationDate: c.repudiation_date || c.repudiationDate || "",
+        settledDate: c.settled_date || c.settledDate || "",
         lastUpdated: parseDateField(c.last_updated || c.lastUpdated || c.status_updated || c.statusUpdated || c.updated_at || c.updatedAt || c.modified_date || c.modifiedDate || c.status_date || c.statusDate),
         lastUpdatedSource: c.last_updated_source || c.lastUpdatedSource || "",
         description: c.description || "",
@@ -7273,7 +7439,9 @@ async function loadClaimsFromBackend() {
 
 // SAVE EXTRACT TO BACKEND
 async function saveExtractToBackend(processedClaims, fileName, extractMeta = null) {
-  if (!currentUser || !["manager","admin"].includes(currentUser.role)) return;
+  if (!currentUser || !["manager","admin"].includes(currentUser.role)) {
+    return { ok: false, data: null, error: new Error("Only managers and admins can upload extracts") };
+  }
   const extractDate = extractMeta?.extractDate || new Date().toISOString().split("T")[0];
   const extractId = extractMeta?.id || `${extractDate}-${Date.now()}`;
   try {
@@ -7299,8 +7467,17 @@ async function saveExtractToBackend(processedClaims, fileName, extractMeta = nul
       }),
     });
     const data = await res.json();
-    if (data.success) console.log("Extract saved to backend:", data.claimsStored, "claims");
-  } catch(e) { console.warn("Backend save failed:", e); }
+    if (!res.ok || !data.success) {
+      throw new Error(data.error || "Server rejected the extract");
+    }
+    if (data.extractId) currentExtractId = data.extractId;
+    serverHistoryCache = null;
+    console.log("Extract saved to backend:", data.claimsStored, "claims");
+    return { ok: true, data };
+  } catch(e) {
+    console.warn("Backend save failed:", e);
+    return { ok: false, data: null, error: e };
+  }
 }
 
 // AUDIT LOG VIEW
@@ -7335,10 +7512,12 @@ async function renderAuditLog() {
 
 // MAIN AUTH INIT
 async function initAuth() {
-  // Check for OAuth callback
-  const hasCode = window.location.search.includes("code=");
+  // Check for an OAuth callback, including error-only callbacks.
+  const params = new URLSearchParams(window.location.search);
+  const hasOAuthCallback = ["code", "state", "session_state", "error", "error_description", "error_uri"]
+    .some((key) => params.has(key));
 
-  if (hasCode) {
+  if (hasOAuthCallback) {
     const success = await handleOAuthCallback();
     if (!success) return;
   } else {
@@ -7382,6 +7561,7 @@ async function initAuth() {
 
   // Apply role restrictions
   applyRoleRestrictions(currentUser.role);
+  await loadHandlerDirectory();
   await loadSettings();
   loadTeamsConfig();
 
@@ -7393,6 +7573,7 @@ async function initAuth() {
   if (!loaded) {
     document.getElementById("today-date").textContent = "No live extract";
   }
+  await loadServerHistory();
 
   // Render everything
   renderAll();
@@ -7463,7 +7644,7 @@ async function openClaimDetail(claimNo) {
           <span class="detail-field-label">Estimate</span>
           <span class="detail-field-val detail-field-val-mono">${fmtCurrency(c.estimate)}</span>
         </div>
-        ${Number.isFinite(c.cardinalAge) ? `<div class="detail-field">
+        ${c.ageProvided && Number.isFinite(c.cardinalAge) ? `<div class="detail-field">
           <span class="detail-field-label">Cardinal age</span>
           <span class="detail-field-val"><span class="age-badge ${c.ageDiscrepancy ? 'warning' : 'ok'}">${c.cardinalAge}d</span></span>
         </div>` : ""}
@@ -7543,6 +7724,16 @@ function closeClaimDetail() {
   document.getElementById("detail-panel").classList.remove("open");
 }
 
+let scoutToastTimer;
+function showScoutToast(message, tone = "") {
+  const toast = document.getElementById("scout-toast");
+  if (!toast) return;
+  clearTimeout(scoutToastTimer);
+  toast.textContent = message;
+  toast.className = "scout-toast show" + (tone ? " " + tone : "");
+  scoutToastTimer = setTimeout(() => { toast.className = "scout-toast"; }, 3200);
+}
+
 async function loadDetailNote(claimNo) {
   if (!currentUser) return;
   try {
@@ -7585,9 +7776,11 @@ async function saveDetailNote(claimNo) {
     const data = await res.json();
     status.textContent = "Saved · " + (data.savedBy || currentUser.name || "You");
     status.className = "detail-note-status ok";
+    showScoutToast("Claim note saved");
   } catch {
     status.textContent = "Failed to save";
     status.className = "detail-note-status err";
+    showScoutToast("Claim note could not be saved", "error");
   } finally {
     btn.disabled = false;
   }

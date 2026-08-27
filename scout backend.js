@@ -55,10 +55,78 @@ import {
 } from "./reporting-domain/management-workflow.mjs";
 
 const CORS = {
-  "Access-Control-Allow-Origin": "*",
+  // The Claims portal is served by the dedicated frontend Worker. Keep the
+  // API readable from that origin only; do not reintroduce wildcard CORS.
+  "Access-Control-Allow-Origin":
+    "https://scout-smartsure.marketing-854.workers.dev",
+  Vary: "Origin",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
+
+const DIGEST_SETTINGS_DEFAULTS = Object.freeze({
+  send_time: "07:30",
+  handler_emails: {},
+  manager_email: "",
+  zero_estimate_email: "",
+  include_terminal_claims: false,
+});
+
+function normaliseDigestSettings(value = {}) {
+  const source = value && typeof value === "object" ? value : {};
+  const handlerEmails =
+    source.handler_emails && typeof source.handler_emails === "object"
+      ? Object.fromEntries(
+          Object.entries(source.handler_emails)
+            .map(([name, email]) => [
+              String(name).trim(),
+              String(email || "").trim(),
+            ])
+            .filter(([name]) => name),
+        )
+      : {};
+  return {
+    ...DIGEST_SETTINGS_DEFAULTS,
+    ...source,
+    send_time: String(
+      source.send_time || DIGEST_SETTINGS_DEFAULTS.send_time,
+    ).slice(0, 5),
+    handler_emails: handlerEmails,
+    manager_email: String(source.manager_email || "").trim(),
+    zero_estimate_email: String(source.zero_estimate_email || "").trim(),
+    include_terminal_claims: Boolean(source.include_terminal_claims),
+  };
+}
+
+async function getDigestSettings(env) {
+  const rows = await supabase(
+    env,
+    "/scout_settings?id=eq.digest&select=value&limit=1",
+    "GET",
+    null,
+    true,
+  );
+  return normaliseDigestSettings(rows?.[0]?.value || {});
+}
+
+async function saveDigestSettings(env, patch) {
+  const current = await getDigestSettings(env);
+  const definedPatch = Object.fromEntries(
+    Object.entries(patch || {}).filter(([, value]) => value !== undefined),
+  );
+  const next = normaliseDigestSettings({ ...current, ...definedPatch });
+  if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(next.send_time))
+    throw new Error("Send time must be HH:mm");
+  const rows = await supabase(
+    env,
+    "/scout_settings?on_conflict=id",
+    "POST",
+    { id: "digest", value: next, updated_at: new Date().toISOString() },
+    true,
+    "resolution=merge-duplicates,return=representation",
+  );
+  return normaliseDigestSettings(rows?.[0]?.value || next);
+}
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -1625,6 +1693,23 @@ async function getUserRole(env, email) {
   return rows[0];
 }
 
+async function canAccessClaimNote(env, claimNo, currentUser) {
+  if (["manager", "admin"].includes(currentUser?.role)) return true;
+  if (currentUser?.role !== "handler" || !currentUser.email) return false;
+  const rows = await supabase(
+    env,
+    "/scout_claims?claim_no=eq." +
+      encodeURIComponent(claimNo) +
+      "&handler_email=eq." +
+      encodeURIComponent(currentUser.email) +
+      "&select=claim_no&limit=1",
+    "GET",
+    null,
+    true,
+  );
+  return Boolean(rows?.length);
+}
+
 // ── ROUTER ───────────────────────────────────────────────────
 export default {
   async fetch(request, env) {
@@ -1682,6 +1767,101 @@ export default {
       currentUser = { ...msUser, ...dbUser };
     } catch (e) {
       return err("Unauthorised: " + e.message, 401);
+    }
+
+    // ── Briefing history/settings read model ─────────────────
+    // These routes read and update the existing briefing tables without
+    // sending a briefing. The briefing scheduler remains a separate concern.
+    if (path === "/briefing-runs" && request.method === "GET") {
+      if (!reportActionAllowed(currentUser.role, "view_workflow"))
+        return err("Not authorised", 403);
+      try {
+        const runs = await supabaseAll(
+          env,
+          "/briefing_runs?select=*&order=started_at.desc&limit=20",
+          true,
+        );
+        return json({ runs });
+      } catch (e) {
+        return err("Briefing history unavailable: " + e.message, 503);
+      }
+    }
+
+    if (path === "/digest-log" && request.method === "GET") {
+      if (!reportActionAllowed(currentUser.role, "view_workflow"))
+        return err("Not authorised", 403);
+      try {
+        const digests = await supabaseAll(
+          env,
+          "/digest_log?select=id,generated_at,type,recipient,subject,claims_count,critical_count,sent_ok&order=generated_at.desc&limit=100",
+          true,
+        );
+        return json({ digests });
+      } catch (e) {
+        return err("Digest history unavailable: " + e.message, 503);
+      }
+    }
+
+    const digestMatch = path.match(/^\/digest-log\/([0-9a-f-]+)$/i);
+    if (digestMatch && request.method === "GET") {
+      if (!reportActionAllowed(currentUser.role, "view_workflow"))
+        return err("Not authorised", 403);
+      try {
+        const rows = await supabase(
+          env,
+          "/digest_log?id=eq." +
+            encodeURIComponent(digestMatch[1]) +
+            "&select=*&limit=1",
+          "GET",
+          null,
+          true,
+        );
+        if (!rows?.[0]) return err("Digest not found", 404);
+        return json({ digest: rows[0] });
+      } catch (e) {
+        return err("Digest history unavailable: " + e.message, 503);
+      }
+    }
+
+    if (
+      path === "/settings" &&
+      (request.method === "GET" || request.method === "PATCH")
+    ) {
+      if (
+        request.method === "GET" &&
+        !reportActionAllowed(currentUser.role, "view_workflow")
+      )
+        return err("Not authorised", 403);
+      if (request.method === "PATCH" && currentUser.role !== "admin")
+        return err("Admin only", 403);
+      if (request.method === "GET") {
+        try {
+          const settings = await getDigestSettings(env);
+          return json({ settings, retention_days: 90 });
+        } catch (e) {
+          return err("Settings unavailable: " + e.message, 503);
+        }
+      }
+      try {
+        const body = await request.json();
+        const settings = await saveDigestSettings(env, {
+          send_time: body.send_time,
+          handler_emails: body.handler_emails,
+          manager_email: body.manager_email,
+          zero_estimate_email: body.zero_estimate_email,
+          include_terminal_claims: body.include_terminal_claims,
+        });
+        await audit(
+          env,
+          currentUser.email,
+          currentUser.name,
+          "update_digest_settings",
+          {},
+        );
+        return json({ ok: true, settings, retention_days: 90 });
+      } catch (e) {
+        return err("Settings could not be saved: " + e.message, 400);
+      }
     }
 
     // ── /claims — get latest extract ─────────────────────────
@@ -1742,6 +1922,15 @@ export default {
     const notesMatch = path.match(/^\/notes\/(.+)$/);
     if (notesMatch) {
       const claimNo = decodeURIComponent(notesMatch[1]);
+      try {
+        if (!(await canAccessClaimNote(env, claimNo, currentUser)))
+          return err("Not authorised", 403);
+      } catch (e) {
+        return err(
+          "Claim note access could not be verified: " + e.message,
+          503,
+        );
+      }
 
       if (request.method === "GET") {
         try {
@@ -1899,12 +2088,13 @@ export default {
         // Handler names that couldn't be resolved to an email — these claims
         // will be invisible to that handler's portal login and daily report.
         const unresolvedHandlers = new Set();
+        const handlerDirectory = (await getActiveHistoryUsers(env)).users;
 
         // Insert new claims in batches of 200
         const batchSize = 200;
         for (let i = 0; i < claims.length; i += batchSize) {
           const batch = claims.slice(i, i + batchSize).map((c) => {
-            const handlerEmail = resolveEmail(c.handler);
+            const handlerEmail = resolveEmail(c.handler, handlerDirectory);
             if (c.handler && !handlerEmail) unresolvedHandlers.add(c.handler);
             return {
               extract_date: date,
@@ -3033,37 +3223,60 @@ export default {
   },
 };
 
-// ── Handler email map ─────────────────────────────────────────
-// Exact-match only (previous behaviour) silently returned "" for any
-// spelling/spacing variant the Cardinal extract used — a claim then gets
-// stored with handler_email = "" and never shows up for that handler's
-// portal login or their daily report, with no error anywhere. Normalising
-// case/whitespace and falling back to a first-name match closes that gap.
-function resolveEmail(handlerName) {
-  if (!handlerName) return "";
-  const map = {
-    "Sarah Dzumba": "sarah@smartsure2020.co.za",
-    "Naledi Moletsane": "naledi@smartsure2020.co.za",
-    Lucky: "lucky@smartsure2020.co.za",
-    "Juan-Paul Van Der Merwe": "juan-paul@smartsure2020.co.za",
-    "Juan-Paul": "juan-paul@smartsure2020.co.za",
-    "Beverly De Beer": "bev@smartsure2020.co.za",
-    "De Beer Bev": "bev@smartsure2020.co.za",
-  };
+// ── Handler email resolution ─────────────────────────────────
+// Handler identity is sourced from the active Scout user directory. No
+// individual production names or email addresses are embedded in the Worker.
+function handlerIdentityKey(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "");
+}
 
-  const normalise = (s) => s.trim().replace(/\s+/g, " ").toLowerCase();
-  const target = normalise(handlerName);
+function handlerIdentityTokens(value) {
+  return String(value || "")
+    .normalize("NFKC")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
 
-  const normalisedMap = {};
-  for (const [name, email] of Object.entries(map))
-    normalisedMap[normalise(name)] = email;
-  if (normalisedMap[target]) return normalisedMap[target];
+function handlerIdentityFirstToken(value) {
+  return (
+    String(value || "")
+      .normalize("NFKC")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean)[0] || ""
+  );
+}
 
-  // Fallback: match on first name/token (e.g. "Lucky Mahlangu" -> "lucky")
-  const firstToken = target.split(" ")[0];
-  for (const [name, email] of Object.entries(normalisedMap)) {
-    if (name.split(" ")[0] === firstToken) return email;
-  }
+function resolveEmail(handlerName, users = []) {
+  const targetKey = handlerIdentityKey(handlerName);
+  const targetTokens = handlerIdentityTokens(handlerName);
+  if (!targetKey) return "";
+  const candidates = users.filter(
+    (user) => user?.active !== false && user?.email,
+  );
+  const exact = candidates.filter((user) =>
+    [user.display_name, user.email].some(
+      (value) => handlerIdentityKey(value) === targetKey,
+    ),
+  );
+  if (exact.length === 1) return String(exact[0].email).toLowerCase();
 
-  return "";
+  const reordered = candidates.filter(
+    (user) => handlerIdentityTokens(user.display_name) === targetTokens,
+  );
+  if (reordered.length === 1) return String(reordered[0].email).toLowerCase();
+
+  const firstToken = handlerIdentityFirstToken(handlerName);
+  const firstNameMatches = candidates.filter(
+    (user) => handlerIdentityFirstToken(user.display_name) === firstToken,
+  );
+  return firstNameMatches.length === 1
+    ? String(firstNameMatches[0].email).toLowerCase()
+    : "";
 }
