@@ -1,3 +1,13 @@
+// IMPORTANT PRODUCTION DEPLOYMENT NOTE:
+//
+// Do not use ordinary `wrangler deploy` for `scout-backend`
+// while Wrangler cannot safely model the live
+// observability.redact_query_string setting.
+//
+// Use SCOUT_PRODUCTION_DEPLOYMENT.md and the proven
+// Cloudflare Version Upload -> strict inheritance ->
+// 0% override acceptance -> 100% deployment process.
+
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "scout-backend",
