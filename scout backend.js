@@ -62,6 +62,7 @@ import {
   buildHistoryClaimRecords,
   historyFailureInfo,
   historyFailurePatch,
+  historyAmbiguousIdentityKey,
   withHistoryDeadline,
   persistHistoryEvidenceWithStore,
   HISTORY_BATCH_SIZE,
@@ -150,6 +151,17 @@ function json(data, status = 200) {
 
 function err(msg, status = 400) {
   return json({ error: msg }, status);
+}
+
+function noteNotificationId(idempotencyKey) {
+  const candidate = String(idempotencyKey ?? "").trim();
+  if (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      candidate,
+    )
+  )
+    return candidate;
+  return globalThis.crypto.randomUUID();
 }
 
 // ── Supabase helpers ─────────────────────────────────────────
@@ -274,83 +286,56 @@ async function getActiveHistoryUsers(env) {
   }
 }
 
-async function ensureHistoryClaimEntity(env, snapshot) {
-  const record = {
-    source_system: DEFAULT_SOURCE_SYSTEM,
-    source_claim_number: snapshot.source_claim_number,
-    identity_key: snapshot.identity_key,
-    identity_confidence: snapshot.identity_confidence,
-    identity_matchable: snapshot.identity_matchable,
-    identity_note: snapshot.identity_matchable
-      ? null
-      : "Source claim number is ambiguous within this extract",
-  };
-  if (snapshot.identity_matchable && snapshot.identity_key) {
-    const inserted = await supabase(
-      env,
-      "/scout_history_claims?on_conflict=identity_key",
-      "POST",
-      record,
-      true,
-      "resolution=ignore-duplicates,return=representation",
-    );
-    if (inserted?.[0]?.id) return inserted[0].id;
-    const existing = await supabase(
-      env,
-      "/scout_history_claims?identity_key=eq." +
-        encodeURIComponent(snapshot.identity_key) +
-        "&select=id&limit=1",
-      "GET",
-      null,
-      true,
-    );
-    if (existing?.[0]?.id) return existing[0].id;
-    throw new Error(
-      "Historical claim identity could not be resolved after idempotent insert",
-    );
-  }
-  const inserted = await supabase(
-    env,
-    "/scout_history_claims",
-    "POST",
-    record,
-    true,
-    "return=representation",
-  );
-  if (!inserted?.[0]?.id)
-    throw new Error(
-      "Historical ambiguous claim identity insert returned no id",
-    );
-  return inserted[0].id;
-}
-
-async function ensureHistoryClaimIds(env, snapshots, existingByRow) {
+async function ensureHistoryClaimIds(env, snapshots, existingByRow, extractId) {
   const claimIds = new Map(existingByRow || []);
   const pending = snapshots.filter(
     (snapshot) => !claimIds.has(snapshot.source_row_identity),
   );
   const matchableRecords = buildHistoryClaimRecords(pending);
+  const ambiguousRecords = pending
+    .filter(
+      (snapshot) => !snapshot.identity_matchable || !snapshot.identity_key,
+    )
+    .map((snapshot) => {
+      const identityKey = historyAmbiguousIdentityKey(
+        extractId,
+        snapshot.source_row_identity,
+      );
+      if (!identityKey)
+        throw new Error(
+          "Historical claim identity requires a source row identity for retry-safe persistence",
+        );
+      return {
+        source_system: DEFAULT_SOURCE_SYSTEM,
+        source_claim_number: snapshot.source_claim_number,
+        identity_key: identityKey,
+        identity_confidence: snapshot.identity_confidence,
+        identity_matchable: false,
+        identity_note: "Source claim number is ambiguous within this extract",
+      };
+    });
+  const claimRecords = [...matchableRecords, ...ambiguousRecords];
 
   // The previous implementation performed one sequential REST write per
-  // matchable row. A 300+ claim upload could therefore be terminated after
-  // its manifest was created but before any durable child row existed. Batch
-  // the idempotent identity upserts, then resolve their IDs in bounded reads.
+  // claim row. A 300+ claim upload could therefore be terminated after its
+  // manifest was created but before any durable child row existed. Batch the
+  // idempotent identity upserts, then resolve their IDs in bounded reads.
   for (
     let index = 0;
-    index < matchableRecords.length;
+    index < claimRecords.length;
     index += HISTORY_BATCH_SIZE
   ) {
     await supabase(
       env,
       "/scout_history_claims?on_conflict=identity_key",
       "POST",
-      matchableRecords.slice(index, index + HISTORY_BATCH_SIZE),
+      claimRecords.slice(index, index + HISTORY_BATCH_SIZE),
       true,
       "resolution=ignore-duplicates,return=representation",
     );
   }
 
-  const identityKeys = matchableRecords.map((record) => record.identity_key);
+  const identityKeys = claimRecords.map((record) => record.identity_key);
   const resolvedByIdentity = new Map();
   for (
     let index = 0;
@@ -372,21 +357,16 @@ async function ensureHistoryClaimIds(env, snapshots, existingByRow) {
   }
 
   for (const snapshot of pending) {
-    if (snapshot.identity_matchable && snapshot.identity_key) {
-      const claimId = resolvedByIdentity.get(snapshot.identity_key);
-      if (!claimId)
-        throw new Error(
-          "Historical claim identity could not be resolved after batched insert",
-        );
-      claimIds.set(snapshot.source_row_identity, claimId);
-    } else {
-      // Ambiguous rows intentionally remain separate. They have no stable
-      // identity key and must not be guessed into an existing claim entity.
-      claimIds.set(
-        snapshot.source_row_identity,
-        await ensureHistoryClaimEntity(env, snapshot),
+    const identityKey =
+      snapshot.identity_matchable && snapshot.identity_key
+        ? snapshot.identity_key
+        : historyAmbiguousIdentityKey(extractId, snapshot.source_row_identity);
+    const claimId = resolvedByIdentity.get(identityKey);
+    if (!claimId)
+      throw new Error(
+        "Historical claim identity could not be resolved after batched insert",
       );
-    }
+    claimIds.set(snapshot.source_row_identity, claimId);
   }
   return claimIds;
 }
@@ -409,41 +389,27 @@ async function persistHistoricalEvidence(
             "&select=source_row_identity,claim_id",
           true,
         ),
-      ensureClaimIds: (snapshots, existingByRow) =>
-        ensureHistoryClaimIds(env, snapshots, existingByRow),
-      insertSnapshots: async (snapshotRows) => {
-        for (
-          let index = 0;
-          index < snapshotRows.length;
-          index += HISTORY_BATCH_SIZE
-        ) {
-          await supabase(
-            env,
-            "/scout_history_snapshots",
-            "POST",
-            snapshotRows.slice(index, index + HISTORY_BATCH_SIZE),
-            true,
-            "resolution=ignore-duplicates,return=representation",
-          );
-        }
-      },
+      ensureClaimIds: (snapshots, existingByRow, extractId) =>
+        ensureHistoryClaimIds(env, snapshots, existingByRow, extractId),
+      insertSnapshots: (snapshotRows) =>
+        supabase(
+          env,
+          "/scout_history_snapshots",
+          "POST",
+          snapshotRows,
+          true,
+          "resolution=ignore-duplicates,return=representation",
+        ),
       listSnapshots: (extractId) => getHistorySnapshots(env, extractId),
-      insertChanges: async (changes) => {
-        for (
-          let index = 0;
-          index < changes.length;
-          index += HISTORY_BATCH_SIZE
-        ) {
-          await supabase(
-            env,
-            "/scout_history_changes",
-            "POST",
-            changes.slice(index, index + HISTORY_BATCH_SIZE),
-            true,
-            "resolution=ignore-duplicates,return=representation",
-          );
-        }
-      },
+      insertChanges: (changes) =>
+        supabase(
+          env,
+          "/scout_history_changes",
+          "POST",
+          changes,
+          true,
+          "resolution=ignore-duplicates,return=representation",
+        ),
     },
   });
 }
@@ -2127,7 +2093,7 @@ export default {
 
       if (request.method === "PUT") {
         try {
-          const { note } = await request.json();
+          const { note, idempotencyKey } = await request.json();
           const record = {
             claim_no: claimNo,
             note: String(note || "").trim(),
@@ -2161,6 +2127,7 @@ export default {
                 claimNumber: claimNo,
                 actor: context.actor,
                 recipient: context.recipient.user,
+                notificationId: noteNotificationId(idempotencyKey),
               });
               if (record) {
                 const rows = await supabase(
@@ -2169,23 +2136,30 @@ export default {
                   "POST",
                   record,
                   true,
-                  "return=representation",
+                  "resolution=ignore-duplicates,return=representation",
                 );
-                notification = {
-                  status: "created",
-                  id: rows?.[0]?.id || null,
-                };
-                await audit(
-                  env,
-                  currentUser.email,
-                  currentUser.name,
-                  "create_claim_note_notification",
-                  {
-                    claim_number: claimNo,
-                    notification_id: rows?.[0]?.id || null,
-                    recipient_user_id: record.recipient_user_id,
-                  },
-                );
+                if (rows?.[0]?.id) {
+                  notification = {
+                    status: "created",
+                    id: rows[0].id,
+                  };
+                  await audit(
+                    env,
+                    currentUser.email,
+                    currentUser.name,
+                    "create_claim_note_notification",
+                    {
+                      claim_number: claimNo,
+                      notification_id: rows[0].id,
+                      recipient_user_id: record.recipient_user_id,
+                    },
+                  );
+                } else {
+                  notification = {
+                    status: "deduplicated",
+                    id: record.id || null,
+                  };
+                }
               } else {
                 notification = {
                   status: "unresolved",

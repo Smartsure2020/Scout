@@ -7968,18 +7968,28 @@ async function saveDetailNote(claimNo) {
   status.className = "detail-note-status";
 
   try {
+    const noteValue = ta.value.trim();
+    const idempotencyKey =
+      btn.dataset.noteIdempotencyNote === noteValue &&
+      btn.dataset.noteIdempotencyKey
+        ? btn.dataset.noteIdempotencyKey
+        : crypto.randomUUID();
+    btn.dataset.noteIdempotencyNote = noteValue;
+    btn.dataset.noteIdempotencyKey = idempotencyKey;
     const res = await fetch(CONFIG.backendUrl + "/notes/" + encodeURIComponent(claimNo), {
       method: "PUT",
       headers: {
         Authorization: "Bearer " + currentUser.msToken,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ note: ta.value.trim() }),
+      body: JSON.stringify({ note: noteValue, idempotencyKey }),
     });
     if (!res.ok) throw new Error();
     const data = await res.json();
     status.textContent = "Saved · " + (data.savedBy || currentUser.name || "You");
     status.className = "detail-note-status ok";
+    delete btn.dataset.noteIdempotencyNote;
+    delete btn.dataset.noteIdempotencyKey;
     showScoutToast("Claim note saved");
   } catch {
     status.textContent = "Failed to save";

@@ -8,6 +8,13 @@ const COMPLETED_HISTORY_STATUSES = new Set([
   "rejected",
 ]);
 
+export function historyAmbiguousIdentityKey(extractId, sourceRowIdentity) {
+  const extract = String(extractId ?? "").trim();
+  const row = String(sourceRowIdentity ?? "").trim();
+  if (!extract || !row) return null;
+  return `ambiguous:${extract}:${row}`;
+}
+
 export function tagHistoryPersistenceError(error, operation) {
   const tagged = error instanceof Error ? error : new Error(String(error));
   if (!tagged.historyOperation && operation) {
@@ -146,6 +153,13 @@ export function buildHistorySnapshotRows(snapshots, extractId, claimIds) {
   });
 }
 
+async function insertHistoryBatches(operation, rows, writer) {
+  for (let index = 0; index < rows.length; index += HISTORY_BATCH_SIZE) {
+    const batch = rows.slice(index, index + HISTORY_BATCH_SIZE);
+    await withHistoryOperation(operation, () => writer(batch));
+  }
+}
+
 export async function persistHistoryEvidenceWithStore({
   store,
   manifest,
@@ -163,7 +177,7 @@ export async function persistHistoryEvidenceWithStore({
     ...snapshot,
   }));
   const claimIds = await withHistoryOperation("claim_identity_resolution", () =>
-    store.ensureClaimIds(snapshots, existingByRow),
+    store.ensureClaimIds(snapshots, existingByRow, manifest.id),
   );
   const snapshotRows = buildHistorySnapshotRows(
     snapshots,
@@ -176,8 +190,8 @@ export async function persistHistoryEvidenceWithStore({
       "claim_identity_resolution",
     );
   }
-  await withHistoryOperation("snapshot_insert", () =>
-    store.insertSnapshots(snapshotRows),
+  await insertHistoryBatches("snapshot_insert", snapshotRows, (batch) =>
+    store.insertSnapshots(batch),
   );
 
   const currentSnapshots = await withHistoryOperation("snapshot_readback", () =>
@@ -203,8 +217,8 @@ export async function persistHistoryEvidenceWithStore({
       change.change_type,
     ].join("|"),
   }));
-  await withHistoryOperation("change_insert", () =>
-    store.insertChanges(changes),
+  await insertHistoryBatches("change_insert", changes, (batch) =>
+    store.insertChanges(batch),
   );
   return {
     snapshotCount: currentSnapshots.length,

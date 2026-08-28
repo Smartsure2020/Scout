@@ -4,12 +4,14 @@ import test from "node:test";
 import { normalizeHistoricalRows } from "./history.mjs";
 import {
   buildHistoryClaimRecords,
+  historyAmbiguousIdentityKey,
   historyFailureInfo,
   historyFailurePatch,
   historyRecoveryDecision,
   persistHistoryEvidenceWithStore,
   withHistoryDeadline,
 } from "./history-persistence.mjs";
+import { selectBoundaryExtract } from "./reporting-metrics.mjs";
 
 const activeUsers = [
   {
@@ -93,13 +95,20 @@ function manifest(id, qualitySummary = {}) {
   };
 }
 
-function memoryStore(failOperation = null) {
+function memoryStore(options = null) {
+  const config =
+    typeof options === "string" ? { failOperation: options } : options || {};
   const claims = new Map();
   const snapshots = new Map();
   const changes = new Map();
   let nextClaimId = 1;
+  const calls = { snapshot_insert: 0, change_insert: 0 };
   const fail = (operation) => {
-    if (failOperation === operation)
+    calls[operation] += 1;
+    if (
+      config.failOperation === operation &&
+      (!config.failOnCall || config.failOnCall === calls[operation])
+    )
       throw new Error(`test ${operation} failure`);
   };
 
@@ -112,11 +121,14 @@ function memoryStore(failOperation = null) {
         (row) => row.extract_id === extractId,
       );
     },
-    async ensureClaimIds(rows, existingByRow) {
+    async ensureClaimIds(rows, existingByRow, extractId) {
       const result = new Map(existingByRow);
       for (const row of rows) {
         if (result.has(row.source_row_identity)) continue;
-        const key = row.identity_key || `ambiguous:${row.source_row_identity}`;
+        const key =
+          row.identity_key ||
+          historyAmbiguousIdentityKey(extractId, row.source_row_identity);
+        if (!key) throw new Error("test row has no retry identity");
         if (!claims.has(key)) claims.set(key, `claim-${nextClaimId++}`);
         result.set(row.source_row_identity, claims.get(key));
       }
@@ -135,6 +147,11 @@ function memoryStore(failOperation = null) {
     async insertChanges(rows) {
       fail("change_insert");
       for (const row of rows) changes.set(row.dedupe_key, row);
+    },
+    calls,
+    setFailure(failOperation, failOnCall = null) {
+      config.failOperation = failOperation;
+      config.failOnCall = failOnCall;
     },
   };
 }
@@ -275,6 +292,89 @@ test("retry is idempotent after a partial write and does not create duplicate id
   assert.equal(store.changes.size, 1);
 });
 
+test("a later batch failure retries without duplicate identities or evidence", async () => {
+  const store = memoryStore({
+    failOperation: "snapshot_insert",
+    failOnCall: 2,
+  });
+  const current = manifest("extract-later-batch", {
+    comparable_to_previous: false,
+  });
+  const normalized = {
+    snapshots: Array.from({ length: 401 }, (_, index) =>
+      snapshot({
+        row: `row-${index}`,
+        claim: `C-${index}`,
+        matchable: index !== 250,
+      }),
+    ),
+  };
+
+  await assert.rejects(
+    persistHistoryEvidenceWithStore({
+      store,
+      manifest: current,
+      normalized,
+      quality: current.quality_summary,
+    }),
+    (error) => error.historyOperation === "snapshot_insert",
+  );
+  assert.equal(store.snapshots.size, 200);
+  assert.equal(store.claims.size, 401);
+
+  store.setFailure(null);
+  const retry = await persistHistoryEvidenceWithStore({
+    store,
+    manifest: current,
+    normalized,
+    quality: current.quality_summary,
+  });
+  assert.equal(retry.snapshotCount, 401);
+  assert.equal(retry.changeCount, 400);
+  assert.equal(store.claims.size, 401);
+  assert.equal(store.snapshots.size, 401);
+  assert.equal(store.changes.size, 400);
+  assert.equal(store.calls.snapshot_insert, 5);
+  assert.equal(store.calls.change_insert, 2);
+});
+
+test("311-claim persistence stays bounded and reaches an accepted usable state", async () => {
+  const store = memoryStore();
+  const current = manifest("extract-311", { comparable_to_previous: false });
+  const normalized = {
+    snapshots: Array.from({ length: 311 }, (_, index) =>
+      snapshot({
+        row: `row-${index}`,
+        claim: `C-${index}`,
+      }),
+    ),
+  };
+
+  const persisted = await persistHistoryEvidenceWithStore({
+    store,
+    manifest: current,
+    normalized,
+    quality: current.quality_summary,
+  });
+  const finalManifest = {
+    ...current,
+    status: "accepted",
+    historical_persisted: true,
+    current_state_updated: true,
+  };
+
+  assert.equal(persisted.snapshotCount, 311);
+  assert.equal(persisted.changeCount, 311);
+  assert.equal(store.claims.size, 311);
+  assert.equal(store.snapshots.size, 311);
+  assert.equal(store.changes.size, 311);
+  assert.equal(store.calls.snapshot_insert, 2);
+  assert.equal(store.calls.change_insert, 2);
+  assert.equal(finalManifest.status, "accepted");
+  assert.equal(finalManifest.historical_persisted, true);
+  assert.equal(finalManifest.current_state_updated, true);
+});
+
 test("history persistence failures become safe terminal metadata with an operation", async () => {
   const store = memoryStore("snapshot_insert");
   let error;
@@ -306,13 +406,63 @@ test("history persistence failures become safe terminal metadata with an operati
 });
 
 test("persistence has a deadline before a Worker execution limit can leave processing ambiguous", async () => {
-  await assert.rejects(
-    withHistoryDeadline(() => new Promise(() => {}), 5),
-    (error) => {
-      assert.equal(error.historyOperation, "persistence_deadline");
-      assert.equal(historyFailureInfo(error).code, "execution_limit");
-      return true;
-    },
+  const store = memoryStore();
+  const insertSnapshots = store.insertSnapshots;
+  store.insertSnapshots = async (rows) => {
+    if (store.calls.snapshot_insert > 0) {
+      store.calls.snapshot_insert += 1;
+      return new Promise(() => {});
+    }
+    return insertSnapshots(rows);
+  };
+  const current = manifest("deadline-extract", {
+    comparable_to_previous: false,
+  });
+  const normalized = {
+    snapshots: Array.from({ length: 401 }, (_, index) =>
+      snapshot({ row: `row-${index}`, claim: `C-${index}` }),
+    ),
+  };
+
+  let error;
+  try {
+    await withHistoryDeadline(
+      () =>
+        persistHistoryEvidenceWithStore({
+          store,
+          manifest: current,
+          normalized,
+          quality: current.quality_summary,
+        }),
+      100,
+    );
+    assert.fail("expected deadline");
+  } catch (caught) {
+    error = caught;
+  }
+  assert.equal(error.historyOperation, "persistence_deadline");
+  assert.equal(historyFailureInfo(error).code, "execution_limit");
+  assert.equal(store.calls.snapshot_insert, 2);
+  assert.equal(store.snapshots.size, 200);
+
+  const failedManifest = {
+    id: "deadline-extract",
+    source_system: "cardinal_claims",
+    received_at: "2026-08-27T12:00:00.000Z",
+    status: "processing",
+    ...historyFailurePatch(
+      { quality_state: "ok" },
+      error,
+      "history_persistence",
+    ),
+  };
+  assert.equal(failedManifest.status, "partial_failure");
+  assert.equal(failedManifest.historical_persisted, false);
+  assert.equal(failedManifest.current_state_updated, false);
+  assert.equal(
+    selectBoundaryExtract([failedManifest], "2026-08-28T00:00:00.000Z")
+      .manifest,
+    null,
   );
 });
 

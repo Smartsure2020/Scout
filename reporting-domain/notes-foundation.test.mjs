@@ -15,6 +15,10 @@ const migration = fs.readFileSync(
   "utf8",
 );
 const backend = fs.readFileSync(path.join(root, "scout backend.js"), "utf8");
+const claimsUi = fs.readFileSync(
+  path.join(root, "scout-smartsure", "claims", "index.html"),
+  "utf8",
+);
 
 test("notes migration implements the existing one-note-per-claim service contract", () => {
   assert.match(
@@ -40,4 +44,18 @@ test("notes API remains claim-authorized and uses only the contract columns", ()
   assert.match(backend, /scout_notes\?on_conflict=claim_no/);
   assert.match(backend, /saved_by: currentUser\.name \|\| currentUser\.email/);
   assert.match(backend, /saved_at: new Date\(\)\.toISOString\(\)/);
+  assert.match(
+    backend,
+    /const \{ note, idempotencyKey \} = await request\.json\(\)/,
+  );
+  assert.match(backend, /notificationId: noteNotificationId\(idempotencyKey\)/);
+  assert.match(
+    backend,
+    /"\/scout_notifications",\s*"POST",\s*record,\s*true,\s*"resolution=ignore-duplicates,return=representation"/,
+  );
+  assert.match(claimsUi, /noteIdempotencyKey/);
+  assert.match(
+    claimsUi,
+    /JSON\.stringify\(\{ note: noteValue, idempotencyKey \}\)/,
+  );
 });
