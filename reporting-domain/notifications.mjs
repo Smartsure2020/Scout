@@ -6,6 +6,8 @@ import {
 } from "./roles.mjs";
 
 export const CLAIM_NOTE_NOTIFICATION_TYPE = "claim_note_added";
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function normalizeDisplayValue(value) {
   return String(value ?? "")
@@ -20,6 +22,11 @@ function safeText(value, maxLength) {
     .replace(/[\u0000-\u001f\u007f]/g, "")
     .replace(/\s+/g, " ")
     .slice(0, maxLength);
+}
+
+function safeNotificationId(value) {
+  const candidate = String(value ?? "").trim();
+  return UUID_PATTERN.test(candidate) ? candidate : null;
 }
 
 export function notificationIdentityValue(user) {
@@ -100,6 +107,7 @@ export function buildClaimNoteNotification({
   actor,
   recipient,
   createdAt = null,
+  notificationId = null,
 }) {
   const safeClaimNumber = safeText(claimNumber, 120);
   const recipientUserId = notificationIdentityValue(recipient);
@@ -110,7 +118,9 @@ export function buildClaimNoteNotification({
   const actorDisplayName =
     safeText(actor?.displayName ?? actor?.display_name ?? actor?.name, 120) ||
     "A Scout user";
+  const safeId = safeNotificationId(notificationId);
   return {
+    ...(safeId ? { id: safeId } : {}),
     recipient_user_id: recipientUserId,
     actor_user_id: actorUserId,
     actor_display_name: actorDisplayName,

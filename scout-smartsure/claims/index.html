@@ -7156,6 +7156,8 @@ function handleFileUpload(file) {
       const backendResult = await saveExtractToBackend(processed, file.name, historyResult.entry);
       if (backendResult.ok) {
         status.textContent = `Upload completed and server history saved (${backendResult.data.claimsStored || claims.length} claims).`;
+      } else if (backendResult.data?.history?.status === "partial_failure") {
+        status.textContent = "Upload not completed: server history is recorded as a retryable failure and current claims were not changed. Retry the same source.";
       } else {
         status.textContent = "Upload failed: server history was not saved. No local browser copy is being treated as the source of truth.";
       }
@@ -7546,6 +7548,7 @@ async function saveExtractToBackend(processedClaims, fileName, extractMeta = nul
   }
   const extractDate = extractMeta?.extractDate || new Date().toISOString().split("T")[0];
   const extractId = extractMeta?.id || `${extractDate}-${Date.now()}`;
+  let responseData = null;
   try {
     const res = await fetch(CONFIG.backendUrl + "/upload", {
       method: "POST",
@@ -7569,6 +7572,7 @@ async function saveExtractToBackend(processedClaims, fileName, extractMeta = nul
       }),
     });
     const data = await res.json();
+    responseData = data;
     if (!res.ok || !data.success) {
       throw new Error(data.error || "Server rejected the extract");
     }
@@ -7578,7 +7582,7 @@ async function saveExtractToBackend(processedClaims, fileName, extractMeta = nul
     return { ok: true, data };
   } catch(e) {
     console.warn("Backend save failed:", e);
-    return { ok: false, data: null, error: e };
+    return { ok: false, data: responseData, error: e };
   }
 }
 
@@ -7964,18 +7968,28 @@ async function saveDetailNote(claimNo) {
   status.className = "detail-note-status";
 
   try {
+    const noteValue = ta.value.trim();
+    const idempotencyKey =
+      btn.dataset.noteIdempotencyNote === noteValue &&
+      btn.dataset.noteIdempotencyKey
+        ? btn.dataset.noteIdempotencyKey
+        : crypto.randomUUID();
+    btn.dataset.noteIdempotencyNote = noteValue;
+    btn.dataset.noteIdempotencyKey = idempotencyKey;
     const res = await fetch(CONFIG.backendUrl + "/notes/" + encodeURIComponent(claimNo), {
       method: "PUT",
       headers: {
         Authorization: "Bearer " + currentUser.msToken,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ note: ta.value.trim() }),
+      body: JSON.stringify({ note: noteValue, idempotencyKey }),
     });
     if (!res.ok) throw new Error();
     const data = await res.json();
     status.textContent = "Saved · " + (data.savedBy || currentUser.name || "You");
     status.className = "detail-note-status ok";
+    delete btn.dataset.noteIdempotencyNote;
+    delete btn.dataset.noteIdempotencyKey;
     showScoutToast("Claim note saved");
   } catch {
     status.textContent = "Failed to save";

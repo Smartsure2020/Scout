@@ -12,7 +12,6 @@
 
 import {
   assessExtractQuality,
-  buildObservedChanges,
   computeSourceChecksum,
   DEFAULT_SOURCE_SYSTEM,
   HISTORY_SCHEMA_VERSION,
@@ -59,6 +58,15 @@ import {
   resolveClaimNoteRecipient,
   resolveNotificationActor,
 } from "./reporting-domain/notifications.mjs";
+import {
+  buildHistoryClaimRecords,
+  historyFailureInfo,
+  historyFailurePatch,
+  historyAmbiguousIdentityKey,
+  withHistoryDeadline,
+  persistHistoryEvidenceWithStore,
+  HISTORY_BATCH_SIZE,
+} from "./reporting-domain/history-persistence.mjs";
 
 const CORS = {
   // The Claims portal is served by the dedicated frontend Worker. Keep the
@@ -143,6 +151,17 @@ function json(data, status = 200) {
 
 function err(msg, status = 400) {
   return json({ error: msg }, status);
+}
+
+function noteNotificationId(idempotencyKey) {
+  const candidate = String(idempotencyKey ?? "").trim();
+  if (
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      candidate,
+    )
+  )
+    return candidate;
+  return globalThis.crypto.randomUUID();
 }
 
 // ── Supabase helpers ─────────────────────────────────────────
@@ -267,138 +286,132 @@ async function getActiveHistoryUsers(env) {
   }
 }
 
-async function ensureHistoryClaimEntity(env, snapshot) {
-  const record = {
-    source_system: DEFAULT_SOURCE_SYSTEM,
-    source_claim_number: snapshot.source_claim_number,
-    identity_key: snapshot.identity_key,
-    identity_confidence: snapshot.identity_confidence,
-    identity_matchable: snapshot.identity_matchable,
-    identity_note: snapshot.identity_matchable
-      ? null
-      : "Source claim number is ambiguous within this extract",
-  };
-  if (snapshot.identity_matchable && snapshot.identity_key) {
-    const inserted = await supabase(
+async function ensureHistoryClaimIds(env, snapshots, existingByRow, extractId) {
+  const claimIds = new Map(existingByRow || []);
+  const pending = snapshots.filter(
+    (snapshot) => !claimIds.has(snapshot.source_row_identity),
+  );
+  const matchableRecords = buildHistoryClaimRecords(pending);
+  const ambiguousRecords = pending
+    .filter(
+      (snapshot) => !snapshot.identity_matchable || !snapshot.identity_key,
+    )
+    .map((snapshot) => {
+      const identityKey = historyAmbiguousIdentityKey(
+        extractId,
+        snapshot.source_row_identity,
+      );
+      if (!identityKey)
+        throw new Error(
+          "Historical claim identity requires a source row identity for retry-safe persistence",
+        );
+      return {
+        source_system: DEFAULT_SOURCE_SYSTEM,
+        source_claim_number: snapshot.source_claim_number,
+        identity_key: identityKey,
+        identity_confidence: snapshot.identity_confidence,
+        identity_matchable: false,
+        identity_note: "Source claim number is ambiguous within this extract",
+      };
+    });
+  const claimRecords = [...matchableRecords, ...ambiguousRecords];
+
+  // The previous implementation performed one sequential REST write per
+  // claim row. A 300+ claim upload could therefore be terminated after its
+  // manifest was created but before any durable child row existed. Batch the
+  // idempotent identity upserts, then resolve their IDs in bounded reads.
+  for (
+    let index = 0;
+    index < claimRecords.length;
+    index += HISTORY_BATCH_SIZE
+  ) {
+    await supabase(
       env,
       "/scout_history_claims?on_conflict=identity_key",
       "POST",
-      record,
+      claimRecords.slice(index, index + HISTORY_BATCH_SIZE),
       true,
       "resolution=ignore-duplicates,return=representation",
     );
-    if (inserted?.[0]?.id) return inserted[0].id;
-    const existing = await supabase(
+  }
+
+  const identityKeys = claimRecords.map((record) => record.identity_key);
+  const resolvedByIdentity = new Map();
+  for (
+    let index = 0;
+    index < identityKeys.length;
+    index += HISTORY_BATCH_SIZE
+  ) {
+    const batch = identityKeys.slice(index, index + HISTORY_BATCH_SIZE);
+    const rows = await supabaseAll(
       env,
-      "/scout_history_claims?identity_key=eq." +
-        encodeURIComponent(snapshot.identity_key) +
-        "&select=id&limit=1",
-      "GET",
-      null,
+      "/scout_history_claims?identity_key=in.(" +
+        batch.map((key) => encodeURIComponent(key)).join(",") +
+        ")&select=id,identity_key",
       true,
     );
-    if (existing?.[0]?.id) return existing[0].id;
-    throw new Error(
-      "Historical claim identity could not be resolved after idempotent insert",
-    );
+    for (const row of rows) {
+      if (row.identity_key && row.id)
+        resolvedByIdentity.set(row.identity_key, row.id);
+    }
   }
-  const inserted = await supabase(
-    env,
-    "/scout_history_claims",
-    "POST",
-    record,
-    true,
-    "return=representation",
-  );
-  if (!inserted?.[0]?.id)
-    throw new Error(
-      "Historical ambiguous claim identity insert returned no id",
-    );
-  return inserted[0].id;
+
+  for (const snapshot of pending) {
+    const identityKey =
+      snapshot.identity_matchable && snapshot.identity_key
+        ? snapshot.identity_key
+        : historyAmbiguousIdentityKey(extractId, snapshot.source_row_identity);
+    const claimId = resolvedByIdentity.get(identityKey);
+    if (!claimId)
+      throw new Error(
+        "Historical claim identity could not be resolved after batched insert",
+      );
+    claimIds.set(snapshot.source_row_identity, claimId);
+  }
+  return claimIds;
 }
 
 async function persistHistoricalEvidence(
   env,
   { manifest, previousManifest, normalized, quality },
 ) {
-  const existingRows = await supabaseAll(
-    env,
-    "/scout_history_snapshots?extract_id=eq." +
-      encodeURIComponent(manifest.id) +
-      "&select=source_row_identity,claim_id",
-    true,
-  );
-  const existingByRow = new Map(
-    existingRows.map((row) => [row.source_row_identity, row.claim_id]),
-  );
-  const snapshotRows = [];
-  for (const snapshot of normalized.snapshots) {
-    const existingClaimId = existingByRow.get(snapshot.source_row_identity);
-    const claimId =
-      existingClaimId || (await ensureHistoryClaimEntity(env, snapshot));
-    snapshot.claim_id = claimId;
-    const {
-      identity_key: _identityKey,
-      identity_confidence: _identityConfidence,
-      identity_matchable: _identityMatchable,
-      _raw_source: _rawSource,
-      _evaluation: _evaluation,
-      _row_status: _rowStatus,
-      movement_source_value: _movementSourceValue,
-      ...row
-    } = snapshot;
-    snapshotRows.push({
-      ...row,
-      extract_id: manifest.id,
-      identity_key: snapshot.identity_key,
-      identity_matchable: snapshot.identity_matchable,
-      identity_confidence: snapshot.identity_confidence,
-    });
-  }
-  for (let index = 0; index < snapshotRows.length; index += 200) {
-    await supabase(
-      env,
-      "/scout_history_snapshots",
-      "POST",
-      snapshotRows.slice(index, index + 200),
-      true,
-      "resolution=ignore-duplicates,return=representation",
-    );
-  }
-
-  const currentSnapshots = await getHistorySnapshots(env, manifest.id);
-  const previousSnapshots = previousManifest
-    ? await getHistorySnapshots(env, previousManifest.id)
-    : [];
-  const currentManifest = { ...manifest, quality_summary: quality };
-  const changes = buildObservedChanges(
+  return persistHistoryEvidenceWithStore({
+    manifest,
     previousManifest,
-    previousSnapshots,
-    currentManifest,
-    currentSnapshots,
-  ).map((change) => ({
-    ...change,
-    dedupe_key: [
-      change.source_extract_id,
-      change.claim_id,
-      change.previous_extract_id || "none",
-      change.change_type,
-    ].join("|"),
-  }));
-  for (let index = 0; index < changes.length; index += 200) {
-    await supabase(
-      env,
-      "/scout_history_changes",
-      "POST",
-      changes.slice(index, index + 200),
-      true,
-      "resolution=ignore-duplicates,return=representation",
-    );
-  }
-  return {
-    snapshotCount: currentSnapshots.length,
-    changeCount: changes.length,
-  };
+    normalized,
+    quality,
+    store: {
+      listExistingSnapshots: (extractId) =>
+        supabaseAll(
+          env,
+          "/scout_history_snapshots?extract_id=eq." +
+            encodeURIComponent(extractId) +
+            "&select=source_row_identity,claim_id",
+          true,
+        ),
+      ensureClaimIds: (snapshots, existingByRow, extractId) =>
+        ensureHistoryClaimIds(env, snapshots, existingByRow, extractId),
+      insertSnapshots: (snapshotRows) =>
+        supabase(
+          env,
+          "/scout_history_snapshots",
+          "POST",
+          snapshotRows,
+          true,
+          "resolution=ignore-duplicates,return=representation",
+        ),
+      listSnapshots: (extractId) => getHistorySnapshots(env, extractId),
+      insertChanges: (changes) =>
+        supabase(
+          env,
+          "/scout_history_changes",
+          "POST",
+          changes,
+          true,
+          "resolution=ignore-duplicates,return=representation",
+        ),
+    },
+  });
 }
 
 function exactEffectiveAt(value) {
@@ -582,12 +595,16 @@ async function preserveHistoricalExtract(
   }
   if (!manifest.historical_persisted) {
     try {
-      await persistHistoricalEvidence(env, {
-        manifest,
-        previousManifest,
-        normalized,
-        quality,
-      });
+      const persisted = await withHistoryDeadline(
+        () =>
+          persistHistoricalEvidence(env, {
+            manifest,
+            previousManifest,
+            normalized,
+            quality,
+          }),
+        env.HISTORY_PERSISTENCE_TIMEOUT_MS || 20_000,
+      );
       await updateHistoryManifest(env, manifest.id, {
         historical_persisted: true,
         quality_summary: quality,
@@ -597,24 +614,38 @@ async function preserveHistoricalExtract(
         historical_persisted: true,
         quality_summary: quality,
       };
+      return {
+        kind: "ready",
+        manifest,
+        quality,
+        historicalPersisted: true,
+        snapshotCount: persisted.snapshotCount,
+        changeCount: persisted.changeCount,
+      };
     } catch (error) {
+      const failure = historyFailureInfo(error, "history_persistence");
       try {
         await updateHistoryManifest(env, manifest.id, {
-          status: "partial_failure",
-          quality_summary: {
-            ...quality,
-            historical_persistence_error: String(error?.message || error),
-          },
+          ...historyFailurePatch(quality, error, "history_persistence"),
         });
       } catch {
         /* preserve the original failure */
       }
-      throw new Error(
-        "Historical persistence failed: " + (error?.message || error),
-      );
+      const publicError = new Error("Historical persistence failed");
+      publicError.historyFailure = failure;
+      throw publicError;
     }
   }
-  return { kind: "ready", manifest, quality, historicalPersisted: true };
+  return {
+    kind: "ready",
+    manifest,
+    quality,
+    historicalPersisted: true,
+    snapshotCount: await getHistorySnapshots(env, manifest.id).then(
+      (rows) => rows.length,
+    ),
+    changeCount: null,
+  };
 }
 
 async function getAcceptedReportManifests(env) {
@@ -2062,7 +2093,7 @@ export default {
 
       if (request.method === "PUT") {
         try {
-          const { note } = await request.json();
+          const { note, idempotencyKey } = await request.json();
           const record = {
             claim_no: claimNo,
             note: String(note || "").trim(),
@@ -2096,6 +2127,7 @@ export default {
                 claimNumber: claimNo,
                 actor: context.actor,
                 recipient: context.recipient.user,
+                notificationId: noteNotificationId(idempotencyKey),
               });
               if (record) {
                 const rows = await supabase(
@@ -2104,23 +2136,30 @@ export default {
                   "POST",
                   record,
                   true,
-                  "return=representation",
+                  "resolution=ignore-duplicates,return=representation",
                 );
-                notification = {
-                  status: "created",
-                  id: rows?.[0]?.id || null,
-                };
-                await audit(
-                  env,
-                  currentUser.email,
-                  currentUser.name,
-                  "create_claim_note_notification",
-                  {
-                    claim_number: claimNo,
-                    notification_id: rows?.[0]?.id || null,
-                    recipient_user_id: record.recipient_user_id,
-                  },
-                );
+                if (rows?.[0]?.id) {
+                  notification = {
+                    status: "created",
+                    id: rows[0].id,
+                  };
+                  await audit(
+                    env,
+                    currentUser.email,
+                    currentUser.name,
+                    "create_claim_note_notification",
+                    {
+                      claim_number: claimNo,
+                      notification_id: rows[0].id,
+                      recipient_user_id: record.recipient_user_id,
+                    },
+                  );
+                } else {
+                  notification = {
+                    status: "deduplicated",
+                    id: record.id || null,
+                  };
+                }
               } else {
                 notification = {
                   status: "unresolved",
@@ -2194,6 +2233,7 @@ export default {
             currentUser,
           });
         } catch (error) {
+          const failure = historyFailureInfo(error, "history_persistence");
           await audit(
             env,
             currentUser.email,
@@ -2201,11 +2241,20 @@ export default {
             "history_generation_failure",
             {
               file_name: fileName || "cardinal-extract.xlsx",
-              error: String(error?.message || error).slice(0, 300),
+              failure,
             },
           );
-          return err(
-            "Historical persistence failed; current claims were not changed. Retry the upload.",
+          return json(
+            {
+              error:
+                "Historical persistence failed; current claims were not changed. Retry the same source.",
+              history: {
+                status: "partial_failure",
+                historicalPersisted: false,
+                failure,
+              },
+              currentStateUpdated: false,
+            },
             503,
           );
         }
@@ -2348,6 +2397,12 @@ export default {
         return json({
           success: true,
           historicalStatus: finalHistoricalStatus,
+          history: {
+            status: finalHistoricalStatus,
+            historicalPersisted: true,
+            snapshotCount: historical.snapshotCount || 0,
+            changeCount: historical.changeCount || 0,
+          },
           extractId: historical.manifest.id,
           sourceChecksum: historical.manifest.source_checksum,
           qualitySummary: historical.quality,
@@ -2357,13 +2412,14 @@ export default {
         });
       } catch (e) {
         if (history?.manifest?.id) {
+          const failure = historyFailureInfo(e, "current_state_update");
           try {
             await updateHistoryManifest(env, history.manifest.id, {
               status: "partial_failure",
               current_state_updated: false,
               quality_summary: {
                 ...(history.quality || {}),
-                partial_system_failure: String(e?.message || e).slice(0, 300),
+                partial_system_failure: failure,
               },
             });
           } catch {
@@ -2376,15 +2432,24 @@ export default {
             "partial_system_failure",
             {
               extract_id: history.manifest.id,
-              error: String(e?.message || e).slice(0, 300),
+              failure,
             },
           );
-          return err(
-            "Upload partially failed after historical preservation. Retry the same source.",
+          return json(
+            {
+              error:
+                "Upload partially failed after historical preservation. Retry the same source.",
+              history: {
+                status: "partial_failure",
+                historicalPersisted: true,
+                failure,
+              },
+              currentStateUpdated: false,
+            },
             503,
           );
         }
-        return err("Upload failed: " + e.message, 500);
+        return err("Upload failed. Retry the same source.", 500);
       }
     }
 

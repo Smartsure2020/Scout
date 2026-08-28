@@ -49,6 +49,17 @@ test("manager note on a handler claim creates one recipient notification", () =>
   assert.equal(notification.type, "claim_note_added");
 });
 
+test("a repeated request can reuse one notification identity without storing note text", () => {
+  const notification = buildClaimNoteNotification({
+    claimNumber: "C-1",
+    actor: { id: "manager-id", display_name: "Manager A" },
+    recipient: { id: "handler-id", display_name: "Handler B" },
+    notificationId: "5d4f3f8f-2e5d-4c63-9f04-9fcd52b93f7f",
+  });
+  assert.equal(notification.id, "5d4f3f8f-2e5d-4c63-9f04-9fcd52b93f7f");
+  assert.equal("note" in notification, false);
+});
+
 test("handler adding a note to their own claim does not self-notify", () => {
   const actor = { ...users[0], scout_user_id: users[0].id };
   const resolution = resolveClaimNoteRecipient(
