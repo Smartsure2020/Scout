@@ -9,6 +9,10 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const backend = fs
   .readFileSync(path.join(root, "scout backend.js"), "utf8")
   .replace(/\r\n/g, "\n");
+const historyPersistence = fs.readFileSync(
+  path.join(root, "reporting-domain", "history-persistence.mjs"),
+  "utf8",
+);
 const claimsUi = fs.readFileSync(
   path.join(root, "scout-smartsure", "claims", "index.html"),
   "utf8",
@@ -187,6 +191,13 @@ test("claim-note notifications are recipient-scoped and auditable", () => {
     /\/notifications\/" \+ encodeURIComponent\(notificationId\) \+ "\/read/,
   );
   assert.match(frontend, /Claim note saved/);
+});
+
+test("upload reports history and current-state outcomes separately", () => {
+  assert.match(historyPersistence, /historical_persistence_failure/);
+  assert.match(backend, /currentStateUpdated: false/);
+  assert.match(backend, /Retry the same source/);
+  assert.match(frontend, /server history is recorded as a retryable failure/);
 });
 
 test("frontend consumers map to implemented endpoints", () => {
