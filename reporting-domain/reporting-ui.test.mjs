@@ -12,8 +12,23 @@ import {
   metricState,
   normalizeReport,
   reportSnapshot,
+  ReportsController,
   shiftReportPeriod,
 } from "../scout-smartsure/claims/reporting-ui.mjs";
+
+function reportDocument() {
+  const root = { innerHTML: "", addEventListener() {} };
+  return {
+    getElementById(id) {
+      return id === "reports-content" ? root : null;
+    },
+    addEventListener() {},
+    querySelector() {
+      return null;
+    },
+    root,
+  };
+}
 
 function response(payload, status = 200) {
   return {
@@ -100,8 +115,53 @@ test("management formatting is restrained", () => {
   );
   assert.equal(
     formatComparison({ absolute_delta: null }, "integer"),
-    "No prior period",
+    "Comparison unavailable",
   );
+});
+
+test("claim-linked Management Attention opens with context and confirms its saved item", async () => {
+  const document = reportDocument();
+  const controller = new ReportsController({
+    document,
+    getContext: () => ({ user: { role: "manager" }, freshness: null }),
+  });
+  controller.api = {
+    async listAttention() {
+      return { items: [] };
+    },
+    async createAttention() {
+      return { item: { id: "attention-1", claim_number: "CLM-1", title: "Review" } };
+    },
+  };
+
+  await controller.openAttentionFromClaim({ claimNo: "CLM-1", claimId: "claim-1" });
+  assert.equal(controller.state.activeTab, "weekly");
+  assert.equal(controller.state.workflowForm.claimNumber, "CLM-1");
+  assert.equal(controller.state.workflowForm.claimId, "claim-1");
+  assert.match(document.root.innerHTML, /Add Management Attention/);
+
+  const values = {
+    title: "Review",
+    managementNote: "Escalate before Friday",
+    category: "operational",
+    priority: "high",
+    ownerUserId: "",
+    nextAction: "Review",
+    dueDate: "2026-09-04",
+    status: "open",
+    claimId: "claim-1",
+    sourceClaimNumber: "CLM-1",
+  };
+  const form = {
+    dataset: { workflowForm: "attention" },
+    elements: { namedItem: (name) => ({ value: values[name] || "" }) },
+    closest() {
+      return this;
+    },
+  };
+  await controller.handleSubmit({ target: form, preventDefault() {} });
+  assert.equal(controller.state.workflowSuccess.item.id, "attention-1");
+  assert.match(document.root.innerHTML, /View Management Attention item/);
 });
 
 test("persisted report responses use the frozen metrics snapshot", () => {
