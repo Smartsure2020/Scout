@@ -1,0 +1,65 @@
+name: Scout CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scout-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validate Scout
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run complete test suite
+        run: npm test
+
+      - name: Check JavaScript syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check worker.js
+          node --check 'scout backend.js'
+          while IFS= read -r file; do
+            node --check "$file"
+          done <<'FILES'
+          scout-smartsure/claims/briefing-model.mjs
+          scout-smartsure/claims/claims-qa.mjs
+          scout-smartsure/claims/qa-fixtures.js
+          scout-smartsure/claims/qa-preview-config.js
+          scout-smartsure/claims/reporting-ui.mjs
+          scout-smartsure/claims/ux-model.mjs
+          scout-smartsure/qa-preview-worker.js
+          FILES
+
+      - name: Parse inline claims-page script
+        run: |
+          node --input-type=module -e 'import { readFileSync } from "node:fs"; const html = readFileSync("scout-smartsure/claims/index.html", "utf8"); const matches = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]; const source = matches.at(-1)?.[1]; if (!source) throw new Error("No inline claims-page script found"); new Function(source); console.log("Inline claims-page script parse: passed");'
+
+      - name: Validate production Worker bundle
+        run: npx --no-install wrangler deploy --dry-run --config wrangler.jsonc
+
+      - name: Validate isolated QA Worker bundle
+        run: npx --no-install wrangler deploy --dry-run --config wrangler.frontend.qa.jsonc
