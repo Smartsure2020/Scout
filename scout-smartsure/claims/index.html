@@ -2190,6 +2190,21 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
 }
 .data-banner.freshness-unavailable strong { color: var(--red); }
 
+.synthetic-qa-banner {
+  display: none;
+  margin-bottom: 12px;
+  padding: 9px 13px;
+  border: 1px solid var(--accent-mid);
+  border-left: 4px solid var(--brand-teal);
+  border-radius: var(--r-md);
+  background: var(--accent-lt);
+  color: var(--brand-teal-deep);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.synthetic-qa-banner strong { display: block; color: var(--brand-teal); letter-spacing: .04em; }
+.synthetic-qa-banner span { color: var(--ws-text-muted); }
+
 /* ACKNOWLEDGEMENT */
 .priority-card.acked {
   background: var(--ws-surface2);
@@ -3160,6 +3175,10 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
 
   <!-- MAIN WORKSPACE -->
   <div class="main" id="main-content">
+    <div class="synthetic-qa-banner" id="synthetic-qa-banner" role="status" aria-live="polite">
+      <strong>UX REMEDIATION PREVIEW · SYNTHETIC QA DATA</strong>
+      <span>No production data or writes are used in this environment.</span>
+    </div>
     <div class="data-banner" id="data-status-banner"></div>
 
     <!-- OVERVIEW VIEW -->
@@ -3767,7 +3786,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   </div>
 </div>
 
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script type="module" src="./claims-qa.mjs"></script><script type="module" src="./ux-model.mjs"></script><script type="module" src="./reporting-ui.mjs"></script><script type="module" src="./briefing-model.mjs"></script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="./qa-preview-config.js"></script><script src="./qa-fixtures.js"></script><script type="module" src="./claims-qa.mjs"></script><script type="module" src="./ux-model.mjs"></script><script type="module" src="./reporting-ui.mjs"></script><script type="module" src="./briefing-model.mjs"></script>
 <script>
 
 // XSS SANITISER
@@ -4777,6 +4796,7 @@ let urlStateReady = false;
 let detailRoutePushed = false;
 let detailOriginUrl = "";
 let detailOriginFocus = null;
+let detailOriginClaimNo = "";
 const ALL_CLAIMS_PAGE_SIZE = 50;
 const PRIORITY_PAGE_SIZE = 25;
 const EXTRACT_HISTORY_KEY = "scout_extract_history_v1";
@@ -4872,11 +4892,17 @@ function invalidateProcessedClaims() {
 }
 
 function getProcessedClaims() {
-  if (!processedClaimsCache) processedClaimsCache = processData(claims);
+  if (!processedClaimsCache) {
+    const extractDate = extractUploadDate instanceof Date && !Number.isNaN(extractUploadDate.getTime())
+      ? extractUploadDate.toISOString().split("T")[0]
+      : undefined;
+    processedClaimsCache = processData(claims, extractDate);
+  }
   return processedClaimsCache;
 }
 
 function loadExtractHistory() {
+  if (QA_FIXTURE_MODE && Array.isArray(serverHistoryCache)) return serverHistoryCache;
   try {
     const history = JSON.parse(localStorage.getItem(EXTRACT_HISTORY_KEY) || "[]");
     if (!Array.isArray(history)) return [];
@@ -5656,6 +5682,15 @@ function renderHandlerEmailMap() {
 }
 
 function saveTeamsConfig() {
+  if (QA_FIXTURE_MODE) {
+    const el = document.getElementById("teams-cred-status");
+    if (el) {
+      el.textContent = "Delivery disabled in synthetic QA preview";
+      el.style.color = "var(--ws-text-muted)";
+    }
+    updateBriefingDestinationStatus();
+    return;
+  }
   const handlerEmails = {};
   document.querySelectorAll("[data-handler]").forEach(el => {
     handlerEmails[el.dataset.handler] = el.value.trim();
@@ -5675,6 +5710,12 @@ function saveTeamsConfig() {
 }
 
 function loadTeamsConfig() {
+  if (QA_FIXTURE_MODE) {
+    renderHandlerEmailMap();
+    disableSyntheticWriteControls();
+    updateBriefingDestinationStatus();
+    return;
+  }
   try {
     const cfg = JSON.parse(localStorage.getItem("scout_teams_config") || "{}");
     // Migration: scrub any credentials that were previously stored in the browser
@@ -5699,13 +5740,33 @@ function loadTeamsConfig() {
   }
 }
 
+function disableSyntheticWriteControls() {
+  if (!QA_FIXTURE_MODE) return;
+  ["teams-proxy", "teams-mgr-email", "setting-send-time", "setting-manager-email", "setting-zero-email", "setting-include-terminal"]
+    .forEach(id => document.getElementById(id)?.setAttribute("disabled", "disabled"));
+  document.querySelectorAll("[data-handler], [data-setting-handler]").forEach(input => input.setAttribute("disabled", "disabled"));
+  document.querySelectorAll("#view-settings button").forEach(button => {
+    if (button.textContent.includes("Save settings")) button.disabled = true;
+  });
+  const status = document.getElementById("settings-status");
+  if (status) {
+    status.textContent = "Synthetic QA preview: settings are read-only and are not persisted.";
+    status.style.color = "var(--ws-text-muted)";
+  }
+}
+
 function getTeamsConfig() {
+  if (QA_FIXTURE_MODE) return {};
   try { return JSON.parse(localStorage.getItem("scout_teams_config") || "{}"); }
   catch(e) { return {}; }
 }
 
 async function loadHandlerDirectory() {
   if (!currentUser?.msToken || !["manager", "admin"].includes(currentUser.role)) return;
+  if (QA_FIXTURE_MODE) {
+    handlerDirectory = window.ScoutSyntheticQA.getFixture().users || [];
+    return;
+  }
   try {
     const res = await fetch(CONFIG.backendUrl + "/management-workflow/users", {
       headers: { Authorization: "Bearer " + currentUser.msToken },
@@ -5720,6 +5781,10 @@ async function loadHandlerDirectory() {
 }
 
 async function loadSettings() {
+  if (QA_FIXTURE_MODE) {
+    scoutSettings = { ...scoutSettings, ...(window.ScoutSyntheticQA.getFixture().settings || {}) };
+    return scoutSettings;
+  }
   settingsLoadError = null;
   if (!currentUser?.msToken || !["manager","admin"].includes(currentUser.role)) return scoutSettings;
   try {
@@ -5776,10 +5841,18 @@ async function renderSettings() {
   document.getElementById("setting-retention-days").textContent = settings.retention_days || 90;
   renderSettingsHandlerEmails(settings);
   status.textContent = "Settings loaded.";
+  disableSyntheticWriteControls();
 }
 
 async function saveSettings() {
   const status = document.getElementById("settings-status");
+  if (QA_FIXTURE_MODE) {
+    if (status) {
+      status.textContent = "Disabled in synthetic QA preview. No settings are persisted.";
+      status.style.color = "var(--ws-text-muted)";
+    }
+    return;
+  }
   if (!currentUser?.msToken || currentUser.role !== "admin") {
     if (status) status.textContent = "Only admins can save settings.";
     return;
@@ -6329,7 +6402,7 @@ function getBriefingSendSummary(cfg = getTeamsConfig()) {
     : !hasDeliveryTransport
       ? "Configure the delivery service endpoint to enable sending."
       : "";
-  return {
+  const summary = {
     handlers,
     briefingCount: handlers.length + 1,
     recipientCount,
@@ -6343,6 +6416,9 @@ function getBriefingSendSummary(cfg = getTeamsConfig()) {
     managerEmail,
     missingHandlerEmails: handlers.filter(h => !getHandlerEmail(h, handlerEmails)),
   };
+  return QA_FIXTURE_MODE
+    ? { ...summary, deliveryLabel: "Synthetic QA preview only", canSend: false, hasDeliveryTransport: false, blockingReason: "Email and Teams delivery are disabled in synthetic QA preview." }
+    : summary;
 }
 
 function updateBriefingDestinationStatus() {
@@ -6427,6 +6503,12 @@ function closeSendConfirm() {
 }
 
 async function sendTeamsBriefing(confirmed = false) {
+  if (QA_FIXTURE_MODE) {
+    const log = document.getElementById("teams-log");
+    if (log) log.innerHTML = `<span class="log-muted-entry">Disabled in synthetic QA preview. No email or Teams message was sent.</span>`;
+    updateBriefingDestinationStatus();
+    return;
+  }
   if (!confirmed) {
     showSendConfirm();
     return;
@@ -7224,6 +7306,12 @@ function updateHistoryCount() {
 
 async function loadServerHistory() {
   if (!currentUser?.msToken || !["manager", "admin"].includes(currentUser.role)) return [];
+  if (QA_FIXTURE_MODE) {
+    serverHistoryCache = window.ScoutSyntheticQA.getFixture().history || [];
+    serverHistoryError = null;
+    updateHistoryCount();
+    return serverHistoryCache;
+  }
   try {
     const res = await fetch(CONFIG.backendUrl + "/history/extracts", {
       headers: { Authorization: "Bearer " + currentUser.msToken },
@@ -7509,6 +7597,25 @@ function renderExceptions(data = getProcessedClaims()) {
     if (urlStateReady) syncExceptionsUrlState();
     return;
   }
+  if (exceptionFilter === "closure") {
+    const candidates = filtered
+      .map(c => ({ claim: c, candidate: getReadyToCloseCandidate(c) }))
+      .filter(item => item.candidate);
+    const renderClosureRow = ({ claim: c, candidate }) => {
+      const tone = candidate.level === "green" ? "green" : "amber";
+      return `<div class="stale-card ${tone}" data-claim-no="${esc(c.claimNo)}" role="button" tabindex="0" aria-label="Open closure candidate ${esc(c.claimNo)} for ${esc(c.insured || "Unknown insured")}" onclick="openClaimDetail(this.dataset.claimNo)" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openClaimDetail(this.dataset.claimNo)}" title="View claim detail">
+        <div class="stale-age">${c.workingAge}wd</div>
+        <div class="stale-info"><div class="stale-claim">${esc(c.claimNo)}</div><div class="stale-name">${esc(c.insured)}</div><div class="stale-desc">${esc(canonicalClaimLabel(candidate.label))} · ${esc(c.status)}</div><div class="stale-action">Rule ${candidate.ruleNo}: ${esc(candidate.action)}</div></div>
+        <div class="stale-right"><div class="stale-handler">${esc(c.handler)}</div><div class="stale-outstanding">${fmtCurrency(c.outstanding)}</div><div class="stale-status-note">Estimate: ${fmtCurrency(c.estimate)}</div></div>
+      </div>`;
+    };
+    const closeAfterChecks = candidates.filter(item => item.candidate.level === "green");
+    const managementReview = candidates.filter(item => item.candidate.level === "amber");
+    const renderClosureGroup = (id, title, description, items, tone) => `<section class="closure-group closure-group-${id}"><div class="closure-group-header"><div><h3>${title}</h3><p>${description}</p></div><span class="action-count ${tone}">${items.length}</span></div>${items.length ? items.map(renderClosureRow).join("") : `<div class="empty-state closure-group-empty">No candidates in this group.</div>`}</section>`;
+    list.innerHTML = `${renderClosureGroup("final-checks", "Close after final checks", "Operational closure rules indicate the claim can proceed once the final checklist is complete.", closeAfterChecks, "green")}${renderClosureGroup("management-review", "Management review", "These candidates need a decision, correction or judgement before anyone closes the claim.", managementReview, "amber")}`;
+    if (urlStateReady) syncExceptionsUrlState();
+    return;
+  }
   list.innerHTML = `<div class="exception-list-head" aria-hidden="true"><span>Claim</span><span>Primary reason</span><span>State</span><span>Age / movement</span><span>Next action</span><span>Owner</span></div>` + filtered.map(c => {
     const category = priorityCategory(c);
     const movement = getClaimAgeLabel(c);
@@ -7561,10 +7668,14 @@ const _ACK_KEY  = "scout_acks_v2";
 const _cardData = {}; // populated by priorityCard(), keyed by safeKey
 
 function loadAcks() {
+  if (QA_FIXTURE_MODE) return {};
   try { return JSON.parse(localStorage.getItem(_ACK_KEY) || "{}"); }
   catch { return {}; }
 }
-function saveAcks(acks) { localStorage.setItem(_ACK_KEY, JSON.stringify(acks)); }
+function saveAcks(acks) {
+  if (QA_FIXTURE_MODE) return;
+  localStorage.setItem(_ACK_KEY, JSON.stringify(acks));
+}
 
 function pruneAcks(processedClaims) {
   const acks = loadAcks();
@@ -7590,6 +7701,10 @@ function fmtAckTime(isoStr) {
 }
 
 function markReviewed(safeKey) {
+  if (QA_FIXTURE_MODE) {
+    showScoutToast("Review acknowledgement is disabled in synthetic QA preview");
+    return;
+  }
   const c = _cardData[safeKey];
   if (!c) return;
   const acks = loadAcks();
@@ -7606,6 +7721,7 @@ function markReviewed(safeKey) {
 }
 
 function undoReview(safeKey) {
+  if (QA_FIXTURE_MODE) return;
   const c = _cardData[safeKey];
   if (!c) return;
   const acks = loadAcks();
@@ -7625,6 +7741,7 @@ function toggleNoteForm(safeKey) {
 }
 
 function saveNote(safeKey) {
+  if (QA_FIXTURE_MODE) return;
   const c = _cardData[safeKey];
   if (!c) return;
   const ta = document.getElementById("nft_" + safeKey);
@@ -7734,7 +7851,7 @@ function priorityCard(c, i) {
     ? `<div class="priority-action-acked">${esc(action)}</div>`
     : `<div class="priority-right-col">
         <div class="priority-action">${esc(action)}</div>
-        <button class="ack-btn ack-review-btn" onclick="event.stopPropagation();markReviewed('${safeKey}')">&#10003; Mark reviewed</button>
+        ${QA_FIXTURE_MODE ? `<span class="ack-disabled">Review disabled in synthetic QA preview</span>` : `<button class="ack-btn ack-review-btn" onclick="event.stopPropagation();markReviewed('${safeKey}')">&#10003; Mark reviewed</button>`}
        </div>`;
 
   return `<div class="priority-card${isAcked ? " acked" : ""}" data-claim-no="${esc(c.claimNo)}" role="button" tabindex="0" aria-label="Open priority claim ${esc(c.claimNo)} for ${esc(c.insured || "Unknown insured")}" onclick="openClaimDetail(this.dataset.claimNo)" onkeydown="if(event.target===event.currentTarget&&(event.key==='Enter'||event.key===' ')){event.preventDefault();openClaimDetail(this.dataset.claimNo)}" title="View claim detail">
@@ -8691,6 +8808,8 @@ const CONFIG = {
   azureTenantId:  "0728ffc8-457f-4ae5-8c44-30c3ef0ecd5a",   // IT to provide
   backendUrl:     "https://scout-backend.marketing-854.workers.dev",
 };
+const QA_CONFIG = window.ScoutQAConfig || { fixtureMode: false };
+const QA_FIXTURE_MODE = QA_CONFIG.fixtureMode === true && window.ScoutSyntheticQA?.enabled === true;
 
 // OAuth redirect always goes to the root portal (the only redirect URI
 // currently registered in Azure). The root page relays the code back here.
@@ -8988,6 +9107,45 @@ function showLoadingStates() {
 // LOAD CLAIMS FROM BACKEND
 async function loadClaimsFromBackend() {
   if (!currentUser) return false;
+  if (QA_FIXTURE_MODE) {
+    const fixture = window.ScoutSyntheticQA.getFixture();
+    claims = Array.isArray(fixture.claims) ? fixture.claims.map(c => ({
+      claimId: c.claim_id || null,
+      age: c.age_days || 0,
+      ageProvided: c.age_days !== undefined && c.age_days !== null && c.age_days !== "",
+      handler: c.handler_name || "Unassigned",
+      handlerEmail: c.handler_email || "",
+      claimNo: c.claim_no || "",
+      status: c.status || "",
+      registered: c.registered_date || "",
+      repudiationDate: c.repudiation_date || "",
+      settledDate: c.settled_date || "",
+      lastUpdated: parseDateField(c.last_updated || ""),
+      lastUpdatedSource: c.last_updated_source || "synthetic-qa-fixture",
+      description: c.description || "",
+      insured: c.insured_name || "",
+      outstanding: parseFloat(c.outstanding) || 0,
+      peril: c.peril || "",
+      insurer: c.insurer || "",
+      comments: c.comments || "",
+      settled: false,
+      estimate: parseFloat(c.estimate ?? c.cardinal_estimate ?? 0) || 0,
+      cardinalEstimate: parseFloat(c.cardinal_estimate ?? c.estimate ?? 0) || 0,
+    })) : [];
+    claimsLoaded = true;
+    claims = currentUser.role === "handler"
+      ? claims.filter(c => c.handler.toLowerCase() === currentUser.name.toLowerCase())
+      : claims;
+    currentExtractId = fixture.extractId;
+    currentExtractFileName = fixture.fileName;
+    extractUploadDate = new Date(`${fixture.extractDate}T12:00:00+02:00`);
+    latestDataQualityReport = fixture.quality || { issueCount: 0, warnings: [] };
+    freshnessErrorMessage = null;
+    invalidateProcessedClaims();
+    const todayDate = document.getElementById("today-date");
+    if (todayDate) todayDate.textContent = `Extract: ${extractUploadDate.toLocaleDateString("en-ZA", { day: "numeric", month: "short", year: "numeric" })}`;
+    return true;
+  }
   try {
     const res = await fetch(CONFIG.backendUrl + "/claims", {
       headers: { Authorization: "Bearer " + currentUser.msToken },
@@ -9071,6 +9229,9 @@ async function loadClaimsFromBackend() {
 
 // SAVE EXTRACT TO BACKEND
 async function saveExtractToBackend(processedClaims, fileName, extractMeta = null) {
+  if (QA_FIXTURE_MODE) {
+    return { ok: false, data: null, error: new Error("Disabled in synthetic QA preview") };
+  }
   if (!currentUser || !["manager","admin"].includes(currentUser.role)) {
     return { ok: false, data: null, error: new Error("Only managers and admins can upload extracts") };
   }
@@ -9146,22 +9307,26 @@ async function renderAuditLog() {
 
 // MAIN AUTH INIT
 async function initAuth() {
-  // Check for an OAuth callback, including error-only callbacks.
-  const params = new URLSearchParams(window.location.search);
-  const hasOAuthCallback = ["code", "state", "session_state", "error", "error_description", "error_uri"]
-    .some((key) => params.has(key));
-
-  if (hasOAuthCallback) {
-    const success = await handleOAuthCallback();
-    if (!success) return;
+  if (QA_FIXTURE_MODE) {
+    currentUser = window.ScoutSyntheticQA.user();
   } else {
-    // Check stored session  -  token is never persisted, so attempt silent re-auth
-    const stored = getStoredSession();
-    if (stored && stored.email) {
-      await silentSignIn(stored.email);
-      return; // silentSignIn redirects; execution stops here
+    // Check for an OAuth callback, including error-only callbacks.
+    const params = new URLSearchParams(window.location.search);
+    const hasOAuthCallback = ["code", "state", "session_state", "error", "error_description", "error_uri"]
+      .some((key) => params.has(key));
+
+    if (hasOAuthCallback) {
+      const success = await handleOAuthCallback();
+      if (!success) return;
+    } else {
+      // Check stored session  -  token is never persisted, so attempt silent re-auth
+      const stored = getStoredSession();
+      if (stored && stored.email) {
+        await silentSignIn(stored.email);
+        return; // silentSignIn redirects; execution stops here
+      }
+      // No stored session  -  login screen is already visible via CSS default
     }
-    // No stored session  -  login screen is already visible via CSS default
   }
 
   // Guard: if we reach here without an authenticated user, show the login screen and stop
@@ -9172,6 +9337,11 @@ async function initAuth() {
 
   // User is authenticated  -  show the app
   document.getElementById("auth-overlay").style.display = "none";
+  if (QA_FIXTURE_MODE) {
+    document.body.classList.add("synthetic-qa-mode");
+    const previewBanner = document.getElementById("synthetic-qa-banner");
+    if (previewBanner) previewBanner.style.display = "block";
+  }
 
   // Update user pill (null-safe)
   const safeName = currentUser.name || currentUser.email || "User";
@@ -9195,6 +9365,10 @@ async function initAuth() {
 
   // Apply role restrictions
   applyRoleRestrictions(currentUser.role);
+  if (QA_FIXTURE_MODE) {
+    const uploadButton = document.getElementById("upload-btn");
+    if (uploadButton) uploadButton.style.display = "none";
+  }
   await loadHandlerDirectory();
   await loadSettings();
   loadTeamsConfig();
@@ -9218,6 +9392,7 @@ async function initAuth() {
     user: currentUser,
     backendUrl: CONFIG.backendUrl,
     freshness: getScoutFreshnessModel(),
+    syntheticQa: QA_FIXTURE_MODE,
   });
   window.__scoutAuthReady = true;
   window.dispatchEvent(new Event("scout-auth-ready"));
@@ -9250,10 +9425,17 @@ function rememberDetailOriginFocus() {
 
 function restoreDetailOriginFocus() {
   const origin = detailOriginFocus;
+  const claimNo = detailOriginClaimNo;
   detailOriginFocus = null;
-  if (!origin || !origin.isConnected || origin.hasAttribute("disabled")) return;
+  detailOriginClaimNo = "";
+  if (!origin && !claimNo) return;
   setTimeout(() => {
-    if (origin.isConnected && origin.getClientRects().length) origin.focus({ preventScroll: true });
+    const replacement = claimNo
+      ? [...document.querySelectorAll("[data-claim-no]")]
+        .find(element => element.dataset.claimNo === claimNo && element.getClientRects().length)
+      : null;
+    const target = origin?.isConnected ? origin : replacement;
+    if (target && !target.hasAttribute("disabled")) target.focus({ preventScroll: true });
   }, 0);
 }
 
@@ -9322,6 +9504,12 @@ async function openClaimDetail(claimNo, options = {}) {
   if (!c) return;
 
   if (!document.getElementById("detail-panel")?.classList.contains("open")) rememberDetailOriginFocus();
+  if (!options.fromRoute && !detailOriginFocus) {
+    const origin = [...document.querySelectorAll("[data-claim-no]")]
+      .find(element => element.dataset.claimNo === String(claimNo) && element.getClientRects().length);
+    if (origin) detailOriginFocus = origin;
+  }
+  if (!options.fromRoute) detailOriginClaimNo = String(claimNo);
 
   if (!options.fromRoute && urlStateReady) {
     const currentRoute = readScoutUrlState();
@@ -9422,7 +9610,7 @@ async function openClaimDetail(claimNo, options = {}) {
       </div>
     </div>
 
-    ${["manager","admin"].includes(currentUser?.role) ? `<div class="detail-management-action"><div><div class="detail-section-title">Management attention</div><div class="detail-field-val-secondary">Create a deliberate management item for this claim without changing the claim record.</div></div><button class="btn-secondary" type="button" onclick="openManagementAttentionForm({claimNo:'${esc(c.claimNo)}',claimId:'${esc(c.claimId || "")}'}); closeClaimDetail();">Add to Management Attention</button></div>` : ""}
+    ${["manager","admin"].includes(currentUser?.role) ? `<div class="detail-management-action"><div><div class="detail-section-title">Management attention</div><div class="detail-field-val-secondary">${QA_FIXTURE_MODE ? "Unavailable in synthetic QA preview; no management record can be created." : "Create a deliberate management item for this claim without changing the claim record."}</div></div>${QA_FIXTURE_MODE ? `<button class="btn-secondary" type="button" disabled aria-label="Add to Management Attention disabled in synthetic QA preview">Unavailable in preview</button>` : `<button class="btn-secondary" type="button" onclick="openManagementAttentionForm({claimNo:'${esc(c.claimNo)}',claimId:'${esc(c.claimId || "")}'}); closeClaimDetail();">Add to Management Attention</button>`}</div>` : ""}
 
     ${c.comments ? `<div>
       <div class="detail-section-title">Notes / activity from extract</div>
@@ -9437,10 +9625,10 @@ async function openClaimDetail(claimNo, options = {}) {
       <div class="detail-note-editor">
         <div class="detail-note-editor-label">Write or update note</div>
         <textarea class="detail-note-ta" id="detail-note-ta"
-          aria-label="Claim note" placeholder="Add context for the next person reviewing this claim&hellip;" rows="3"></textarea>
+          aria-label="Claim note" placeholder="Add context for the next person reviewing this claim&hellip;" rows="3" ${QA_FIXTURE_MODE ? "disabled" : ""}></textarea>
         <div class="detail-note-footer">
           <div class="detail-note-status" id="detail-note-status"></div>
-          <button class="detail-note-save-btn" onclick="saveDetailNote('${esc(c.claimNo)}')">Save note</button>
+          <button class="detail-note-save-btn" onclick="saveDetailNote('${esc(c.claimNo)}')" ${QA_FIXTURE_MODE ? "disabled" : ""}>${QA_FIXTURE_MODE ? "Unavailable in preview" : "Save note"}</button>
         </div>
       </div>
     </div>
@@ -9472,8 +9660,14 @@ function closeClaimDetail(options = {}) {
   if (detailRoutePushed && detailOriginUrl) {
     detailRoutePushed = false;
     detailOriginUrl = "";
+    const restoreAfterHistory = () => restoreDetailOriginFocus();
+    window.addEventListener("popstate", restoreAfterHistory, { once: true });
     history.back();
-    restoreDetailOriginFocus();
+    // The history handler re-renders the originating queue, so wait until its
+    // replacement row exists before restoring focus.
+    setTimeout(() => {
+      if (detailOriginClaimNo) restoreDetailOriginFocus();
+    }, 200);
     return;
   }
   detailRoutePushed = false;
@@ -9534,6 +9728,12 @@ function renderNotifications() {
 
 async function loadNotifications() {
   if (!currentUser?.msToken) return;
+  if (QA_FIXTURE_MODE) {
+    scoutNotifications = [];
+    notificationsLoadError = null;
+    renderNotifications();
+    return;
+  }
   try {
     const res = await fetch(CONFIG.backendUrl + "/notifications", {
       headers: { Authorization: "Bearer " + currentUser.msToken },
@@ -9595,6 +9795,17 @@ document.addEventListener("click", function(e) {
 async function loadDetailNote(claimNo) {
   if (!currentUser) return;
   renderSavedDetailNote({ loading: true });
+  if (QA_FIXTURE_MODE) {
+    const ta = document.getElementById("detail-note-ta");
+    const status = document.getElementById("detail-note-status");
+    if (ta) ta.disabled = true;
+    if (status) {
+      status.textContent = "Notes disabled in synthetic QA preview";
+      status.className = "detail-note-status";
+    }
+    renderSavedDetailNote({ note: "" });
+    return;
+  }
   try {
     const res = await fetch(CONFIG.backendUrl + "/notes/" + encodeURIComponent(claimNo), {
       headers: { Authorization: "Bearer " + currentUser.msToken },
@@ -9654,6 +9865,13 @@ async function saveDetailNote(claimNo) {
   const btn    = document.querySelector(".detail-note-save-btn");
   const status = document.getElementById("detail-note-status");
   if (!ta || !btn || !status) return;
+  if (QA_FIXTURE_MODE) {
+    ta.disabled = true;
+    btn.disabled = true;
+    status.textContent = "Disabled in synthetic QA preview. No note was saved.";
+    status.className = "detail-note-status";
+    return;
+  }
 
   btn.disabled = true;
   status.textContent = "Saving…";

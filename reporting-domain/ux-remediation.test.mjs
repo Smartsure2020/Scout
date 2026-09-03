@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 import {
   comparisonUnavailableLabel,
@@ -201,6 +202,7 @@ test("checkpoint 4 makes high-frequency navigation and claim controls keyboard r
   assert.match(source, /\.main \{[\s\S]*?min-width: 0;/);
   assert.match(source, /aria-current/, "navigation state should be announced");
   assert.match(source, /function openUploadOverlay/);
+  assert.match(source, /if \(!options\.fromRoute && !detailOriginFocus\)/, "claim opening should retain a focusable queue origin");
   assert.match(source, /overlay\.setAttribute\("aria-hidden", "false"\)/);
   assert.match(source, /backdrop\.setAttribute\("aria-hidden", "false"\)/);
   assert.match(source, /trapOverlayFocus/);
@@ -230,4 +232,79 @@ test("frontend packages the required claims QA helper referenced by the shell", 
   assert.match(helper, /export function normalizeSourceStatus/);
   assert.match(helper, /window\.ScoutClaimsQA/);
   assert.match(helper, /export function compareExtractClaims/);
+});
+
+test("synthetic QA fixtures are deterministic, non-identifying and comparison-aware", async () => {
+  const source = await readFile(
+    new URL("../scout-smartsure/claims/qa-fixtures.js", import.meta.url),
+    "utf8",
+  );
+  const context = {
+    URL,
+    URLSearchParams,
+    Response,
+    JSON,
+    window: {
+      ScoutQAConfig: { fixtureMode: true },
+      location: { search: "" },
+      fetch: async () => new Response("{}"),
+    },
+  };
+  vm.runInNewContext(source, context);
+  const fixture = context.window.ScoutSyntheticQA.getFixture();
+  assert.ok(fixture.claims.length >= 75 && fixture.claims.length <= 120);
+  assert.equal(fixture.history.length, 2);
+  assert.equal(fixture.reports.length, 3);
+  assert.ok(fixture.claims.every((claim) => /^QA-\d{4}$/.test(claim.claim_no)));
+  assert.ok(fixture.claims.every((claim) => claim.insured_name.startsWith("Synthetic Insured ")));
+  assert.ok(fixture.claims.every((claim) => claim.handler_email.endsWith("@synthetic.invalid")));
+  assert.ok(fixture.claims.some((claim) => claim.status === "Awaiting Assessor Report"));
+  assert.ok(fixture.claims.some((claim) => claim.status === "Payment Requested" && claim.estimate === 0));
+  assert.ok(fixture.claims.some((claim) => claim.outstanding >= 100000));
+  assert.doesNotMatch(JSON.stringify(fixture), /scout-backend\.marketing-854\.workers\.dev/);
+
+  context.window.location.search = "?qa-scenario=no-comparison";
+  const unavailable = context.window.ScoutSyntheticQA.getFixture();
+  assert.equal(unavailable.history.length, 1);
+
+  const readAttempt = await context.window.fetch("https://scout-backend.marketing-854.workers.dev/claims");
+  const writeAttempt = await context.window.fetch("https://scout-backend.marketing-854.workers.dev/notes/QA-0001", { method: "PUT" });
+  assert.equal(readAttempt.status, 200);
+  assert.equal(writeAttempt.status, 403);
+  assert.equal(context.window.ScoutSyntheticQA.getNetworkLog().length, 2);
+});
+
+test("synthetic preview is opt-in and the QA Worker is configuration-gated", async () => {
+  const config = await readFile(
+    new URL("../scout-smartsure/claims/qa-preview-config.js", import.meta.url),
+    "utf8",
+  );
+  const worker = await readFile(
+    new URL("../scout-smartsure/qa-preview-worker.js", import.meta.url),
+    "utf8",
+  );
+  const shell = await readFile(
+    new URL("../scout-smartsure/claims/index.html", import.meta.url),
+    "utf8",
+  );
+  assert.match(config, /fixtureMode: false/);
+  assert.match(worker, /SCOUT_QA_FIXTURE_MODE/);
+  assert.match(worker, /toLowerCase\(\) === "true"/);
+  assert.match(shell, /src="\.\/qa-preview-config\.js"/);
+  assert.match(shell, /src="\.\/qa-fixtures\.js"/);
+  assert.match(shell, /QA_CONFIG\.fixtureMode === true/);
+  assert.match(shell, /No production data or writes are used in this environment/);
+  assert.match(shell, /exceptionFilter === "closure"/);
+  assert.match(shell, /Close after final checks/);
+  assert.match(shell, /Management review/);
+  assert.match(shell, /Review acknowledgement is disabled in synthetic QA preview/);
+  assert.match(shell, /No settings are persisted/);
+  assert.match(shell, /syntheticQa: QA_FIXTURE_MODE/);
+  const reports = await readFile(
+    new URL("../scout-smartsure/claims/reporting-ui.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(reports, /isSyntheticQa\(\)/);
+  assert.match(reports, /Report changes are disabled in the synthetic QA preview/);
+  assert.match(worker, /SCOUT_BASE_URL/);
 });

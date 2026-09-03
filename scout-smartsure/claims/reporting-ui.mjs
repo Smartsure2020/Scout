@@ -750,6 +750,18 @@ export class ReportsController {
     return true;
   }
 
+  isSyntheticQa() {
+    return this.getContext?.()?.syntheticQa === true;
+  }
+
+  blockSyntheticMutation() {
+    this.state.error = {
+      code: "NOT_AUTHORIZED",
+      message: "Report changes are disabled in the synthetic QA preview.",
+    };
+    this.render();
+  }
+
   open(tab = "weekly") {
     if (!this.api) return;
     this.state.activeTab = ["weekly", "monthly", "history"].includes(tab)
@@ -868,6 +880,7 @@ export class ReportsController {
   async generate() {
     const type = this.state.activeTab;
     if (!this.api || !["weekly", "monthly"].includes(type)) return;
+    if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     await this.perform("Generating report…", () =>
       this.api.generateReport(type, this.state.periodStarts[type]),
     );
@@ -876,24 +889,28 @@ export class ReportsController {
   async regenerate() {
     const id = this.state.selected?.id;
     if (!id) return;
+    if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     if (!(await this.confirm("regenerate"))) return;
     await this.perform("Regenerating…", () => this.api.regenerateReport(id));
   }
 
   async finalise() {
     const id = this.state.selected?.id;
+    if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     if (!id || !(await this.confirm("finalise"))) return;
     await this.perform("Finalising…", () => this.api.finaliseReport(id));
   }
 
   async archive() {
     const id = this.state.selected?.id;
+    if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     if (!id || !(await this.confirm("archive"))) return;
     await this.perform("Archiving…", () => this.api.archiveReport(id));
   }
 
   async exportPdf() {
     const run = this.state.selected;
+    if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     const snapshot = reportSnapshot(run);
     if (
       !run?.id ||
@@ -1075,6 +1092,10 @@ export class ReportsController {
   }
 
   async performWorkflow(operation, callback) {
+    if (this.isSyntheticQa()) {
+      this.blockSyntheticMutation();
+      return;
+    }
     if (this.state.loading || !this.api) return;
     this.state.loading = true;
     this.state.operation = operation;
@@ -1398,13 +1419,14 @@ export class ReportsController {
     const type = this.state.activeTab;
     const periodStart = this.state.periodStarts[type];
     const report = this.state.selected;
+    const syntheticQa = this.isSyntheticQa();
     if (!report) {
       return `<section class="report-period-shell">
         <div class="report-period-header">
           <div><div class="report-period-label">${type === "weekly" ? "Weekly" : "Monthly"}</div><h2>${escapeHtml(formatPeriodLabel({ report_type: type, period_start_local_date: periodStart, period_end_local_date: type === "weekly" ? addDays(periodStart, 5) : addDays(shiftReportPeriod("monthly", periodStart, 1), 0) }))}</h2></div>
           <div class="report-period-actions"><button class="btn-secondary" data-report-action="period" data-direction="-1">Previous ${type === "weekly" ? "Week" : "Month"}</button><button class="btn-secondary" data-report-action="period" data-direction="1" ${isFutureReportPeriod(type, shiftReportPeriod(type, periodStart, 1)) ? "disabled" : ""}>Next ${type === "weekly" ? "Week" : "Month"}</button></div>
         </div>
-        <div class="report-empty-card"><div class="report-empty-icon">↗</div><h3>No ${type} report yet</h3><p>Generate the Claims Report for this period when you are ready.</p><button class="btn-primary" data-report-action="generate" ${this.state.loading ? "disabled" : ""}>Generate Report</button></div>
+        <div class="report-empty-card"><div class="report-empty-icon">↗</div><h3>No ${type} report yet</h3><p>${syntheticQa ? "Report generation is disabled in the synthetic QA preview." : "Generate the Claims Report for this period when you are ready."}</p><button class="btn-primary" data-report-action="generate" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Generate Report"}</button></div>
         ${type === "weekly" && this.state.workflowForm?.type === "attention" ? `<section class="report-section workflow-section workflow-standalone">${this.renderExistingClaimAttention()}<div class="section-header"><div><div class="section-title">Add Management Attention</div><p class="section-help">Create a live attention item now; add it to a Draft report later if needed.</p></div></div>${this.workflowForm(this.state.workflowForm)}</section>` : ""}
       </section>`;
     }
@@ -1420,13 +1442,14 @@ export class ReportsController {
     const isDraft = run.status === "draft";
     const isFinalised = run.status === "finalised";
     const isArchived = run.status === "archived";
+    const syntheticQa = this.isSyntheticQa();
     const canExportPdf =
       (isFinalised || isArchived) && coverage !== "insufficient";
     const canArchive = this.getContext?.()?.user?.role === "admin";
     return `<section class="report-period-shell">
       <div class="report-period-header">
         <div><div class="report-period-label">${type === "weekly" ? "Weekly" : "Monthly"} Claims Report</div><h2>${escapeHtml(formatPeriodLabel(snapshot, type))}</h2><div class="report-meta-line">${statusBadge(run.status)} <span>Generated ${escapeHtml(this.formatDateTime(run.generated_at))}</span>${run.finalised_at ? `<span>· Finalised ${escapeHtml(this.formatDateTime(run.finalised_at))}</span>` : ""}</div></div>
-        <div class="report-period-actions">${isDraft ? `<button class="btn-secondary" data-report-action="regenerate" ${this.state.loading ? "disabled" : ""}>Regenerate</button><button class="btn-primary" data-report-action="finalise" ${coverage === "insufficient" || this.state.loading ? "disabled" : ""}>Finalise</button>` : ""}${canExportPdf ? `<button class="btn-primary" data-report-action="export-pdf" ${this.state.loading ? "disabled" : ""}>Export PDF</button>` : ""}${isFinalised && canArchive ? `<button class="btn-secondary" data-report-action="archive" ${this.state.loading ? "disabled" : ""}>Archive</button>` : ""}${isArchived ? `<span class="report-action-note">Historical snapshot</span>` : ""}</div>
+        <div class="report-period-actions">${isDraft ? `<button class="btn-secondary" data-report-action="regenerate" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Regenerate"}</button><button class="btn-primary" data-report-action="finalise" ${coverage === "insufficient" || this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Finalise"}</button>` : ""}${canExportPdf ? `<button class="btn-primary" data-report-action="export-pdf" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Export PDF"}</button>` : ""}${isFinalised && canArchive ? `<button class="btn-secondary" data-report-action="archive" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Archive"}</button>` : ""}${isArchived ? `<span class="report-action-note">Historical snapshot</span>` : ""}</div>
       </div>
       <div class="report-coverage-banner ${coverage === "complete" ? "is-complete" : coverage === "insufficient" ? "is-insufficient" : "is-warning"}"><div><strong>Coverage</strong> ${coverageBadge(coverage, warnings.length)}</div><span>${escapeHtml(this.coverageCopy(coverage, snapshot))}</span></div>
       ${!isDraft && this.state.workflowForm?.type === "attention" ? `<section class="report-section workflow-section workflow-standalone">${this.renderExistingClaimAttention()}<div class="section-header"><div><div class="section-title">Add Management Attention</div><p class="section-help">This creates a live item without changing the historical report snapshot.</p></div></div>${this.workflowForm(this.state.workflowForm)}</section>` : ""}
