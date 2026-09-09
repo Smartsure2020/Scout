@@ -320,7 +320,7 @@ test("frontend packages the required claims QA helper referenced by the shell", 
 
 test("synthetic QA fixtures are deterministic, non-identifying and comparison-aware", async () => {
   const source = await readFile(
-    new URL("../scout-smartsure/claims/qa-fixtures.js", import.meta.url),
+    new URL("../scout-smartsure/claims/qa-fixtures.js.txt", import.meta.url),
     "utf8",
   );
   const context = {
@@ -380,38 +380,141 @@ test("synthetic QA fixtures are deterministic, non-identifying and comparison-aw
   assert.equal(context.window.ScoutSyntheticQA.getNetworkLog().length, 2);
 });
 
-test("synthetic preview is opt-in and the QA Worker is configuration-gated", async () => {
-  const config = await readFile(
-    new URL("../scout-smartsure/claims/qa-preview-config.js", import.meta.url),
-    "utf8",
-  );
-  const worker = await readFile(
-    new URL("../scout-smartsure/qa-preview-worker.js", import.meta.url),
-    "utf8",
-  );
+test("production assets exclude preview-only artifacts while retaining shared helpers", async () => {
   const shell = await readFile(
     new URL("../scout-smartsure/claims/index.html", import.meta.url),
     "utf8",
   );
-  assert.match(config, /fixtureMode: false/);
-  assert.match(worker, /SCOUT_QA_FIXTURE_MODE/);
-  assert.match(worker, /toLowerCase\(\) === "true"/);
-  assert.match(shell, /src="\.\/qa-preview-config\.js"/);
-  assert.match(shell, /src="\.\/qa-fixtures\.js"/);
-  assert.match(shell, /QA_CONFIG\.fixtureMode === true/);
-  assert.match(
-    shell,
-    /No production data or writes are used in this environment/,
+  const helper = await readFile(
+    new URL("../scout-smartsure/claims/claims-qa.mjs", import.meta.url),
+    "utf8",
   );
-  assert.match(shell, /exceptionFilter === "closure"/);
-  assert.match(shell, /Close after final checks/);
-  assert.match(shell, /Management review/);
-  assert.match(
-    shell,
-    /Review acknowledgement is disabled in synthetic QA preview/,
+  const assetsIgnore = await readFile(
+    new URL("../scout-smartsure/.assetsignore", import.meta.url),
+    "utf8",
   );
-  assert.match(shell, /No settings are persisted/);
-  assert.match(shell, /syntheticQa: QA_FIXTURE_MODE/);
+  const qaShell = await readFile(
+    new URL("../scout-smartsure/claims/qa-preview-index.html", import.meta.url),
+    "utf8",
+  );
+  const qaFixtures = await readFile(
+    new URL("../scout-smartsure/claims/qa-fixtures.js.txt", import.meta.url),
+    "utf8",
+  );
+  assert.match(shell, /src="\.\/claims-qa\.mjs"/);
+  assert.match(helper, /export function normalizeSourceStatus/);
+  assert.match(qaShell, /UX REMEDIATION PREVIEW · SYNTHETIC QA DATA/);
+  assert.match(qaFixtures, /window\.ScoutSyntheticQA/);
+  assert.doesNotMatch(shell, /qa-preview-config/);
+  assert.doesNotMatch(shell, /qa-fixtures/);
+  assert.doesNotMatch(shell, /ScoutSyntheticQA/);
+  assert.doesNotMatch(shell, /ScoutQAConfig/);
+  assert.doesNotMatch(shell, /QA_FIXTURE_MODE/);
+  assert.doesNotMatch(shell, /synthetic-qa-banner/);
+  assert.doesNotMatch(shell, /UX REMEDIATION PREVIEW/);
+  for (const path of [
+    "/qa-preview-worker.js",
+    "/remediation-preview-worker.js",
+    "/claims/qa-preview-index.html",
+    "/claims/qa-fixtures.js.txt",
+    "/claims/qa-preview-config.js",
+    "/claims/qa-fixtures.js",
+  ]) {
+    assert.match(assetsIgnore, new RegExp(`\\${path}`));
+  }
+  await assert.rejects(
+    readFile(
+      new URL(
+        "../scout-smartsure/claims/qa-preview-config.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  await assert.rejects(
+    readFile(
+      new URL("../scout-smartsure/claims/qa-fixtures.js", import.meta.url),
+      "utf8",
+    ),
+  );
+});
+
+test("QA Worker serves isolated preview assets and falls through for shared assets", async () => {
+  const workerSource = await readFile(
+    new URL("../scout-smartsure/qa-preview-worker.js", import.meta.url),
+    "utf8",
+  );
+  const qaShell = await readFile(
+    new URL("../scout-smartsure/claims/qa-preview-index.html", import.meta.url),
+    "utf8",
+  );
+  const qaFixtures = await readFile(
+    new URL("../scout-smartsure/claims/qa-fixtures.js.txt", import.meta.url),
+    "utf8",
+  );
+  const executable = workerSource
+    .replace(
+      'import qaPreviewHtml from "./claims/qa-preview-index.html";',
+      `const qaPreviewHtml = ${JSON.stringify(qaShell)};`,
+    )
+    .replace(
+      'import qaFixtures from "./claims/qa-fixtures.js.txt";',
+      `const qaFixtures = ${JSON.stringify(qaFixtures)};`,
+    )
+    .replace("export default", "const worker =");
+  const context = { URL, Response, Set };
+  vm.runInNewContext(`${executable}\nthis.worker = worker;`, context);
+  const fallthrough = [];
+  const env = {
+    SCOUT_QA_FIXTURE_MODE: "true",
+    SCOUT_BASE_URL:
+      "https://scout-smartsure-ux-qa.marketing-854.workers.dev/claims/",
+    ASSETS: {
+      fetch: async (request) => {
+        fallthrough.push(new URL(request.url).pathname);
+        return new Response("shared asset", { status: 200 });
+      },
+    },
+  };
+  for (const path of ["/claims", "/claims/", "/claims/index.html"]) {
+    const response = await context.worker.fetch(
+      new Request(`https://qa.example.test${path}`),
+      env,
+    );
+    assert.equal(response.status, 200);
+    assert.match(
+      await response.text(),
+      /UX REMEDIATION PREVIEW · SYNTHETIC QA DATA/,
+    );
+    assert.equal(
+      response.headers.get("content-type"),
+      "text/html; charset=UTF-8",
+    );
+  }
+  const configResponse = await context.worker.fetch(
+    new Request("https://qa.example.test/claims/qa-preview-config.js"),
+    env,
+  );
+  assert.equal(configResponse.status, 200);
+  const configText = await configResponse.text();
+  assert.match(configText, /"fixtureMode":true/);
+  assert.match(configText, /scout-smartsure-ux-qa/);
+  const fixtureResponse = await context.worker.fetch(
+    new Request("https://qa.example.test/claims/qa-fixtures.js"),
+    env,
+  );
+  assert.equal(fixtureResponse.status, 200);
+  assert.match(await fixtureResponse.text(), /window\.ScoutSyntheticQA/);
+  assert.equal(
+    fixtureResponse.headers.get("content-type"),
+    "application/javascript; charset=UTF-8",
+  );
+  const sharedResponse = await context.worker.fetch(
+    new Request("https://qa.example.test/oauth-route.js"),
+    env,
+  );
+  assert.equal(sharedResponse.status, 200);
+  assert.deepEqual(fallthrough, ["/oauth-route.js"]);
   const reports = await readFile(
     new URL("../scout-smartsure/claims/reporting-ui.mjs", import.meta.url),
     "utf8",
@@ -421,5 +524,7 @@ test("synthetic preview is opt-in and the QA Worker is configuration-gated", asy
     reports,
     /Report changes are disabled in the synthetic QA preview/,
   );
-  assert.match(worker, /SCOUT_BASE_URL/);
+  assert.match(workerSource, /SCOUT_BASE_URL/);
+  assert.match(workerSource, /qaPreviewHtml/);
+  assert.match(workerSource, /qaFixtures/);
 });
