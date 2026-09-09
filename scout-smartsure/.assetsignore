@@ -1,3 +1,9 @@
 .git
 /.git/
 **/.git/**
+/qa-preview-worker.js
+/remediation-preview-worker.js
+/claims/qa-preview-index.html
+/claims/qa-fixtures.js.txt
+/claims/qa-preview-config.js
+/claims/qa-fixtures.js

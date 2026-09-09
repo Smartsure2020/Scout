@@ -47,8 +47,6 @@ jobs:
           done <<'FILES'
           scout-smartsure/claims/briefing-model.mjs
           scout-smartsure/claims/claims-qa.mjs
-          scout-smartsure/claims/qa-fixtures.js
-          scout-smartsure/claims/qa-preview-config.js
           scout-smartsure/claims/reporting-ui.mjs
           scout-smartsure/claims/ux-model.mjs
           scout-smartsure/qa-preview-worker.js

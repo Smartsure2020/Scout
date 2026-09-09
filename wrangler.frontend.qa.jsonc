@@ -7,10 +7,16 @@
   "assets": {
     "directory": "scout-smartsure",
     "binding": "ASSETS",
-    "run_worker_first": ["/claims/qa-preview-config.js"]
+    "run_worker_first": [
+      "/claims",
+      "/claims/",
+      "/claims/index.html",
+      "/claims/qa-preview-config.js",
+      "/claims/qa-fixtures.js",
+    ],
   },
   "vars": {
     "SCOUT_QA_FIXTURE_MODE": "true",
-    "SCOUT_BASE_URL": "https://scout-smartsure-ux-qa.marketing-854.workers.dev/claims/"
-  }
+    "SCOUT_BASE_URL": "https://scout-smartsure-ux-qa.marketing-854.workers.dev/claims/",
+  },
 }
