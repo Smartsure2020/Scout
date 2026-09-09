@@ -282,10 +282,75 @@ test("reporting API exposes manager workflow routes with the same bearer boundar
 test("frontend state has separate weekly, monthly and history contexts", () => {
   const state = createReportState(new Date("2026-08-25T10:00:00+02:00"));
   assert.equal(state.activeTab, "weekly");
+  assert.equal(state.reportOriginTab, null);
   assert.equal(state.periodStarts.weekly, "2026-08-17");
   assert.equal(state.periodStarts.monthly, "2026-08-01");
   assert.deepEqual(state.reports, []);
   assert.equal(state.historyLoaded, false);
+});
+
+test("Reports history restores History on Back and the same detail on Forward", async () => {
+  const document = reportDocument();
+  const entries = [{
+    url: "/claims/?view=reports&reportTab=weekly",
+    route: { reportTab: "weekly", report: "" },
+  }];
+  let cursor = 0;
+  const syncUrlState = ({ reportTab, report }, options = {}) => {
+    const route = { reportTab, report: report || "" };
+    const url = `/claims/?view=reports&reportTab=${encodeURIComponent(reportTab)}${report ? `&report=${encodeURIComponent(report)}` : ""}`;
+    const entry = { url, route };
+    if (options.replace) entries[cursor] = entry;
+    else {
+      entries.splice(cursor + 1);
+      entries.push(entry);
+      cursor += 1;
+    }
+  };
+  const controller = new ReportsController({
+    document,
+    syncUrlState,
+    getContext: () => ({ user: { role: "manager" }, freshness: null }),
+  });
+  controller.api = {
+    async getReport() {
+      return {
+        report: {
+          id: "monthly-draft",
+          report_type: "monthly",
+          status: "draft",
+          period_start_local_date: "2026-09-01",
+          period_end_local_date: "2026-10-01",
+          metrics_snapshot: { metrics: {} },
+        },
+      };
+    },
+  };
+
+  controller.open("history");
+  assert.equal(controller.state.activeTab, "history");
+  assert.equal(entries[cursor].url, "/claims/?view=reports&reportTab=history");
+
+  await controller.openReport("monthly-draft");
+  assert.equal(controller.state.activeTab, "monthly");
+  assert.equal(controller.state.selected.id, "monthly-draft");
+  assert.equal(entries[cursor].url, "/claims/?view=reports&reportTab=history&report=monthly-draft");
+
+  cursor -= 1;
+  await controller.openFromRoute(entries[cursor].route.reportTab, entries[cursor].route.report);
+  assert.equal(controller.state.activeTab, "history");
+  assert.equal(controller.state.selected, null);
+
+  cursor += 1;
+  await controller.openFromRoute(entries[cursor].route.reportTab, entries[cursor].route.report);
+  assert.equal(controller.state.activeTab, "monthly");
+  assert.equal(controller.state.selected.id, "monthly-draft");
+
+  controller.open("weekly", { syncUrl: false });
+  assert.equal(controller.state.activeTab, "weekly");
+  controller.open("monthly", { syncUrl: false });
+  assert.equal(controller.state.activeTab, "monthly");
+  assert.equal(controller.state.selected, null);
 });
 
 test("API failures are surfaced to the reporting layer instead of becoming zero-valued data", async () => {

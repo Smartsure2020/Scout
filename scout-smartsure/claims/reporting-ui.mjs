@@ -586,6 +586,7 @@ export function createReportingApi({
 export function createReportState(now = new Date()) {
   return {
     activeTab: "weekly",
+    reportOriginTab: null,
     periodStarts: {
       weekly: defaultReportPeriodStart("weekly", now),
       monthly: defaultReportPeriodStart("monthly", now),
@@ -715,10 +716,13 @@ function claimRowMatchesFilter(row, filter) {
 }
 
 export class ReportsController {
-  constructor({ document, getContext, rootId = "reports-content" } = {}) {
+  constructor({ document, getContext, rootId = "reports-content", syncUrlState } = {}) {
     this.document = document;
     this.getContext = getContext;
     this.rootId = rootId;
+    this.syncUrlState = syncUrlState || ((partial, options) => {
+      globalThis.window?.syncReportsUrlState?.(partial, options);
+    });
     this.state = createReportState();
     this.api = null;
     this.confirmResolver = null;
@@ -746,7 +750,8 @@ export class ReportsController {
     this.document.addEventListener("keydown", this.handleKeydown);
     this.render();
     this.loadWorkflowOwners();
-    this.loadReports();
+    const route = globalThis.window?.getScoutReportsUrlState?.();
+    if (!route?.report) this.loadReports();
     return true;
   }
 
@@ -762,13 +767,17 @@ export class ReportsController {
     this.render();
   }
 
-  open(tab = "weekly") {
+  open(tab = "weekly", options = {}) {
     if (!this.api) return;
     this.state.activeTab = ["weekly", "monthly", "history"].includes(tab)
       ? tab
       : "weekly";
+    this.state.reportOriginTab = null;
     this.state.selected = null;
     this.state.error = null;
+    if (options.syncUrl !== false) {
+      this.syncUrlState({ reportTab: this.state.activeTab, report: "" }, { replace: options.replace === true });
+    }
     this.render();
     if (this.state.activeTab === "history") {
       if (!this.state.historyLoaded) this.loadReports();
@@ -1382,16 +1391,27 @@ export class ReportsController {
       this.loadPeriodReport("weekly");
   }
 
-  async openReport(id) {
+  async openReport(id, options = {}) {
+    return this.openReportWithOptions(id, options);
+  }
+
+  async openReportWithOptions(id, options = {}) {
     if (!id || !this.api) return;
+    const originTab = ["weekly", "monthly", "history"].includes(options.originTab)
+      ? options.originTab
+      : (this.state.activeTab === "history" ? "history" : (this.state.reportOriginTab || "history"));
     this.state.loading = true;
     this.state.operation = "Loading report…";
     this.render();
     try {
       const response = await this.api.getReport(id);
       this.state.selected = normalizeReport(response?.report).run;
+      this.state.reportOriginTab = originTab;
       this.state.activeTab = this.state.selected.report_type || "history";
       this.state.error = null;
+      if (options.syncUrl !== false) {
+        this.syncUrlState({ reportTab: originTab, report: id }, { replace: false });
+      }
     } catch (error) {
       this.state.error = error;
     } finally {
@@ -1399,6 +1419,21 @@ export class ReportsController {
       this.state.operation = "";
       this.render();
     }
+  }
+
+  async openFromRoute(tab = "weekly", reportId = "") {
+    const routeTab = ["weekly", "monthly", "history"].includes(tab) ? tab : "weekly";
+    if (!reportId) {
+      this.open(routeTab, { syncUrl: false });
+      return;
+    }
+    if (!this.api) return;
+    this.state.activeTab = routeTab;
+    this.state.reportOriginTab = routeTab;
+    this.state.selected = null;
+    this.state.error = null;
+    this.render();
+    await this.openReportWithOptions(reportId, { syncUrl: false, originTab: routeTab });
   }
 
   render() {
@@ -1854,7 +1889,12 @@ if (typeof window !== "undefined") {
       }
     }
   });
-  window.openReportsView = (tab) => window.__scoutReportsController?.open(tab);
+  window.openReportsView = (tab, options = {}) => {
+    const controller = window.__scoutReportsController;
+    if (!controller) return;
+    if (options.reportId) return controller.openFromRoute(tab, options.reportId);
+    return controller.open(tab, options);
+  };
   window.openManagementAttentionForm = (claim = {}) => {
     const controller = window.__scoutReportsController;
     if (!controller) {

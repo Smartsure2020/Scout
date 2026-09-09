@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+supabase/signing_keys.json
 
 # Wrangler, dependency, and local tool state
 .wrangler/
@@ -30,4 +31,3 @@ browser-proof.pdf
 .DS_Store
 Thumbs.db
 .vscode/
-

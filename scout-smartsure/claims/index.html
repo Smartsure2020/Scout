@@ -2020,6 +2020,9 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   .main { padding: 14px 10px; }
   .topnav { padding: 10px 12px; }
   .global-search { display: none; }
+  .date-badge { display: none; }
+  .user-pill { width: 34px; flex: 0 0 34px; padding: 5px 3px; justify-content: center; }
+  #user-display-name, #user-role-badge { display: none; }
   .stat-row, .two-col, .settings-grid { grid-template-columns: 1fr !important; }
   .overview-secondary-grid { grid-template-columns: 1fr; }
   .claims-filter-toolbar { align-items: stretch; flex-direction: column; }
@@ -2947,6 +2950,16 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   .sidebar .nav-item { justify-content: space-between; padding: 8px 10px; }
   .auth-card { width: min(400px, calc(100vw - 24px)); padding: 32px 24px; }
 }
+
+/* The full desktop header first fits at 830px. Keep the 641–829px band
+   compact without hiding the search, notifications, or upload controls. */
+@media (min-width: 641px) and (max-width: 829px) {
+  .topnav { min-width: 0; padding: 10px 12px; }
+  .nav-right { min-width: 0; gap: 8px; }
+  .date-badge { display: none; }
+  .user-pill { width: 34px; flex: 0 0 34px; padding: 5px 3px; justify-content: center; }
+  #user-display-name, #user-role-badge { display: none; }
+}
 </style>
 
 <body>
@@ -3786,7 +3799,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   </div>
 </div>
 
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="./qa-preview-config.js"></script><script src="./qa-fixtures.js"></script><script type="module" src="./claims-qa.mjs"></script><script type="module" src="./ux-model.mjs"></script><script type="module" src="./reporting-ui.mjs"></script><script type="module" src="./briefing-model.mjs"></script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="../oauth-route.js"></script><script src="./qa-preview-config.js"></script><script src="./qa-fixtures.js"></script><script type="module" src="./claims-qa.mjs"></script><script type="module" src="./ux-model.mjs"></script><script type="module" src="./reporting-ui.mjs"></script><script type="module" src="./briefing-model.mjs"></script>
 <script>
 
 // XSS SANITISER
@@ -8383,7 +8396,7 @@ function populateFilters(data) {
 }
 
 // NAVIGATION
-const SCOUT_MANAGED_URL_PARAMS = ["view", "claim", "exception", "handler", "search", "status", "priority", "category", "insurer", "from", "to", "min", "zero"];
+const SCOUT_MANAGED_URL_PARAMS = ["view", "claim", "exception", "handler", "search", "status", "priority", "category", "insurer", "from", "to", "min", "zero", "reportTab", "report"];
 
 function urlViewForName(name) {
   if (name === "overview") return "today";
@@ -8436,6 +8449,8 @@ function readScoutUrlState() {
     to: params.get("to") || "",
     min: params.get("min") || "",
     zero: params.get("zero") === "1",
+    reportTab: params.get("reportTab") || "weekly",
+    report: params.get("report") || "",
   };
 }
 
@@ -8460,9 +8475,21 @@ function writeScoutUrlState(partial = {}, options = {}) {
     });
     if (next.zero) url.searchParams.set("zero", "1");
   }
+  if (view === "reports") {
+    const reportTab = ["weekly", "monthly", "history"].includes(next.reportTab) ? next.reportTab : "weekly";
+    url.searchParams.set("reportTab", reportTab);
+    if (next.report) url.searchParams.set("report", String(next.report));
+  }
   if (options.replace) history.replaceState({}, "", url.toString());
   else history.pushState({}, "", url.toString());
 }
+
+function syncReportsUrlState(partial = {}, options = {}) {
+  writeScoutUrlState({ view: "reports", ...partial }, options);
+}
+
+window.getScoutReportsUrlState = readScoutUrlState;
+window.syncReportsUrlState = syncReportsUrlState;
 
 function syncClaimsUrlState() {
   writeScoutUrlState({
@@ -8558,6 +8585,15 @@ function applyScoutUrlState() {
     setSelectValue("exceptions-handler-filter", state.handler);
     focusViewById("exceptions", { syncUrl: false });
     renderExceptions(getProcessedClaims());
+    return;
+  }
+  if (state.view === "reports") {
+    focusViewById("reports", { syncUrl: false });
+    const reportTab = ["weekly", "monthly", "history"].includes(state.reportTab) ? state.reportTab : "weekly";
+    setTimeout(() => window.openReportsView?.(reportTab, {
+      syncUrl: false,
+      reportId: state.report || "",
+    }), 0);
     return;
   }
   const routeView = state.view === "today" ? "overview" : state.view;
@@ -8862,7 +8898,10 @@ async function signIn() {
 
   const state = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
   sessionStorage.setItem("oauth_state", state);
-  sessionStorage.setItem("oauth_relay_target", "/claims/");
+  sessionStorage.setItem(
+    "oauth_relay_target",
+    window.ScoutOAuthRoute?.buildOAuthRelayTarget(window.location.href, window.location.origin) || "/claims/",
+  );
 
   const redirectUri = encodeURIComponent(REDIRECT_URI);
   const scope = encodeURIComponent("openid profile email User.Read");
@@ -8887,7 +8926,10 @@ async function silentSignIn(loginHint) {
   sessionStorage.setItem("silent_auth", "1");
   const state = Array.from(crypto.getRandomValues(new Uint8Array(16)), b => b.toString(16).padStart(2, "0")).join("");
   sessionStorage.setItem("oauth_state", state);
-  sessionStorage.setItem("oauth_relay_target", "/claims/");
+  sessionStorage.setItem(
+    "oauth_relay_target",
+    window.ScoutOAuthRoute?.buildOAuthRelayTarget(window.location.href, window.location.origin) || "/claims/",
+  );
   const redirectUri = encodeURIComponent(REDIRECT_URI);
   const scope = encodeURIComponent("openid profile email User.Read");
   window.location.href = "https://login.microsoftonline.com/" + CONFIG.azureTenantId +

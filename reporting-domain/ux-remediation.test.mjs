@@ -200,6 +200,12 @@ test("checkpoint 4 makes high-frequency navigation and claim controls keyboard r
   assert.doesNotMatch(source, /<button class="filter-chip[^>]*>.*<button/s);
   assert.match(source, /claims-table \{ overflow-x: auto; \}/);
   assert.match(source, /\.main \{[\s\S]*?min-width: 0;/);
+  assert.match(source, /\.date-badge \{ display: none; \}/, "mobile header should remove the duplicate date badge before controls wrap");
+  assert.match(source, /\.user-pill \{ width: 34px; flex: 0 0 34px; padding: 5px 3px; justify-content: center; \}/, "mobile header should compact the user control without removing it");
+  assert.match(source, /#user-display-name, #user-role-badge \{ display: none; \}/, "mobile header should keep the user control accessible while compact");
+  assert.match(source, /@media \(min-width: 641px\) and \(max-width: 829px\) \{[\s\S]*?\.topnav \{ min-width: 0; padding: 10px 12px; \}[\s\S]*?\.nav-right \{ min-width: 0; gap: 8px; \}[\s\S]*?\.date-badge \{ display: none; \}[\s\S]*?\.user-pill \{ width: 34px; flex: 0 0 34px; padding: 5px 3px; justify-content: center; \}[\s\S]*?#user-display-name, #user-role-badge \{ display: none; \}/, "tablet header should compact only the duplicate date and user presentation");
+  assert.match(source, /id="notification-button"/, "tablet header should retain the notification control");
+  assert.match(source, /id="upload-btn"/, "tablet header should retain the upload control");
   assert.match(source, /aria-current/, "navigation state should be announced");
   assert.match(source, /function openUploadOverlay/);
   assert.match(source, /if \(!options\.fromRoute && !detailOriginFocus\)/, "claim opening should retain a focusable queue origin");
