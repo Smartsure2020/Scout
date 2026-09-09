@@ -12,28 +12,41 @@ import { buildBriefingModel } from "../scout-smartsure/claims/briefing-model.mjs
 test("freshness model distinguishes current, stale, warning and unavailable extracts", () => {
   const now = new Date("2026-09-02T09:00:00+02:00");
   assert.equal(
-    getFreshnessModel({ claimsAvailable: true, extractDate: "2026-09-02", now }).state,
+    getFreshnessModel({ claimsAvailable: true, extractDate: "2026-09-02", now })
+      .state,
     "current",
   );
   assert.equal(
-    getFreshnessModel({ claimsAvailable: true, extractDate: "2026-09-01", now }).state,
+    getFreshnessModel({ claimsAvailable: true, extractDate: "2026-09-01", now })
+      .state,
     "stale",
   );
   assert.equal(
-    getFreshnessModel({ claimsAvailable: true, extractDate: "2026-09-02", warningCount: 1, now }).state,
+    getFreshnessModel({
+      claimsAvailable: true,
+      extractDate: "2026-09-02",
+      warningCount: 1,
+      now,
+    }).state,
     "warning",
   );
   assert.equal(
     getFreshnessModel({ claimsAvailable: true, now }).state,
     "warning",
   );
-  assert.equal(getFreshnessModel({ claimsAvailable: false, now }).state, "unavailable");
+  assert.equal(
+    getFreshnessModel({ claimsAvailable: false, now }).state,
+    "unavailable",
+  );
 });
 
 test("comparison requires a real previous extract, including a valid empty one", () => {
   assert.equal(hasValidComparison([{ claimNo: "A" }], []), true);
   assert.equal(hasValidComparison([{ claimNo: "A" }], null), false);
-  assert.equal(comparisonUnavailableLabel([{ claimNo: "A" }], null), "Comparison unavailable");
+  assert.equal(
+    comparisonUnavailableLabel([{ claimNo: "A" }], null),
+    "Comparison unavailable",
+  );
   assert.equal(comparisonUnavailableLabel([{ claimNo: "A" }], []), "");
 });
 
@@ -108,13 +121,29 @@ test("checkpoint 2 provides an exceptions workbench, role-aware navigation and s
   assert.match(source, /function buildClaimTimeline/);
   assert.match(source, /class="detail-next-action"/);
   assert.match(source, /No claim movement chronology is available/);
-  assert.match(source, /role="dialog" aria-modal="true" aria-labelledby="dp-claim-no"/);
+  assert.match(
+    source,
+    /role="dialog" aria-modal="true" aria-labelledby="dp-claim-no"/,
+  );
 });
 
 test("shared briefing model suppresses invalid comparisons and deduplicates handler items", () => {
   const claims = [
-    { claimNo: "C-1", handler: "Jane Doe", score: 80, outstanding: 100000, critical: true, zero: true },
-    { claimNo: "C-2", handler: "Jane Doe", score: 50, stale: true, awaiting: true },
+    {
+      claimNo: "C-1",
+      handler: "Jane Doe",
+      score: 80,
+      outstanding: 100000,
+      critical: true,
+      zero: true,
+    },
+    {
+      claimNo: "C-2",
+      handler: "Jane Doe",
+      score: 50,
+      stale: true,
+      awaiting: true,
+    },
     { claimNo: "C-3", handler: "Jane Doe", score: 30, payment: true },
   ];
   const helpers = {
@@ -130,11 +159,14 @@ test("shared briefing model suppresses invalid comparisons and deduplicates hand
     isMandate: (c) => c.outstanding >= 100000,
     isAwaitingExternal: (c) => c.awaiting,
     isPayment: (c) => c.payment,
-    getPrimaryReason: (c) => c.critical ? "Critical SLA breach" : "Review claim progress",
+    getPrimaryReason: (c) =>
+      c.critical ? "Critical SLA breach" : "Review claim progress",
     getNextAction: () => "Review and progress claim",
     claimUrl: (c) => `https://scout.test/claims/?view=claim&claim=${c.claimNo}`,
-    handlerUrl: (h) => `https://scout.test/claims/?view=claims&handler=${encodeURIComponent(h)}`,
-    exceptionUrl: (e) => `https://scout.test/claims/?view=exceptions&exception=${e}`,
+    handlerUrl: (h) =>
+      `https://scout.test/claims/?view=claims&handler=${encodeURIComponent(h)}`,
+    exceptionUrl: (e) =>
+      `https://scout.test/claims/?view=exceptions&exception=${e}`,
   };
   const unavailable = buildBriefingModel(claims, helpers, {
     comparisonAvailable: false,
@@ -145,9 +177,15 @@ test("shared briefing model suppresses invalid comparisons and deduplicates hand
   assert.equal(unavailable.extractDate, "2026-09-01");
   assert.equal(unavailable.metrics.newClaims, null);
   assert.equal(unavailable.comparisonLabel, "Comparison unavailable");
-  assert.equal(unavailable.handler.items.filter((item) => item.claimNo === "C-1").length, 1);
+  assert.equal(
+    unavailable.handler.items.filter((item) => item.claimNo === "C-1").length,
+    1,
+  );
   assert.match(unavailable.topRisks.items[0]?.url || "", /view=claim/);
-  const available = buildBriefingModel(claims, helpers, { comparisonAvailable: true, previousClaims: [] });
+  const available = buildBriefingModel(claims, helpers, {
+    comparisonAvailable: true,
+    previousClaims: [],
+  });
   assert.equal(available.comparisonAvailable, true);
   assert.notEqual(available.metrics.newClaims, null);
 });
@@ -157,8 +195,14 @@ test("checkpoint 3 uses one briefing model for Outlook-safe email, Teams and dee
     new URL("../scout-smartsure/claims/index.html", import.meta.url),
     "utf8",
   );
-  const worker = await readFile(new URL("../worker.js", import.meta.url), "utf8");
-  const model = await readFile(new URL("../scout-smartsure/claims/briefing-model.mjs", import.meta.url), "utf8");
+  const worker = await readFile(
+    new URL("../worker.js", import.meta.url),
+    "utf8",
+  );
+  const model = await readFile(
+    new URL("../scout-smartsure/claims/briefing-model.mjs", import.meta.url),
+    "utf8",
+  );
   assert.match(source, /briefing-model\.mjs/);
   assert.match(source, /function getSharedBriefingModel/);
   assert.match(source, /buildBriefingModel/);
@@ -196,19 +240,50 @@ test("checkpoint 4 makes high-frequency navigation and claim controls keyboard r
   assert.match(source, /aria-describedby="detail-body"/);
   assert.match(source, /role="button" tabindex="0" aria-label="Open claim/);
   assert.match(source, /return `<a class="exception-row"/);
-  assert.doesNotMatch(source, /exception-row-primary"><a class="exception-row-link"/);
+  assert.doesNotMatch(
+    source,
+    /exception-row-primary"><a class="exception-row-link"/,
+  );
   assert.doesNotMatch(source, /<button class="filter-chip[^>]*>.*<button/s);
   assert.match(source, /claims-table \{ overflow-x: auto; \}/);
   assert.match(source, /\.main \{[\s\S]*?min-width: 0;/);
-  assert.match(source, /\.date-badge \{ display: none; \}/, "mobile header should remove the duplicate date badge before controls wrap");
-  assert.match(source, /\.user-pill \{ width: 34px; flex: 0 0 34px; padding: 5px 3px; justify-content: center; \}/, "mobile header should compact the user control without removing it");
-  assert.match(source, /#user-display-name, #user-role-badge \{ display: none; \}/, "mobile header should keep the user control accessible while compact");
-  assert.match(source, /@media \(min-width: 641px\) and \(max-width: 829px\) \{[\s\S]*?\.topnav \{ min-width: 0; padding: 10px 12px; \}[\s\S]*?\.nav-right \{ min-width: 0; gap: 8px; \}[\s\S]*?\.date-badge \{ display: none; \}[\s\S]*?\.user-pill \{ width: 34px; flex: 0 0 34px; padding: 5px 3px; justify-content: center; \}[\s\S]*?#user-display-name, #user-role-badge \{ display: none; \}/, "tablet header should compact only the duplicate date and user presentation");
-  assert.match(source, /id="notification-button"/, "tablet header should retain the notification control");
-  assert.match(source, /id="upload-btn"/, "tablet header should retain the upload control");
+  assert.match(
+    source,
+    /\.date-badge \{ display: none; \}/,
+    "mobile header should remove the duplicate date badge before controls wrap",
+  );
+  assert.match(
+    source,
+    /\.user-pill \{ width: 34px; flex: 0 0 34px; padding: 5px 3px; justify-content: center; \}/,
+    "mobile header should compact the user control without removing it",
+  );
+  assert.match(
+    source,
+    /#user-display-name, #user-role-badge \{ display: none; \}/,
+    "mobile header should keep the user control accessible while compact",
+  );
+  assert.match(
+    source,
+    /@media \(min-width: 641px\) and \(max-width: 829px\) \{[\s\S]*?\.topnav \{ min-width: 0; padding: 10px 12px; \}[\s\S]*?\.nav-right \{ min-width: 0; gap: 8px; \}[\s\S]*?\.date-badge \{ display: none; \}[\s\S]*?\.user-pill \{ width: 34px; flex: 0 0 34px; padding: 5px 3px; justify-content: center; \}[\s\S]*?#user-display-name, #user-role-badge \{ display: none; \}/,
+    "tablet header should compact only the duplicate date and user presentation",
+  );
+  assert.match(
+    source,
+    /id="notification-button"/,
+    "tablet header should retain the notification control",
+  );
+  assert.match(
+    source,
+    /id="upload-btn"/,
+    "tablet header should retain the upload control",
+  );
   assert.match(source, /aria-current/, "navigation state should be announced");
   assert.match(source, /function openUploadOverlay/);
-  assert.match(source, /if \(!options\.fromRoute && !detailOriginFocus\)/, "claim opening should retain a focusable queue origin");
+  assert.match(
+    source,
+    /if \(!options\.fromRoute && !detailOriginFocus\)/,
+    "claim opening should retain a focusable queue origin",
+  );
   assert.match(source, /overlay\.setAttribute\("aria-hidden", "false"\)/);
   assert.match(source, /backdrop\.setAttribute\("aria-hidden", "false"\)/);
   assert.match(source, /trapOverlayFocus/);
@@ -216,7 +291,10 @@ test("checkpoint 4 makes high-frequency navigation and claim controls keyboard r
     new URL("../scout-smartsure/claims/reporting-ui.mjs", import.meta.url),
     "utf8",
   );
-  assert.match(reports, /role="tab" aria-selected=.*aria-controls="reports-tabpanel"/);
+  assert.match(
+    reports,
+    /role="tab" aria-selected=.*aria-controls="reports-tabpanel"/,
+  );
   assert.match(reports, /role="tabpanel" tabindex="-1"/);
   assert.match(reports, /confirmOriginFocus/);
   assert.match(reports, /drillOriginFocus/);
@@ -262,19 +340,41 @@ test("synthetic QA fixtures are deterministic, non-identifying and comparison-aw
   assert.equal(fixture.history.length, 2);
   assert.equal(fixture.reports.length, 3);
   assert.ok(fixture.claims.every((claim) => /^QA-\d{4}$/.test(claim.claim_no)));
-  assert.ok(fixture.claims.every((claim) => claim.insured_name.startsWith("Synthetic Insured ")));
-  assert.ok(fixture.claims.every((claim) => claim.handler_email.endsWith("@synthetic.invalid")));
-  assert.ok(fixture.claims.some((claim) => claim.status === "Awaiting Assessor Report"));
-  assert.ok(fixture.claims.some((claim) => claim.status === "Payment Requested" && claim.estimate === 0));
+  assert.ok(
+    fixture.claims.every((claim) =>
+      claim.insured_name.startsWith("Synthetic Insured "),
+    ),
+  );
+  assert.ok(
+    fixture.claims.every((claim) =>
+      claim.handler_email.endsWith("@synthetic.invalid"),
+    ),
+  );
+  assert.ok(
+    fixture.claims.some((claim) => claim.status === "Awaiting Assessor Report"),
+  );
+  assert.ok(
+    fixture.claims.some(
+      (claim) => claim.status === "Payment Requested" && claim.estimate === 0,
+    ),
+  );
   assert.ok(fixture.claims.some((claim) => claim.outstanding >= 100000));
-  assert.doesNotMatch(JSON.stringify(fixture), /scout-backend\.marketing-854\.workers\.dev/);
+  assert.doesNotMatch(
+    JSON.stringify(fixture),
+    /scout-backend\.marketing-854\.workers\.dev/,
+  );
 
   context.window.location.search = "?qa-scenario=no-comparison";
   const unavailable = context.window.ScoutSyntheticQA.getFixture();
   assert.equal(unavailable.history.length, 1);
 
-  const readAttempt = await context.window.fetch("https://scout-backend.marketing-854.workers.dev/claims");
-  const writeAttempt = await context.window.fetch("https://scout-backend.marketing-854.workers.dev/notes/QA-0001", { method: "PUT" });
+  const readAttempt = await context.window.fetch(
+    "https://scout-backend.marketing-854.workers.dev/claims",
+  );
+  const writeAttempt = await context.window.fetch(
+    "https://scout-backend.marketing-854.workers.dev/notes/QA-0001",
+    { method: "PUT" },
+  );
   assert.equal(readAttempt.status, 200);
   assert.equal(writeAttempt.status, 403);
   assert.equal(context.window.ScoutSyntheticQA.getNetworkLog().length, 2);
@@ -299,11 +399,17 @@ test("synthetic preview is opt-in and the QA Worker is configuration-gated", asy
   assert.match(shell, /src="\.\/qa-preview-config\.js"/);
   assert.match(shell, /src="\.\/qa-fixtures\.js"/);
   assert.match(shell, /QA_CONFIG\.fixtureMode === true/);
-  assert.match(shell, /No production data or writes are used in this environment/);
+  assert.match(
+    shell,
+    /No production data or writes are used in this environment/,
+  );
   assert.match(shell, /exceptionFilter === "closure"/);
   assert.match(shell, /Close after final checks/);
   assert.match(shell, /Management review/);
-  assert.match(shell, /Review acknowledgement is disabled in synthetic QA preview/);
+  assert.match(
+    shell,
+    /Review acknowledgement is disabled in synthetic QA preview/,
+  );
   assert.match(shell, /No settings are persisted/);
   assert.match(shell, /syntheticQa: QA_FIXTURE_MODE/);
   const reports = await readFile(
@@ -311,6 +417,9 @@ test("synthetic preview is opt-in and the QA Worker is configuration-gated", asy
     "utf8",
   );
   assert.match(reports, /isSyntheticQa\(\)/);
-  assert.match(reports, /Report changes are disabled in the synthetic QA preview/);
+  assert.match(
+    reports,
+    /Report changes are disabled in the synthetic QA preview/,
+  );
   assert.match(worker, /SCOUT_BASE_URL/);
 });

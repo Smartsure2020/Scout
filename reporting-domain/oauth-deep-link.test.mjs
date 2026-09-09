@@ -6,7 +6,10 @@ import { readFile } from "node:fs/promises";
 const origin = "https://preview.example";
 
 async function loadRouteHelper() {
-  const source = await readFile(new URL("../scout-smartsure/oauth-route.js", import.meta.url), "utf8");
+  const source = await readFile(
+    new URL("../scout-smartsure/oauth-route.js", import.meta.url),
+    "utf8",
+  );
   const context = {
     URL,
     URLSearchParams,
@@ -47,17 +50,30 @@ test("OAuth relay normalizes claims and exception routes and rejects external ta
     "/claims/?view=claims&handler=Blair+Handler&priority=critical",
   );
   assert.equal(
-    route.buildOAuthRelayTarget(`${origin}/claims/?view=exceptions&exception=closure`, origin),
+    route.buildOAuthRelayTarget(
+      `${origin}/claims/?view=exceptions&exception=closure`,
+      origin,
+    ),
     "/claims/?view=exceptions&exception=closure",
   );
-  assert.equal(route.mergeOAuthCallbackParams("https://evil.example/claims/", `${origin}/?code=x`, origin), "");
+  assert.equal(
+    route.mergeOAuthCallbackParams(
+      "https://evil.example/claims/",
+      `${origin}/?code=x`,
+      origin,
+    ),
+    "",
+  );
 });
 
 test("OAuth relay preserves valid Reports tab and detail state through cold authentication", async () => {
   const route = await loadRouteHelper();
   for (const reportTab of ["weekly", "monthly", "history"]) {
     assert.equal(
-      route.buildOAuthRelayTarget(`${origin}/claims/?view=reports&reportTab=${reportTab}`, origin),
+      route.buildOAuthRelayTarget(
+        `${origin}/claims/?view=reports&reportTab=${reportTab}`,
+        origin,
+      ),
       `/claims/?view=reports&reportTab=${reportTab}`,
     );
   }
@@ -82,15 +98,24 @@ test("OAuth relay preserves valid Reports tab and detail state through cold auth
 test("OAuth relay drops invalid Reports substate without corrupting the route", async () => {
   const route = await loadRouteHelper();
   assert.equal(
-    route.buildOAuthRelayTarget(`${origin}/claims/?view=reports&reportTab=unknown&report=bad`, origin),
+    route.buildOAuthRelayTarget(
+      `${origin}/claims/?view=reports&reportTab=unknown&report=bad`,
+      origin,
+    ),
     "/claims/?view=reports",
   );
   assert.equal(
-    route.buildOAuthRelayTarget(`${origin}/claims/?view=reports&reportTab=history&report=https%3A%2F%2Fevil.example`, origin),
+    route.buildOAuthRelayTarget(
+      `${origin}/claims/?view=reports&reportTab=history&report=https%3A%2F%2Fevil.example`,
+      origin,
+    ),
     "/claims/?view=reports&reportTab=history",
   );
   assert.equal(
-    route.buildOAuthRelayTarget(`${origin}/claims/?view=claim&claim=QA-0001&reportTab=history`, origin),
+    route.buildOAuthRelayTarget(
+      `${origin}/claims/?view=claim&claim=QA-0001&reportTab=history`,
+      origin,
+    ),
     "/claims/?view=claim&claim=QA-0001",
   );
 });
