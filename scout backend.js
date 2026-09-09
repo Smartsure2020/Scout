@@ -67,6 +67,13 @@ import {
   persistHistoryEvidenceWithStore,
   HISTORY_BATCH_SIZE,
 } from "./reporting-domain/history-persistence.mjs";
+import {
+  corsHeaders,
+  isApprovedPreviewRead,
+  isPreviewMutation,
+  isPreviewReadOnly,
+  PREVIEW_SUPABASE_URL,
+} from "./preview-policy.mjs";
 
 const CORS = {
   // The Claims portal is served by the dedicated frontend Worker. Keep the
@@ -142,15 +149,15 @@ async function saveDigestSettings(env, patch) {
   return normaliseDigestSettings(rows?.[0]?.value || next);
 }
 
-function json(data, status = 200) {
+function jsonResponse(data, status = 200, headers = CORS) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...CORS, "Content-Type": "application/json" },
+    headers: { ...headers, "Content-Type": "application/json" },
   });
 }
 
-function err(msg, status = 400) {
-  return json({ error: msg }, status);
+function errorResponse(msg, status = 400, headers = CORS) {
+  return jsonResponse({ error: msg }, status, headers);
 }
 
 function noteNotificationId(idempotencyKey) {
@@ -173,12 +180,31 @@ async function supabase(
   useService = false,
   prefer = null,
 ) {
-  const key = useService ? env.SUPABASE_SERVICE : env.SUPABASE_ANON;
-  const res = await fetch(env.SUPABASE_URL + "/rest/v1" + path, {
+  const preview = isPreviewReadOnly(env);
+  const apiKey = preview
+    ? env.SUPABASE_PREVIEW_API_KEY
+    : useService
+      ? env.SUPABASE_SERVICE
+      : env.SUPABASE_ANON;
+  const bearerToken = preview
+    ? env.SUPABASE_PREVIEW_READER_TOKEN
+    : apiKey;
+  const supabaseUrl = preview ? String(env.SUPABASE_URL || "") : env.SUPABASE_URL;
+  if (preview && supabaseUrl !== PREVIEW_SUPABASE_URL) {
+    throw new Error("Preview Supabase URL is not the approved acceptance project");
+  }
+  if (!apiKey || !bearerToken) {
+    throw new Error(
+      preview
+        ? "Preview Supabase API key and reader credential are not configured"
+        : "Supabase credential is not configured",
+    );
+  }
+  const res = await fetch(supabaseUrl + "/rest/v1" + path, {
     method,
     headers: {
-      apikey: key,
-      Authorization: "Bearer " + key,
+      apikey: apiKey,
+      Authorization: "Bearer " + bearerToken,
       "Content-Type": "application/json",
       Prefer: prefer || (method === "POST" ? "return=representation" : ""),
     },
@@ -1661,6 +1687,7 @@ function publicHistoryManifest(manifest) {
 
 // ── Audit logger ─────────────────────────────────────────────
 async function audit(env, userEmail, userName, action, detail = {}) {
+  if (isPreviewReadOnly(env)) return;
   try {
     await supabase(
       env,
@@ -1784,11 +1811,28 @@ async function canAccessClaimNote(env, claimNo, currentUser) {
 // ── ROUTER ───────────────────────────────────────────────────
 export default {
   async fetch(request, env) {
-    if (request.method === "OPTIONS")
-      return new Response(null, { headers: CORS });
-
     const url = new URL(request.url);
     const path = url.pathname;
+    const headers = corsHeaders(env, request);
+    const json = (data, status = 200) =>
+      jsonResponse(data, status, headers);
+    const err = (msg, status = 400) =>
+      errorResponse(msg, status, headers);
+
+    if (request.method === "OPTIONS")
+      return new Response(null, { headers });
+
+    if (isPreviewReadOnly(env)) {
+      if (request.method === "HEAD")
+        return new Response(null, { status: 200, headers });
+      if (isPreviewMutation(path, request.method))
+        return err("Preview environment is read-only", 403);
+      if (
+        request.method === "GET" &&
+        !isApprovedPreviewRead(path, request.method)
+      )
+        return err("Preview route is not enabled", 404);
+    }
 
     // ── /auth/me — verify MS token, return user+role ──────────
     if (path === "/auth/me" && request.method === "POST") {

@@ -289,6 +289,7 @@ body {
   </div>
 </div>
 
+<script src="./oauth-route.js"></script>
 <script>
 // ── CONFIG ────────────────────────────────────────────────────
 const CONFIG = {
@@ -508,10 +509,17 @@ async function init() {
     // send users through here with the client's origin as redirect_uri, then
     // ask us to relay the returned code back to them to finish the exchange.
     const relayTarget = sessionStorage.getItem("oauth_relay_target");
-    if (params.has("code") && relayTarget) {
+    if (relayTarget && hasOAuthCallback) {
+      const relayedUrl = window.ScoutOAuthRoute?.mergeOAuthCallbackParams(
+        relayTarget,
+        window.location.href,
+        window.location.origin,
+      );
       sessionStorage.removeItem("oauth_relay_target");
-      window.location.href = relayTarget + window.location.search;
-      return;
+      if (relayedUrl) {
+        window.location.href = relayedUrl;
+        return;
+      }
     }
     const success = await handleOAuthCallback();
     if (!success) return;

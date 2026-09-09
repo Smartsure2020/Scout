@@ -24,7 +24,10 @@
  * - SUPABASE_DIGEST_LOG_TABLE=digest_log
  * - SUPABASE_SETTINGS_TABLE=scout_settings
  * - DIGEST_HISTORY_RETENTION_DAYS=90
+ * - SCOUT_CLAIMS_URL=https://your-scout-host/claims/ (optional, for briefing deep links)
  */
+
+import { buildBriefingModel } from "./scout-smartsure/claims/briefing-model.mjs";
 
 const DEFAULT_SEND_TIME = "07:30";
 const DEFAULT_MANAGER_EMAIL = "bev@smartsure2020.co.za";
@@ -368,15 +371,18 @@ function emailLayout(title, subtitle, bodyHtml) {
   return `<!doctype html>
 <html>
 <body style="margin:0;background:#f4f8f8;font-family:Segoe UI,Arial,sans-serif;color:#1a2e2e;">
-  <div style="max-width:760px;margin:0 auto;padding:28px 16px;">
-    <div style="background:#1e6363;color:#fff;border-radius:10px 10px 0 0;padding:20px 24px;">
-      <div style="font-size:20px;font-weight:700;">${escapeHtml(title)}</div>
-      <div style="font-size:13px;color:rgba(255,255,255,.75);margin-top:4px;">${escapeHtml(subtitle)}</div>
-    </div>
-    <div style="background:#fff;border:1px solid #e2ecea;border-top:none;border-radius:0 0 10px 10px;padding:24px;">
-      ${bodyHtml}
-    </div>
-  </div>
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;background:#f4f8f8;">
+    <tr><td align="center" style="padding:24px 12px;">
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="680" style="width:100%;max-width:680px;background:#fff;border:1px solid #e2ecea;border-collapse:separate;border-radius:8px;overflow:hidden;">
+        <tr><td style="background:#1e6363;color:#fff;padding:20px 24px;">
+          <div style="font-size:20px;font-weight:700;line-height:1.25;">${escapeHtml(title)}</div>
+          <div style="font-size:13px;color:#e7f4f1;margin-top:5px;line-height:1.45;">${escapeHtml(subtitle)}</div>
+        </td></tr>
+        <tr><td style="padding:24px;">${bodyHtml}</td></tr>
+        <tr><td style="background:#f4f8f8;border-top:1px solid #e2ecea;padding:14px 24px;text-align:center;color:#6b8582;font-size:12px;line-height:1.5;">Scout · Smartsure Twenty20 · Automated briefing</td></tr>
+      </table>
+    </td></tr>
+  </table>
 </body>
 </html>`;
 }
@@ -422,105 +428,247 @@ function managerRiskLine(claim) {
   return `${escapeHtml(claimNo(claim))} - ${escapeHtml(claimInsured(claim))} - ${escapeHtml(claimStatus(claim))} - ${escapeHtml(claimFlags(claim).join(", ") || "Risk review")}`;
 }
 
-function buildHandlerBriefing(handler, claims, runDate, options = {}) {
-  const active = options.includeTerminalClaims ? claims : claims.filter(claim => !isTerminalClaim(claim));
-  const critical = active.filter(isCriticalClaim);
-  const stale = active.filter(isStaleClaim);
-  const onTrack = Math.max(0, active.length - critical.length - stale.length);
-  const urgent = active
-    .filter(claim => isCriticalClaim(claim) || claimPriorityScore(claim) >= 45)
-    .sort(sortByPriorityThenAge)
-    .slice(0, 10);
-  const zero = active.filter(isZeroEstimateAnomaly).sort(sortByPriorityThenAge).slice(0, 10);
-  const awaiting = active.filter(isAwaitingBrokerFollowUp).sort(sortByPriorityThenAge).slice(0, 10);
-  const assessor = active.filter(isAssessorReportOverdue).sort(sortByPriorityThenAge).slice(0, 10);
-  const payment = active.filter(isPaymentReady).sort(sortByPriorityThenAge).slice(0, 10);
-  const fresh = active.filter(isNewToday).sort(sortByPriorityThenAge).slice(0, 10);
+function canonicalBriefingLabel(label) {
+  const text = String(label || "").trim();
+  if (!text) return "Review claim progress";
+  if (/^sla breached$/i.test(text)) return "Critical SLA breach";
+  if (/^near sla$/i.test(text)) return "SLA at risk";
+  if (/zero[- ]estimate anomaly|zero estimate/i.test(text)) return "Zero estimate anomaly";
+  if (/mandate|over mandate/i.test(text)) return "Mandate authority required";
+  if (/no movement/i.test(text)) return "No movement";
+  if (/assessor report overdue/i.test(text)) return "Assessor report overdue";
+  if (/investigator report overdue/i.test(text)) return "Investigator report overdue";
+  if (/broker unresponsive|awaiting .*broker|awaiting .*client|broker\/client/i.test(text)) return "Awaiting external response";
+  if (/payment[s]? pending|awaiting payment/i.test(text)) return "Payment pending";
+  if (/ready to close|possible closure|closure review|consider closing|settlement complete/i.test(text)) return "Closure candidate";
+  return text.replace(/\s+-\s+/g, " — ").replace(/\s{2,}/g, " ");
+}
 
+function briefingPrimaryReason(claim) {
+  return canonicalBriefingLabel(claimFlags(claim)[0] || "Review claim progress");
+}
+
+function briefingNextAction(claim) {
+  if (isCriticalClaim(claim)) return "Review the critical SLA and progress the next step";
+  if (claimOutstanding(claim) >= 100000 || normaliseStatus(claimStatus(claim)).includes("mandate")) return "Review authority and management decision";
+  if (isZeroEstimateAnomaly(claim)) return "Validate estimate and payment or closure state";
+  if (isAssessorReportOverdue(claim)) return "Chase assessor report";
+  if (isAwaitingBrokerFollowUp(claim)) return "Follow up with broker or client";
+  if (isPaymentReady(claim)) return "Confirm payment status and close if complete";
+  const closure = getReadyToCloseCandidate(claim);
+  if (closure) return closure.action;
+  return "Review and progress claim";
+}
+
+function workerScoutBaseUrl(options = {}) {
+  const raw = options.scoutClaimsUrl || options.scoutBaseUrl || "";
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (!/\/claims\/?$/i.test(url.pathname)) {
+      url.pathname = url.pathname.replace(/\/+$/, "") + "/claims/";
+    } else if (!url.pathname.endsWith("/")) {
+      url.pathname += "/";
+    }
+    url.search = "";
+    url.hash = "";
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function workerScoutUrl(options, params) {
+  const url = workerScoutBaseUrl(options);
+  if (!url) return "";
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== "") url.searchParams.set(key, String(value));
+  });
+  return url.toString();
+}
+
+function workerBriefingModel(claims, previousClaims, options = {}) {
+  return buildBriefingModel(claims, {
+    getClaimNo: claimNo,
+    getHandler: claimHandler,
+    getInsured: claimInsured,
+    getAge: claimAge,
+    getScore: claimPriorityScore,
+    getOutstanding: claimOutstanding,
+    isTerminal: isTerminalClaim,
+    isSettled: claim => normaliseStatus(claimStatus(claim)).startsWith("settled"),
+    isCritical: isCriticalClaim,
+    isStale: isStaleClaim,
+    isZeroEstimate: isZeroEstimateAnomaly,
+    isRisk: isRiskWatchClaim,
+    isMandate: claim => claimOutstanding(claim) >= 100000 || normaliseStatus(claimStatus(claim)).includes("mandate"),
+    isClosure: isReadyToCloseClaim,
+    isNoMovement: isNoMovement30,
+    isAwaitingExternal: isAwaitingBrokerFollowUp,
+    isAssessorOverdue: isAssessorReportOverdue,
+    isPayment: isPaymentReady,
+    isNew: isNewToday,
+    getPrimaryReason: briefingPrimaryReason,
+    getNextAction: briefingNextAction,
+    claimUrl: claim => workerScoutUrl(options, { view: "claim", claim: claimNo(claim) }),
+    handlerUrl: handler => workerScoutUrl(options, { view: "claims", handler }),
+    exceptionUrl: (exception, handler) => workerScoutUrl(options, { view: "exceptions", exception, handler }),
+  }, {
+    includeTerminalClaims: options.includeTerminalClaims,
+    includeSettled: options.includeSettled === true,
+    comparisonAvailable: options.comparisonAvailable,
+    previousClaims,
+    extractDate: options.extract?.extract_date || options.extract?.effective_date || null,
+    freshness: { label: extractFreshnessLine(options.extract) },
+    generatedDate: options.runDate || null,
+  });
+}
+
+function workerEmailLink(url, label) {
+  return url
+    ? `<a href="${escapeHtml(url)}" style="color:#1e6363;text-decoration:underline;font-weight:700;">${escapeHtml(label)}</a>`
+    : escapeHtml(label);
+}
+
+function workerEmailSectionTitle(title) {
+  return `<div style="font-size:14px;font-weight:700;color:#1e6363;padding-bottom:7px;border-bottom:1px solid #e2ecea;margin:24px 0 10px;">${escapeHtml(title)}</div>`;
+}
+
+function workerClaimTable(items, emptyText = "No claims require attention.") {
+  if (!items.length) return `<p style="margin:0;color:#6b8582;font-size:13px;">${escapeHtml(emptyText)}</p>`;
+  return `<table role="table" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;font-size:13px;">
+    <thead><tr style="background:#f4f8f8;">
+      <th align="left" style="padding:8px;border-bottom:1px solid #e2ecea;">Claim</th>
+      <th align="left" style="padding:8px;border-bottom:1px solid #e2ecea;">Insured</th>
+      <th align="left" style="padding:8px;border-bottom:1px solid #e2ecea;">Primary reason</th>
+      <th align="left" style="padding:8px;border-bottom:1px solid #e2ecea;">Next action</th>
+    </tr></thead><tbody>${items.map(item => `<tr>
+      <td style="padding:9px 8px;border-bottom:1px solid #edf3f2;vertical-align:top;">${workerEmailLink(item.url, item.claimNo)}</td>
+      <td style="padding:9px 8px;border-bottom:1px solid #edf3f2;vertical-align:top;">${escapeHtml(item.insured)}</td>
+      <td style="padding:9px 8px;border-bottom:1px solid #edf3f2;vertical-align:top;">${escapeHtml(item.primaryReason)}</td>
+      <td style="padding:9px 8px;border-bottom:1px solid #edf3f2;vertical-align:top;">${escapeHtml(item.nextAction)}</td>
+    </tr>`).join("")}</tbody>
+  </table>`;
+}
+
+function workerMetricTable(metrics, links = {}) {
+  return `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;font-size:13px;">
+    <tr>${metrics.map(metric => `<td width="25%" style="width:25%;padding:10px 8px 10px 0;vertical-align:top;">
+      <div style="font-size:22px;font-weight:700;color:#1a2e2e;line-height:1.15;">${links[metric.key] ? workerEmailLink(links[metric.key], metric.value) : escapeHtml(metric.value)}</div>
+      <div style="font-size:11px;color:#6b8582;margin-top:4px;line-height:1.35;">${escapeHtml(metric.label)}</div>
+    </td>`).join("")}</tr>
+  </table>`;
+}
+
+function buildHandlerBriefing(handler, claims, runDate, options = {}) {
+  const model = workerBriefingModel(claims, options.previousClaims, { ...options, includeSettled: false, runDate });
+  const sections = model.handler.sections;
+  const firstName = handler.split(" ")[0] || handler;
+  const extractDate = model.extractDate ? formatExtractDateForBriefing(model.extractDate) : "Extract date unavailable";
+  const section = (title, data, emptyText) => `${workerEmailSectionTitle(title)}${workerClaimTable(data.items, emptyText)}${data.hasMore ? `<p style="margin:7px 0 0;font-size:12px;color:#6b8582;">View all ${data.total} in Scout.</p>` : ""}`;
   const body = `
-    <div style="font-size:18px;font-weight:800;margin-bottom:6px;">Scout Daily Briefing - ${escapeHtml(handler.split(" ")[0] || handler)} - ${escapeHtml(runDate)}</div>
-    <div style="font-size:14px;font-weight:700;margin:10px 0 18px;color:#1a2e2e;">STATUS HEADER: 🔴 ${critical.length} critical / 🟡 ${stale.length} stale / 🟢 ${onTrack} on track</div>
-    <div style="border-top:1px solid #ccdbd8;margin:18px 0 2px;"></div>
-    ${handlerSection("URGENT - ACTION REQUIRED TODAY", urgent.map(claim =>
-      handlerLine(claim, `${claimAge(claim)} days - ${escapeHtml(claimAction(claim))}`)
-    ))}
-    ${handlerSection("ZERO ESTIMATE ANOMALIES", zero.map(claim =>
-      `${escapeHtml(claimNo(claim))} - ${escapeHtml(claimInsured(claim))} - ${escapeHtml(claimStatus(claim))} - Estimate = R0 - Review payment/closure mismatch`
-    ))}
-    ${handlerSection("AWAITING YOUR FOLLOW-UP", awaiting.map(claim =>
-      handlerLine(claim, `${claimAge(claim)} days`)
-    ))}
-    ${handlerSection("ASSESSOR REPORTS OVERDUE", assessor.map(claim =>
-      handlerLine(claim, `${claimAge(claim)} days`)
-    ))}
-    ${handlerSection("PAYMENT READY", payment.map(claim =>
-      `${escapeHtml(claimNo(claim))} - ${escapeHtml(claimInsured(claim))} - ${escapeHtml(claimStatus(claim))} - ${fmtCurrency(claimOutstanding(claim) || claimPaid(claim))}`
-    ))}
-    ${handlerSection("NEW TODAY", fresh.map(claim =>
-      `${escapeHtml(claimNo(claim))} - ${escapeHtml(claimInsured(claim))} - ${escapeHtml(claimStatus(claim))} - ${escapeHtml(claimPeril(claim))}`
-    ))}
+    <div style="font-size:13px;color:#6b8582;margin-bottom:4px;">${escapeHtml(runDate)} · Data as at: <strong style="color:#1a2e2e;">${escapeHtml(extractDate)}</strong></div>
+    <div style="font-size:13px;color:#6b8582;margin-bottom:18px;">${escapeHtml(extractFreshnessLine(options.extract))}${model.comparisonAvailable ? "" : " · Comparison unavailable"}</div>
+    ${workerEmailSectionTitle("YOUR WORKLOAD")}
+    ${workerMetricTable([
+      { key: "active", label: "Active claims", value: String(model.handler.active.length) },
+      { key: "critical", label: "Critical SLA", value: String(model.handler.critical.length) },
+      { key: "stale", label: "SLA at risk", value: String(model.handler.stale.length) },
+      { key: "new", label: "New claims", value: model.metrics.newClaims == null ? "—" : String(model.metrics.newClaims) },
+    ], { critical: workerScoutUrl(options, { view: "exceptions", exception: "critical", handler }), stale: workerScoutUrl(options, { view: "exceptions", exception: "sla-risk", handler }) })}
+    ${section("URGENT TODAY", sections.urgent, "No urgent claims require action today.")}
+    ${section("DECISIONS / AUTHORITY", sections.decision, "No authority decisions require attention.")}
+    ${section("OVERDUE FOLLOW-UPS", sections.followup, "No overdue follow-ups in the briefing.")}
+    ${section("PAYMENT / ESTIMATE WORK", sections.payment, "No payment or estimate exceptions in the briefing.")}
+    ${section("CLOSURE CANDIDATES", sections.closure, "No closure candidates in the briefing.")}
+    ${model.comparisonAvailable ? section("NEW CLAIMS", sections.new, "No new claims in the briefing.") : ""}
+    <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e2ecea;">${workerEmailLink(workerScoutUrl(options, { view: "claims", handler }), "Open My Claims →")} &nbsp; ${workerEmailLink(workerScoutUrl(options, { view: "today" }), "Open Today's Priorities")}</div>
   `;
   return {
-    subject: `Scout Daily Briefing - ${handler.split(" ")[0] || handler} - ${runDate}`,
-    html: emailLayout("Scout Daily Briefing", `${handler} - ${runDate}`, body),
-    text: `Scout Daily Briefing - ${handler} - ${runDate}. Critical: ${critical.length}. Stale: ${stale.length}. On track: ${onTrack}.`,
+    subject: `Scout Daily Briefing - ${firstName} - ${runDate}`,
+    html: emailLayout("Scout Daily Briefing", `${handler} · My work for today`, body),
+    text: `Scout Daily Briefing - ${handler} - ${runDate}. Active: ${model.handler.active.length}. Critical SLA: ${model.handler.critical.length}. SLA at risk: ${model.handler.stale.length}. ${model.comparisonAvailable ? `New: ${model.metrics.newClaims}.` : "New: Comparison unavailable."} Open My Claims: ${workerScoutUrl(options, { view: "claims", handler }) || "Scout"}`,
   };
 }
 
-function buildManagerBriefing(claims, runDate, previousClaims = [], options = {}) {
-  const active = options.includeTerminalClaims
-    ? claims
-    : claims.filter(claim => !isTerminalClaim(claim) || normaliseStatus(claimStatus(claim)).startsWith("settled"));
-  const zero = active.filter(isZeroEstimateAnomaly);
-  const critical = active.filter(isCriticalClaim);
-  const previousCriticalNos = new Set((previousClaims || []).filter(isCriticalClaim).map(claimNo));
-  const newCritical = critical.filter(claim => !previousCriticalNos.has(claimNo(claim)));
-  const risks = active.filter(isRiskWatchClaim).sort(sortByPriorityThenAge);
-  const overMandate = active.filter(claim => claimOutstanding(claim) >= 100000);
-  const readyToClose = active.filter(isReadyToCloseClaim);
-  const stuck30 = active.filter(isNoMovement30);
-  const totalExposure = active.reduce((sum, claim) => sum + claimOutstanding(claim), 0);
-  const handlers = [...new Set(active.map(claimHandler))].filter(Boolean).sort();
-  const teamRows = handlers.map(handler => {
-    const handlerClaims = active.filter(claim => claimHandler(claim) === handler);
-    const handlerCritical = handlerClaims.filter(isCriticalClaim);
-    const handlerZero = handlerClaims.filter(isZeroEstimateAnomaly);
-    const handlerStale = handlerClaims.filter(isStaleClaim);
-    const icon = handlerCritical.length ? "🔴" : handlerStale.length ? "🟡" : "🟢";
-    const detail = handlerCritical.length
-      ? `${handlerClaims.length} claims, ${handlerCritical.length} critical, ${handlerZero.length} zero-estimate`
-      : handlerStale.length
-        ? `${handlerClaims.length} claims, ${handlerStale.length} stale`
-        : `${handlerClaims.length} claims, all on track`;
-    return `<div style="font-family:Consolas,'Courier New',monospace;font-size:13px;line-height:1.65;">${icon} ${escapeHtml(handler)} - ${escapeHtml(detail)}</div>`;
-  }).join("");
-  const topRiskRows = risks.slice(0, 5).map(claim =>
-    `<div style="font-family:Consolas,'Courier New',monospace;font-size:13px;line-height:1.65;">${managerRiskLine(claim)}</div>`
-  ).join("") || `<div style="color:#6b8582;font-size:13px;">No top risks flagged.</div>`;
+function formatExtractDateForBriefing(value) {
+  const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return "Extract date unavailable";
+  return new Intl.DateTimeFormat("en-ZA", { timeZone: "UTC", day: "numeric", month: "short", year: "numeric" })
+    .format(new Date(`${match[1]}-${match[2]}-${match[3]}T12:00:00Z`));
+}
+
+function extractFreshnessLine(extract) {
+  const extractDate = extract?.extract_date || extract?.effective_date || "";
+  const match = String(extractDate).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return "Unavailable · Extract date unavailable";
+  const dateLabel = new Intl.DateTimeFormat("en-ZA", {
+    timeZone: "UTC",
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  }).format(new Date(`${match[1]}-${match[2]}-${match[3]}T12:00:00Z`));
+  const today = localDateParts(new Date(), DEFAULT_TIMEZONE).dateKey;
+  const quality = extract?.quality_summary || {};
+  const warningCount = Number(quality.issueCount ?? quality.issue_count ?? 0) ||
+    (Array.isArray(quality.warnings) ? quality.warnings.length : 0);
+  const state = extractDate < today ? "Stale" : warningCount > 0 ? "Loaded with warnings" : "Current";
+  const received = extract?.received_at || extract?.uploaded_at || extract?.created_at;
+  const receivedDate = received ? new Date(received) : null;
+  const receivedLabel = receivedDate && !Number.isNaN(receivedDate.getTime())
+    ? new Intl.DateTimeFormat("en-ZA", { timeZone: DEFAULT_TIMEZONE, day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }).format(receivedDate)
+    : "";
+  return `${state} · Extract ${dateLabel}${receivedLabel ? ` · Received ${receivedLabel}` : ""}${warningCount ? ` · ${warningCount} data quality warning${warningCount === 1 ? "" : "s"}` : ""}`;
+}
+
+function buildManagerBriefing(claims, runDate, previousClaims = null, options = {}) {
+  const model = workerBriefingModel(claims, previousClaims, { ...options, includeSettled: true, runDate });
+  const metricLinks = {
+    critical: workerScoutUrl(options, { view: "exceptions", exception: "critical" }),
+    stale: workerScoutUrl(options, { view: "exceptions", exception: "sla-risk" }),
+  };
+  const attentionRows = model.attention.map(item => `<tr>
+    <td style="padding:9px 8px;border-bottom:1px solid #edf3f2;vertical-align:top;"><strong>${escapeHtml(item.label)}</strong></td>
+    <td style="padding:9px 8px;border-bottom:1px solid #edf3f2;vertical-align:top;">${escapeHtml(String(item.count))}</td>
+    <td style="padding:9px 8px;border-bottom:1px solid #edf3f2;vertical-align:top;">${escapeHtml(item.action)}</td>
+    <td style="padding:9px 8px;border-bottom:1px solid #edf3f2;vertical-align:top;">${workerEmailLink(item.url, "Open queue →")}</td>
+  </tr>`).join("");
+  const teamRows = model.team.map(row => `<tr>
+    <td style="padding:8px;border-bottom:1px solid #edf3f2;">${workerEmailLink(row.url, row.handler)}</td>
+    <td style="padding:8px;border-bottom:1px solid #edf3f2;text-align:right;">${row.active}</td>
+    <td style="padding:8px;border-bottom:1px solid #edf3f2;text-align:right;">${row.critical ? workerEmailLink(row.criticalUrl, String(row.critical)) : "0"}</td>
+    <td style="padding:8px;border-bottom:1px solid #edf3f2;text-align:right;">${row.stale}</td>
+    <td style="padding:8px;border-bottom:1px solid #edf3f2;">${escapeHtml(row.primaryBlocker)}</td>
+  </tr>`).join("");
+  const attentionTable = attentionRows
+    ? `<table role="table" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:#f4f8f8;"><th align="left" style="padding:8px;">Issue</th><th align="left" style="padding:8px;">Count</th><th align="left" style="padding:8px;">Recommended next action</th><th align="left" style="padding:8px;">Scout</th></tr></thead><tbody>${attentionRows}</tbody></table>`
+    : `<p style="margin:0;color:#6b8582;font-size:13px;">No priority concerns in this extract.</p>`;
+  const teamTable = teamRows
+    ? `<table role="table" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr style="background:#f4f8f8;"><th align="left" style="padding:8px;">Handler</th><th align="right" style="padding:8px;">Active</th><th align="right" style="padding:8px;">Critical</th><th align="right" style="padding:8px;">SLA at risk</th><th align="left" style="padding:8px;">Primary blocker</th></tr></thead><tbody>${teamRows}</tbody></table>`
+    : `<p style="margin:0;color:#6b8582;font-size:13px;">No handler data.</p>`;
   const body = `
-    <div style="font-size:18px;font-weight:800;margin-bottom:14px;">Scout Manager Summary - ${escapeHtml(runDate)}</div>
-    <div style="font-family:Consolas,'Courier New',monospace;font-size:14px;font-weight:700;margin-bottom:18px;">PORTFOLIO: ${active.length} active · R${(totalExposure / 1000000).toFixed(2)}m exposure · ${critical.length} critical SLA</div>
-    <div style="margin-bottom:20px;">
-      ${managerMetricLine("ZERO ESTIMATE ANOMALIES:", `${zero.length} claims require review`)}
-      ${managerMetricLine("CRITICAL SLA BREACHES:", `${critical.length} claims`, `(+ ${newCritical.length} new since yesterday)`)}
-      ${managerMetricLine("RISK WATCHLIST:", `${risks.length} claims`, "(legal/repudiation/mandate)")}
-      ${managerMetricLine("MANDATE AUTHORITY NEEDED:", `${overMandate.length} claims over R100k`)}
-      ${managerMetricLine("READY TO CLOSE:", `${readyToClose.length} claims`, "(action recommended)")}
-      ${managerMetricLine("NO MOVEMENT 30+ DAYS:", `${stuck30.length} claims`, "(stuck)")}
-    </div>
-    <div style="margin-top:22px;">
-      <div style="font-size:13px;font-weight:800;color:#1e6363;letter-spacing:.5px;border-bottom:1px solid #e2ecea;padding-bottom:7px;margin-bottom:8px;">TEAM SLA STATUS</div>
-      ${teamRows || `<div style="color:#6b8582;font-size:13px;">No handler data.</div>`}
-    </div>
-    <div style="margin-top:22px;">
-      <div style="font-size:13px;font-weight:800;color:#1e6363;letter-spacing:.5px;border-bottom:1px solid #e2ecea;padding-bottom:7px;margin-bottom:8px;">TOP 5 RISKS</div>
-      ${topRiskRows}
-    </div>
+    <div style="font-size:13px;color:#6b8582;margin-bottom:4px;">${escapeHtml(runDate)} · Data as at: <strong style="color:#1a2e2e;">${escapeHtml(model.extractDate ? formatExtractDateForBriefing(model.extractDate) : "Extract date unavailable")}</strong></div>
+    <div style="font-size:13px;color:#6b8582;margin-bottom:18px;">${escapeHtml(extractFreshnessLine(options.extract))} · ${escapeHtml(model.comparisonLabel)}</div>
+    ${workerEmailSectionTitle("PORTFOLIO HEALTH")}
+    ${workerMetricTable([
+      { key: "active", label: "Active claims", value: String(model.metrics.active) },
+      { key: "critical", label: "Critical SLA", value: String(model.metrics.critical) },
+      { key: "stale", label: "SLA at risk", value: String(model.metrics.stale) },
+      { key: "exposure", label: "Outstanding exposure", value: `R${(model.metrics.exposure / 1000000).toFixed(2)}m` },
+    ], metricLinks)}
+    ${workerEmailSectionTitle("REQUIRES ATTENTION")}
+    ${attentionTable}
+    <p style="margin:8px 0 0;color:#6b8582;font-size:12px;">Counts may overlap; one claim can appear in more than one action queue.</p>
+    ${workerEmailSectionTitle("TEAM SUMMARY")}
+    ${teamTable}
+    ${workerEmailSectionTitle("TOP RISKS")}
+    ${workerClaimTable(model.topRisks.items, "No top risks flagged.")}${model.topRisks.hasMore ? `<p style="margin:7px 0 0;font-size:12px;color:#6b8582;">View all ${model.topRisks.total} in Scout.</p>` : ""}
+    <div style="margin-top:24px;padding-top:16px;border-top:1px solid #e2ecea;">${workerEmailLink(workerScoutUrl(options, { view: "today" }), "Open Morning Action Board →")} &nbsp; ${workerEmailLink(workerScoutUrl(options, { view: "manager" }), "Open Manager Summary")}</div>
   `;
   return {
-    subject: `Scout Manager Summary - ${runDate}`,
-    html: emailLayout("Scout Manager Summary", runDate, body),
-    text: `Scout Manager Summary - ${runDate}. Portfolio: ${active.length} active, R${(totalExposure / 1000000).toFixed(2)}m exposure, ${critical.length} critical SLA. Zero estimates: ${zero.length}. Ready to close: ${readyToClose.length}.`,
+    subject: `Scout Manager Briefing - ${runDate}`,
+    html: emailLayout("Scout Manager Briefing", runDate, body),
+    text: `Scout Manager Briefing - ${runDate}. Active: ${model.metrics.active}. Critical SLA: ${model.metrics.critical}. SLA at risk: ${model.metrics.stale}. Exposure: R${(model.metrics.exposure / 1000000).toFixed(2)}m. ${model.comparisonLabel}. Open Morning Action Board: ${workerScoutUrl(options, { view: "today" }) || "Scout"}`,
   };
 }
 
@@ -843,7 +991,7 @@ async function runDailyBriefings(env, trigger = "manual", providedSettings = nul
   const settings = providedSettings || await getDigestSettings(env);
   await pruneDigestHistory(env);
   const runDate = new Date().toLocaleDateString("en-ZA", { day: "numeric", month: "short", year: "numeric" });
-  const { extract, claims: rawClaims, previousClaims: rawPreviousClaims } = await getLatestExtractClaims(env);
+  const { extract, previousExtract, claims: rawClaims, previousClaims: rawPreviousClaims } = await getLatestExtractClaims(env);
   const claims = annotateDuplicateClaims(rawClaims);
   const previousClaims = annotateDuplicateClaims(rawPreviousClaims);
   const digestClaims = settings.include_terminal_claims
@@ -871,7 +1019,14 @@ async function runDailyBriefings(env, trigger = "manual", providedSettings = nul
     byHandler.get(handler).push(claim);
   });
 
-  const briefingOptions = { includeTerminalClaims: settings.include_terminal_claims };
+  const briefingOptions = {
+    includeTerminalClaims: settings.include_terminal_claims,
+    comparisonAvailable: Boolean(previousExtract),
+    extract,
+    previousClaims: digestPreviousClaims,
+    runDate,
+    scoutClaimsUrl: env.SCOUT_CLAIMS_URL || env.SCOUT_BASE_URL || "",
+  };
   const managerMessage = buildManagerBriefing(digestClaims, runDate, digestPreviousClaims, briefingOptions);
   deliveries.push({
     type: "manager",

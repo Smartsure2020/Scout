@@ -298,7 +298,7 @@ export function formatComparison(comparison, kind = "integer") {
     comparison.absolute_delta === null ||
     comparison.absolute_delta === undefined
   ) {
-    return "No prior period";
+    return "Comparison unavailable";
   }
   const delta = Number(comparison.absolute_delta);
   if (!Number.isFinite(delta) || delta === 0) return "— unchanged";
@@ -310,6 +310,23 @@ export function formatComparison(comparison, kind = "integer") {
       ? formatRand(Math.abs(delta))
       : formatInteger(Math.abs(delta));
   return `${arrow} ${value} vs previous period`;
+}
+
+function freshnessNotice(freshness) {
+  if (!freshness) return "";
+  const state = ["current", "stale", "warning", "unavailable"].includes(
+    freshness.state,
+  )
+    ? freshness.state
+    : "unavailable";
+  const detail = [
+    freshness.message,
+    freshness.receivedAtLabel ? `Received ${freshness.receivedAtLabel}` : "",
+    freshness.warningText || "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return `<div class="report-freshness report-freshness-${state}" role="status" aria-live="polite"><strong>${escapeHtml(freshness.label || "Data status")}:</strong> ${escapeHtml(detail)}</div>`;
 }
 
 export function formatPeriodLabel(source, reportType = null) {
@@ -569,6 +586,7 @@ export function createReportingApi({
 export function createReportState(now = new Date()) {
   return {
     activeTab: "weekly",
+    reportOriginTab: null,
     periodStarts: {
       weekly: defaultReportPeriodStart("weekly", now),
       monthly: defaultReportPeriodStart("monthly", now),
@@ -583,6 +601,7 @@ export function createReportState(now = new Date()) {
     workflowForm: null,
     workflowOwners: [],
     workflowExistingAttention: [],
+    workflowSuccess: null,
   };
 }
 
@@ -697,13 +716,19 @@ function claimRowMatchesFilter(row, filter) {
 }
 
 export class ReportsController {
-  constructor({ document, getContext, rootId = "reports-content" } = {}) {
+  constructor({ document, getContext, rootId = "reports-content", syncUrlState } = {}) {
     this.document = document;
     this.getContext = getContext;
     this.rootId = rootId;
+    this.syncUrlState = syncUrlState || ((partial, options) => {
+      globalThis.window?.syncReportsUrlState?.(partial, options);
+    });
     this.state = createReportState();
     this.api = null;
     this.confirmResolver = null;
+    this.confirmOriginFocus = null;
+    this.drillOriginFocus = null;
+    this.drillFocusPending = false;
     this.handleClick = this.handleClick.bind(this);
     this.handleChange = this.handleChange.bind(this);
     this.handleSubmit = this.handleSubmit.bind(this);
@@ -725,17 +750,34 @@ export class ReportsController {
     this.document.addEventListener("keydown", this.handleKeydown);
     this.render();
     this.loadWorkflowOwners();
-    this.loadReports();
+    const route = globalThis.window?.getScoutReportsUrlState?.();
+    if (!route?.report) this.loadReports();
     return true;
   }
 
-  open(tab = "weekly") {
+  isSyntheticQa() {
+    return this.getContext?.()?.syntheticQa === true;
+  }
+
+  blockSyntheticMutation() {
+    this.state.error = {
+      code: "NOT_AUTHORIZED",
+      message: "Report changes are disabled in the synthetic QA preview.",
+    };
+    this.render();
+  }
+
+  open(tab = "weekly", options = {}) {
     if (!this.api) return;
     this.state.activeTab = ["weekly", "monthly", "history"].includes(tab)
       ? tab
       : "weekly";
+    this.state.reportOriginTab = null;
     this.state.selected = null;
     this.state.error = null;
+    if (options.syncUrl !== false) {
+      this.syncUrlState({ reportTab: this.state.activeTab, report: "" }, { replace: options.replace === true });
+    }
     this.render();
     if (this.state.activeTab === "history") {
       if (!this.state.historyLoaded) this.loadReports();
@@ -847,6 +889,7 @@ export class ReportsController {
   async generate() {
     const type = this.state.activeTab;
     if (!this.api || !["weekly", "monthly"].includes(type)) return;
+    if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     await this.perform("Generating report…", () =>
       this.api.generateReport(type, this.state.periodStarts[type]),
     );
@@ -855,24 +898,28 @@ export class ReportsController {
   async regenerate() {
     const id = this.state.selected?.id;
     if (!id) return;
+    if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     if (!(await this.confirm("regenerate"))) return;
     await this.perform("Regenerating…", () => this.api.regenerateReport(id));
   }
 
   async finalise() {
     const id = this.state.selected?.id;
+    if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     if (!id || !(await this.confirm("finalise"))) return;
     await this.perform("Finalising…", () => this.api.finaliseReport(id));
   }
 
   async archive() {
     const id = this.state.selected?.id;
+    if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     if (!id || !(await this.confirm("archive"))) return;
     await this.perform("Archiving…", () => this.api.archiveReport(id));
   }
 
   async exportPdf() {
     const run = this.state.selected;
+    if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     const snapshot = reportSnapshot(run);
     if (
       !run?.id ||
@@ -933,11 +980,13 @@ export class ReportsController {
       ],
     }[action];
     if (!copy) return Promise.resolve(false);
+    this.confirmOriginFocus = this.document?.activeElement || null;
     title.textContent = copy[0];
     body.textContent = copy[1];
     confirmButton.textContent = copy[2];
     confirmButton.dataset.confirmAction = action;
     backdrop.classList.add("show");
+    backdrop.setAttribute("aria-hidden", "false");
     confirmButton.focus();
     return new Promise((resolve) => {
       this.confirmResolver = resolve;
@@ -946,10 +995,20 @@ export class ReportsController {
 
   closeConfirm(result) {
     const backdrop = this.document?.getElementById("report-confirm-backdrop");
-    if (backdrop) backdrop.classList.remove("show");
+    if (backdrop) {
+      backdrop.classList.remove("show");
+      backdrop.setAttribute("aria-hidden", "true");
+    }
     const resolve = this.confirmResolver;
     this.confirmResolver = null;
+    const origin = this.confirmOriginFocus;
+    this.confirmOriginFocus = null;
     if (resolve) resolve(Boolean(result));
+    if (origin && origin.isConnected) {
+      setTimeout(() => {
+        if (origin.isConnected && origin.getClientRects().length) origin.focus({ preventScroll: true });
+      }, 0);
+    }
   }
 
   async drill(metricId, filter = "") {
@@ -957,6 +1016,8 @@ export class ReportsController {
     if (!reportId || !metricId || this.state.loading) return;
     const metric = metricState(reportSnapshot(this.state.selected), metricId);
     if (!metric.drillable) return;
+    this.drillOriginFocus = this.document?.activeElement || null;
+    this.drillFocusPending = true;
     this.state.drill = {
       metricId,
       filter,
@@ -979,8 +1040,34 @@ export class ReportsController {
   }
 
   closeDrill() {
+    const origin = this.drillOriginFocus;
+    this.drillOriginFocus = null;
     this.state.drill = null;
     this.renderDrill();
+    if (origin && origin.isConnected) {
+      setTimeout(() => {
+        if (origin.isConnected && origin.getClientRects().length) origin.focus({ preventScroll: true });
+      }, 0);
+    }
+  }
+
+  trapDialogFocus(event, panel) {
+    if (event.key !== "Tab" || !panel) return;
+    const focusable = [...panel.querySelectorAll("button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])")]
+      .filter((element) => element.getClientRects().length && !element.hasAttribute("hidden"));
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (!panel.contains(this.document.activeElement)) {
+      event.preventDefault();
+      first.focus();
+    } else if (event.shiftKey && this.document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && this.document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   }
 
   workflowItems(run, type) {
@@ -1014,13 +1101,17 @@ export class ReportsController {
   }
 
   async performWorkflow(operation, callback) {
+    if (this.isSyntheticQa()) {
+      this.blockSyntheticMutation();
+      return;
+    }
     if (this.state.loading || !this.api) return;
     this.state.loading = true;
     this.state.operation = operation;
     this.state.error = null;
     this.render();
     try {
-      await callback();
+      const result = await callback();
       if (this.state.selected?.id) {
         const response = await this.api.getReport(this.state.selected.id);
         this.state.selected = normalizeReport(response?.report).run;
@@ -1028,6 +1119,7 @@ export class ReportsController {
       }
       this.state.workflowForm = null;
       this.state.error = null;
+      return result;
     } catch (error) {
       this.state.error = error;
     } finally {
@@ -1049,6 +1141,10 @@ export class ReportsController {
     const item = this.state.workflowForm?.item;
     const reportId = this.state.selected?.id;
     if (type === "attention") {
+      const claimNumber =
+        this.formValue(form, "sourceClaimNumber") ||
+        this.state.workflowForm?.claimNumber ||
+        "";
       const payload = {
         title: this.formValue(form, "title"),
         managementNote: this.formValue(form, "managementNote"),
@@ -1061,7 +1157,7 @@ export class ReportsController {
         claimId: this.formValue(form, "claimId") || null,
         sourceClaimNumber: this.formValue(form, "sourceClaimNumber") || null,
       };
-      await this.performWorkflow(
+      const savedItem = await this.performWorkflow(
         item ? "Updating attention…" : "Adding attention…",
         async () => {
           const response = item
@@ -1073,8 +1169,22 @@ export class ReportsController {
           const created = response?.item;
           if (!item && reportId && created?.id)
             await this.api.addReportAttention(reportId, created.id);
+          return created || item || null;
         },
       );
+      if (savedItem?.id) {
+        this.state.workflowSuccess = {
+          type: "attention",
+          item: savedItem,
+          claimNumber:
+            savedItem.claim_number || claimNumber || "the originating claim",
+          message: item
+            ? "Management Attention updated."
+            : "Management Attention added.",
+        };
+        this.state.workflowExistingAttention = [savedItem];
+        this.render();
+      }
       return;
     }
     if (type === "attention-resolve") {
@@ -1128,6 +1238,25 @@ export class ReportsController {
     const target = event.target.closest?.("[data-report-action]");
     if (!target) return;
     const action = target.dataset.reportAction;
+    if (action === "view-attention-item") {
+      const result = this.state.workflowSuccess;
+      if (result?.type === "attention" && result.item) {
+        this.state.workflowSuccess = null;
+        this.state.activeTab = "weekly";
+        this.state.selected = null;
+        this.state.workflowExistingAttention = [result.item];
+        this.state.workflowForm = {
+          type: "attention",
+          mode: "edit",
+          item: result.item,
+          claimNumber: result.claimNumber,
+          claimId: result.item.claim_id || "",
+        };
+        globalThis.window?.focusScoutView?.("reports");
+        this.render();
+      }
+      return;
+    }
     if (action === "tab") this.open(target.dataset.tab);
     if (action === "period") this.movePeriod(Number(target.dataset.direction));
     if (action === "generate") this.generate();
@@ -1206,6 +1335,10 @@ export class ReportsController {
   }
 
   handleKeydown(event) {
+    if (event.key === "Tab") {
+      if (this.state.drill) this.trapDialogFocus(event, this.document?.getElementById("report-drill-panel"));
+      else if (this.confirmResolver) this.trapDialogFocus(event, this.document?.querySelector("#report-confirm-backdrop .confirm-modal"));
+    }
     if (event.key === "Escape") {
       if (this.state.drill) this.closeDrill();
       else if (this.confirmResolver) this.closeConfirm(false);
@@ -1225,6 +1358,7 @@ export class ReportsController {
   }
 
   async openAttentionFromClaim(claim = {}) {
+    globalThis.window?.focusScoutView?.("reports");
     this.state.activeTab = "weekly";
     if (this.state.selected?.report_type !== "weekly")
       this.state.selected = null;
@@ -1234,7 +1368,9 @@ export class ReportsController {
       item: null,
       claimNumber:
         claim.claimNo || claim.claim_no || claim.source_claim_number || "",
+      claimId: claim.claimId || claim.claim_id || "",
     };
+    this.state.workflowSuccess = null;
     this.state.workflowExistingAttention = [];
     this.state.error = null;
     this.render();
@@ -1255,16 +1391,27 @@ export class ReportsController {
       this.loadPeriodReport("weekly");
   }
 
-  async openReport(id) {
+  async openReport(id, options = {}) {
+    return this.openReportWithOptions(id, options);
+  }
+
+  async openReportWithOptions(id, options = {}) {
     if (!id || !this.api) return;
+    const originTab = ["weekly", "monthly", "history"].includes(options.originTab)
+      ? options.originTab
+      : (this.state.activeTab === "history" ? "history" : (this.state.reportOriginTab || "history"));
     this.state.loading = true;
     this.state.operation = "Loading report…";
     this.render();
     try {
       const response = await this.api.getReport(id);
       this.state.selected = normalizeReport(response?.report).run;
+      this.state.reportOriginTab = originTab;
       this.state.activeTab = this.state.selected.report_type || "history";
       this.state.error = null;
+      if (options.syncUrl !== false) {
+        this.syncUrlState({ reportTab: originTab, report: id }, { replace: false });
+      }
     } catch (error) {
       this.state.error = error;
     } finally {
@@ -1274,16 +1421,32 @@ export class ReportsController {
     }
   }
 
+  async openFromRoute(tab = "weekly", reportId = "") {
+    const routeTab = ["weekly", "monthly", "history"].includes(tab) ? tab : "weekly";
+    if (!reportId) {
+      this.open(routeTab, { syncUrl: false });
+      return;
+    }
+    if (!this.api) return;
+    this.state.activeTab = routeTab;
+    this.state.reportOriginTab = routeTab;
+    this.state.selected = null;
+    this.state.error = null;
+    this.render();
+    await this.openReportWithOptions(reportId, { syncUrl: false, originTab: routeTab });
+  }
+
   render() {
     const root = this.document?.getElementById(this.rootId);
     if (!root) return;
-    root.innerHTML = `<div class="reports-tabs" role="tablist" aria-label="Claims report type">
-      ${["weekly", "monthly", "history"].map((tab) => `<button class="tab ${this.state.activeTab === tab ? "active" : ""}" role="tab" aria-selected="${this.state.activeTab === tab}" data-report-action="tab" data-tab="${tab}">${tab[0].toUpperCase() + tab.slice(1)}</button>`).join("")}
+    root.innerHTML = `${freshnessNotice(this.getContext?.()?.freshness)}<div class="reports-tabs" role="tablist" aria-label="Claims report type">
+      ${["weekly", "monthly", "history"].map((tab) => `<button type="button" class="tab ${this.state.activeTab === tab ? "active" : ""}" id="reports-tab-${tab}" role="tab" aria-selected="${this.state.activeTab === tab}" aria-controls="reports-tabpanel" data-report-action="tab" data-tab="${tab}">${tab[0].toUpperCase() + tab.slice(1)}</button>`).join("")}
     </div>
     ${this.state.operation ? `<div class="reports-operation" role="status"><span class="upload-spinner"></span>${escapeHtml(this.state.operation)}</div>` : ""}
     ${this.state.error && this.state.error.code !== "SUCCESS" ? `<div class="report-alert report-alert-error" role="alert">${escapeHtml(errorMessage(this.state.error))}<button class="btn-ghost" data-report-action="retry">Try again</button></div>` : ""}
     ${this.state.error?.code === "SUCCESS" ? `<div class="report-alert report-alert-success" role="status">${escapeHtml(this.state.error.message)}</div>` : ""}
-    ${this.state.activeTab === "history" ? this.renderHistory() : this.renderPeriod()}`;
+    ${this.state.workflowSuccess?.type === "attention" ? `<div class="report-alert report-alert-success" role="status"><strong>${escapeHtml(this.state.workflowSuccess.message)}</strong> Claim ${escapeHtml(this.state.workflowSuccess.claimNumber)}. <button class="btn-ghost" data-report-action="view-attention-item">View Management Attention item</button></div>` : ""}
+    <div id="reports-tabpanel" role="tabpanel" tabindex="-1" aria-labelledby="reports-tab-${this.state.activeTab}">${this.state.activeTab === "history" ? this.renderHistory() : this.renderPeriod()}</div>`;
     this.renderDrill();
   }
 
@@ -1291,13 +1454,14 @@ export class ReportsController {
     const type = this.state.activeTab;
     const periodStart = this.state.periodStarts[type];
     const report = this.state.selected;
+    const syntheticQa = this.isSyntheticQa();
     if (!report) {
       return `<section class="report-period-shell">
         <div class="report-period-header">
           <div><div class="report-period-label">${type === "weekly" ? "Weekly" : "Monthly"}</div><h2>${escapeHtml(formatPeriodLabel({ report_type: type, period_start_local_date: periodStart, period_end_local_date: type === "weekly" ? addDays(periodStart, 5) : addDays(shiftReportPeriod("monthly", periodStart, 1), 0) }))}</h2></div>
           <div class="report-period-actions"><button class="btn-secondary" data-report-action="period" data-direction="-1">Previous ${type === "weekly" ? "Week" : "Month"}</button><button class="btn-secondary" data-report-action="period" data-direction="1" ${isFutureReportPeriod(type, shiftReportPeriod(type, periodStart, 1)) ? "disabled" : ""}>Next ${type === "weekly" ? "Week" : "Month"}</button></div>
         </div>
-        <div class="report-empty-card"><div class="report-empty-icon">↗</div><h3>No ${type} report yet</h3><p>Generate the Claims Report for this period when you are ready.</p><button class="btn-primary" data-report-action="generate" ${this.state.loading ? "disabled" : ""}>Generate Report</button></div>
+        <div class="report-empty-card"><div class="report-empty-icon">↗</div><h3>No ${type} report yet</h3><p>${syntheticQa ? "Report generation is disabled in the synthetic QA preview." : "Generate the Claims Report for this period when you are ready."}</p><button class="btn-primary" data-report-action="generate" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Generate Report"}</button></div>
         ${type === "weekly" && this.state.workflowForm?.type === "attention" ? `<section class="report-section workflow-section workflow-standalone">${this.renderExistingClaimAttention()}<div class="section-header"><div><div class="section-title">Add Management Attention</div><p class="section-help">Create a live attention item now; add it to a Draft report later if needed.</p></div></div>${this.workflowForm(this.state.workflowForm)}</section>` : ""}
       </section>`;
     }
@@ -1313,13 +1477,14 @@ export class ReportsController {
     const isDraft = run.status === "draft";
     const isFinalised = run.status === "finalised";
     const isArchived = run.status === "archived";
+    const syntheticQa = this.isSyntheticQa();
     const canExportPdf =
       (isFinalised || isArchived) && coverage !== "insufficient";
     const canArchive = this.getContext?.()?.user?.role === "admin";
     return `<section class="report-period-shell">
       <div class="report-period-header">
         <div><div class="report-period-label">${type === "weekly" ? "Weekly" : "Monthly"} Claims Report</div><h2>${escapeHtml(formatPeriodLabel(snapshot, type))}</h2><div class="report-meta-line">${statusBadge(run.status)} <span>Generated ${escapeHtml(this.formatDateTime(run.generated_at))}</span>${run.finalised_at ? `<span>· Finalised ${escapeHtml(this.formatDateTime(run.finalised_at))}</span>` : ""}</div></div>
-        <div class="report-period-actions">${isDraft ? `<button class="btn-secondary" data-report-action="regenerate" ${this.state.loading ? "disabled" : ""}>Regenerate</button><button class="btn-primary" data-report-action="finalise" ${coverage === "insufficient" || this.state.loading ? "disabled" : ""}>Finalise</button>` : ""}${canExportPdf ? `<button class="btn-primary" data-report-action="export-pdf" ${this.state.loading ? "disabled" : ""}>Export PDF</button>` : ""}${isFinalised && canArchive ? `<button class="btn-secondary" data-report-action="archive" ${this.state.loading ? "disabled" : ""}>Archive</button>` : ""}${isArchived ? `<span class="report-action-note">Historical snapshot</span>` : ""}</div>
+        <div class="report-period-actions">${isDraft ? `<button class="btn-secondary" data-report-action="regenerate" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Regenerate"}</button><button class="btn-primary" data-report-action="finalise" ${coverage === "insufficient" || this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Finalise"}</button>` : ""}${canExportPdf ? `<button class="btn-primary" data-report-action="export-pdf" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Export PDF"}</button>` : ""}${isFinalised && canArchive ? `<button class="btn-secondary" data-report-action="archive" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Archive"}</button>` : ""}${isArchived ? `<span class="report-action-note">Historical snapshot</span>` : ""}</div>
       </div>
       <div class="report-coverage-banner ${coverage === "complete" ? "is-complete" : coverage === "insufficient" ? "is-insufficient" : "is-warning"}"><div><strong>Coverage</strong> ${coverageBadge(coverage, warnings.length)}</div><span>${escapeHtml(this.coverageCopy(coverage, snapshot))}</span></div>
       ${!isDraft && this.state.workflowForm?.type === "attention" ? `<section class="report-section workflow-section workflow-standalone">${this.renderExistingClaimAttention()}<div class="section-header"><div><div class="section-title">Add Management Attention</div><p class="section-help">This creates a live item without changing the historical report snapshot.</p></div></div>${this.workflowForm(this.state.workflowForm)}</section>` : ""}
@@ -1381,7 +1546,7 @@ export class ReportsController {
         )
         .join(
           "",
-        )}</select></label><label>Priority<select name="priority"><option value="high" ${item.priority === "high" ? "selected" : ""}>High</option><option value="medium" ${!item.priority || item.priority === "medium" ? "selected" : ""}>Medium</option><option value="low" ${item.priority === "low" ? "selected" : ""}>Low</option></select></label><label>Status<select name="status"><option value="open" ${!item.status || item.status === "open" ? "selected" : ""}>Open</option><option value="monitoring" ${item.status === "monitoring" ? "selected" : ""}>Monitoring</option><option value="waiting" ${item.status === "waiting" ? "selected" : ""}>Waiting</option><option value="resolved" ${item.status === "resolved" ? "selected" : ""}>Resolved</option></select></label><label>Owner<select name="ownerUserId">${this.workflowOwnerOptions(item.owner_user_id || item.owner_user_id_snapshot || "")}</select></label><label>Next action<input name="nextAction" value="${escapeHtml(item.next_action || "")}" placeholder="Next step"></label><label>Due date<input type="date" name="dueDate" value="${escapeHtml(item.due_date || "")}"></label><label>Claim number<input name="sourceClaimNumber" value="${escapeHtml(item.claim_number || form.claimNumber || "")}" placeholder="Optional claim number"></label><input type="hidden" name="claimId" value="${escapeHtml(item.claim_id || "")}"><label class="workflow-form-wide">Management note<textarea name="managementNote" rows="2" placeholder="Short context for management">${escapeHtml(item.management_note || "")}</textarea></label></div><div class="workflow-form-actions"><button type="button" class="btn-secondary" data-report-action="cancel-workflow">Cancel</button><button type="submit" class="btn-primary">${item.id ? "Save attention" : "Add attention"}</button></div></form>`;
+        )}</select></label><label>Priority<select name="priority"><option value="high" ${item.priority === "high" ? "selected" : ""}>High</option><option value="medium" ${!item.priority || item.priority === "medium" ? "selected" : ""}>Medium</option><option value="low" ${item.priority === "low" ? "selected" : ""}>Low</option></select></label><label>Status<select name="status"><option value="open" ${!item.status || item.status === "open" ? "selected" : ""}>Open</option><option value="monitoring" ${item.status === "monitoring" ? "selected" : ""}>Monitoring</option><option value="waiting" ${item.status === "waiting" ? "selected" : ""}>Waiting</option><option value="resolved" ${item.status === "resolved" ? "selected" : ""}>Resolved</option></select></label><label>Owner<select name="ownerUserId">${this.workflowOwnerOptions(item.owner_user_id || item.owner_user_id_snapshot || "")}</select></label><label>Next action<input name="nextAction" value="${escapeHtml(item.next_action || "")}" placeholder="Next step"></label><label>Due date<input type="date" name="dueDate" value="${escapeHtml(item.due_date || "")}"></label><label>Claim number<input name="sourceClaimNumber" value="${escapeHtml(item.claim_number || form.claimNumber || "")}" placeholder="Optional claim number"></label><input type="hidden" name="claimId" value="${escapeHtml(item.claim_id || form.claimId || "")}"><label class="workflow-form-wide">Management note<textarea name="managementNote" rows="2" placeholder="Short context for management">${escapeHtml(item.management_note || "")}</textarea></label></div><div class="workflow-form-actions"><button type="button" class="btn-secondary" data-report-action="cancel-workflow">Cancel</button><button type="submit" class="btn-primary">${item.id ? "Save attention" : "Add attention"}</button></div></form>`;
     }
     return `<form class="workflow-form" data-workflow-form="action"><div class="workflow-form-grid"><label>Action<input name="action" required value="${escapeHtml(item.action || "")}" placeholder="What must happen?"></label><label>Category<select name="category" required>${Object.entries(
       ACTION_CATEGORY_LABELS,
@@ -1649,6 +1814,8 @@ export class ReportsController {
     if (!this.state.drill) {
       backdrop.classList.remove("show");
       panel.classList.remove("open");
+      backdrop.setAttribute("aria-hidden", "true");
+      panel.setAttribute("aria-hidden", "true");
       return;
     }
     const snapshot = reportSnapshot(this.state.selected);
@@ -1659,6 +1826,12 @@ export class ReportsController {
     panel.innerHTML = `<div class="detail-header"><div><div class="detail-claim-no">${escapeHtml(formatPeriodLabel(snapshot))}</div><div class="detail-insured">${escapeHtml(label)}</div><div class="report-muted">Frozen report-time claim population</div></div><button class="detail-close" data-report-action="close-drill" aria-label="Close claim population">×</button></div><div class="detail-body">${this.state.drill.loading ? `<div class="empty-state"><span class="upload-spinner"></span>Loading claims…</div>` : this.state.drill.error ? `<div class="empty-state empty-state-error">${escapeHtml(errorMessage(this.state.drill.error))}</div>` : this.renderDrillClaims(this.state.drill.claims)}</div>`;
     backdrop.classList.add("show");
     panel.classList.add("open");
+    backdrop.setAttribute("aria-hidden", "false");
+    panel.setAttribute("aria-hidden", "false");
+    if (this.drillFocusPending) {
+      this.drillFocusPending = false;
+      setTimeout(() => panel.querySelector("[data-report-action='close-drill']")?.focus(), 0);
+    }
   }
 
   drillLabel(metricId, filter) {
@@ -1706,12 +1879,31 @@ if (typeof window !== "undefined") {
         document: window.document,
         getContext: window.getScoutReportsContext,
       });
-      if (controller.mount()) window.__scoutReportsController = controller;
+      if (controller.mount()) {
+        window.__scoutReportsController = controller;
+        const pendingClaim = window.__scoutPendingManagementAttention;
+        if (pendingClaim) {
+          delete window.__scoutPendingManagementAttention;
+          queueMicrotask(() => controller.openAttentionFromClaim(pendingClaim));
+        }
+      }
     }
   });
-  window.openReportsView = (tab) => window.__scoutReportsController?.open(tab);
-  window.openManagementAttentionForm = (claim) =>
-    window.__scoutReportsController?.openAttentionFromClaim(claim);
+  window.openReportsView = (tab, options = {}) => {
+    const controller = window.__scoutReportsController;
+    if (!controller) return;
+    if (options.reportId) return controller.openFromRoute(tab, options.reportId);
+    return controller.open(tab, options);
+  };
+  window.openManagementAttentionForm = (claim = {}) => {
+    const controller = window.__scoutReportsController;
+    if (!controller) {
+      window.__scoutPendingManagementAttention = claim;
+      window.focusScoutView?.("reports");
+      return false;
+    }
+    return controller.openAttentionFromClaim(claim);
+  };
   if (window.__scoutAuthReady)
     window.dispatchEvent(new Event("scout-auth-ready"));
 }

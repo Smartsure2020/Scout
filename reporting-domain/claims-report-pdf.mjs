@@ -165,7 +165,7 @@ function metricValue(snapshot, id, formatter = formatInteger) {
 function comparisonText(snapshot, id, formatter = formatInteger) {
   const comparison = asObject(asObject(snapshot).comparisons)[id];
   const delta = Number(asObject(comparison).absolute_delta);
-  if (!Number.isFinite(delta)) return "No prior period";
+  if (!Number.isFinite(delta)) return "Comparison unavailable";
   if (delta === 0) return "Unchanged vs previous period";
   const direction = delta > 0 ? "Up" : "Down";
   return `${direction} ${formatter(Math.abs(delta))} vs previous period`;
