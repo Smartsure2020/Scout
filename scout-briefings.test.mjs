@@ -7,8 +7,7 @@ import {
   PRODUCTION_ORIGIN,
 } from "./scout-briefings.js";
 
-const productionRecipient = "manager@example.com";
-const pilotRecipient = "pilot@example.com";
+const teamsWebhook = "https://teams-webhook.example.test/trigger";
 
 function response(body, status = 200) {
   return new Response(body == null ? null : JSON.stringify(body), {
@@ -21,12 +20,8 @@ function environment(overrides = {}) {
   return {
     SUPABASE_URL: "https://supabase.example.test",
     SUPABASE_SERVICE_ROLE_KEY: "service-role-test-value",
-    AZURE_TENANT_ID: "tenant-id",
-    AZURE_CLIENT_ID: "client-id",
-    AZURE_CLIENT_SECRET: "client-secret",
-    MAIL_FROM: "briefings@example.com",
     DELIVERY_ALLOWED_CALLERS_JSON: JSON.stringify(["caller@example.com"]),
-    DELIVERY_PILOT_RECIPIENTS_JSON: JSON.stringify([pilotRecipient]),
+    TEAMS_MANAGER_WEBHOOK: teamsWebhook,
     SUPABASE_EXTRACTS_TABLE: "claim_extracts",
     SUPABASE_CLAIMS_TABLE: "claims",
     SUPABASE_BRIEFING_RUNS_TABLE: "briefing_runs",
@@ -72,7 +67,8 @@ function makeHarness({
   noExtract = false,
   noSettings = false,
   storageFailure = null,
-  graphSendFailure = false,
+  teamsSendFailure = false,
+  teamsResponseStatus = 202,
   failPostSendAudit = false,
 } = {}) {
   const deliveries = new Map();
@@ -80,7 +76,7 @@ function makeHarness({
   const digests = new Map();
   const calls = [];
   let sequence = 0;
-  let graphAccepted = false;
+  let teamsAccepted = false;
   const extracts = [
     {
       id: "extract-latest",
@@ -96,8 +92,6 @@ function makeHarness({
     },
   ];
   const defaultSettings = {
-    manager_email: productionRecipient,
-    zero_estimate_email: productionRecipient,
     handler_emails: { "Mapped Handler": "mapped@example.com" },
     ...settings,
   };
@@ -114,15 +108,11 @@ function makeHarness({
         ? response({ mail: graphIdentity, userPrincipalName: graphIdentity })
         : response({ error: "invalid" }, 401);
     }
-    if (parsed.hostname === "login.microsoftonline.com")
-      return response({ access_token: "graph-send-token" });
-    if (
-      parsed.hostname === "graph.microsoft.com" &&
-      parsed.pathname.endsWith("/sendMail")
-    ) {
-      if (graphSendFailure) throw new Error("Graph network failure");
-      graphAccepted = true;
-      return response(null, 202);
+    if (parsed.hostname === "teams-webhook.example.test") {
+      if (teamsSendFailure) throw new Error("Teams network failure");
+      if (teamsResponseStatus >= 200 && teamsResponseStatus < 300)
+        teamsAccepted = true;
+      return response(null, teamsResponseStatus);
     }
     if (parsed.hostname !== "supabase.example.test")
       throw new Error(`Unexpected URL ${url}`);
@@ -131,8 +121,8 @@ function makeHarness({
     const method = init.method || "GET";
     const failure =
       failPostSendAudit &&
-      graphAccepted &&
-      table === "briefing_deliveries" &&
+      teamsAccepted &&
+      table === "digest_log" &&
       method === "PATCH"
         ? { status: 500 }
         : storageFailure?.({ table, method, url: parsed.toString() });
@@ -160,7 +150,7 @@ function makeHarness({
             { code: "23505", message: "duplicate key value" },
             409,
           );
-        deliveries.set(body.id, { ...body });
+        deliveries.set(id || body.id, { ...body });
         return response([{ ...body }], 201);
       }
       if (method === "PATCH") {
@@ -241,12 +231,24 @@ async function bodyOf(result) {
   return result.json();
 }
 
+function sendPayload(idempotencyKey = "send-key", extra = {}) {
+  return {
+    briefingType: "manager",
+    idempotencyKey,
+    ...extra,
+  };
+}
+
+function teamsCalls(calls) {
+  return calls.filter((call) => call.url === teamsWebhook);
+}
+
 function pilotModel(claims, { previousClaims = [], settings = {} } = {}) {
   return buildPilotBriefingModel({
     claims,
     previousClaims,
     extract: { extract_date: "2026-09-10" },
-    settings: { manager_email: productionRecipient, ...settings },
+    settings,
   });
 }
 
@@ -255,6 +257,19 @@ test("exact production CORS origin is accepted", async () => {
   const result = await worker.fetch(request("/health"), env);
   assert.equal(result.status, 200);
   assert.equal(result.headers.get("Cache-Control"), "no-store");
+  assert.equal(
+    result.headers.get("Access-Control-Allow-Origin"),
+    PRODUCTION_ORIGIN,
+  );
+});
+
+test("exact production CORS preflight is accepted", async () => {
+  const { worker, env } = makeHarness();
+  const result = await worker.fetch(
+    request("/briefings/send-pilot", { method: "OPTIONS", token: null }),
+    env,
+  );
+  assert.equal(result.status, 204);
   assert.equal(
     result.headers.get("Access-Control-Allow-Origin"),
     PRODUCTION_ORIGIN,
@@ -310,7 +325,7 @@ test("missing caller allowlist fails closed", async () => {
   assert.equal((await bodyOf(result)).error, "caller_allowlist_unavailable");
 });
 
-test("health reveals no configuration or recipient data", async () => {
+test("health reveals only generic Teams manager mode", async () => {
   const { worker, env, calls } = makeHarness();
   const result = await worker.fetch(request("/health", { token: null }), env);
   const body = await bodyOf(result);
@@ -318,10 +333,11 @@ test("health reveals no configuration or recipient data", async () => {
     ok: true,
     service: "scout-briefings",
     mode: "pilot",
+    delivery: "teams-manager",
     scheduledDelivery: false,
   });
   assert.equal(calls.length, 0);
-  assert.equal(JSON.stringify(body).includes(productionRecipient), false);
+  assert.equal(JSON.stringify(body).includes(teamsWebhook), false);
 });
 
 test("plan performs no sends", async () => {
@@ -331,42 +347,32 @@ test("plan performs no sends", async () => {
     env,
   );
   assert.equal(result.status, 200);
-  assert.equal(
-    calls.some((call) => call.url.endsWith("/sendMail")),
-    false,
-  );
+  assert.equal(teamsCalls(calls).length, 0);
 });
 
-test("plan surfaces missing handler mappings as a warning", async () => {
-  const { worker, env } = makeHarness({
-    settings: { zero_estimate_email: "" },
-  });
+test("plan surfaces missing handler mappings as a warning only", async () => {
+  const { worker, env } = makeHarness();
   const result = await worker.fetch(
     request("/briefings/plan", { method: "POST" }),
     env,
   );
   const body = await bodyOf(result);
   assert.deepEqual(body.missingHandlers, ["Unmapped Handler"]);
-  assert.equal(body.pilotReady, undefined);
   assert.equal(body.readiness.managerPilotReady, true);
   assert.deepEqual(body.readiness.blockingReasons, []);
   assert.deepEqual(body.readiness.warnings, [
     "handler_email_mappings_incomplete",
-    "anomaly_recipient_configuration_not_required_for_manager_pilot",
   ]);
 });
 
-test("plan returns one authoritative manager readiness result", async () => {
+test("plan returns the authoritative Teams readiness result", async () => {
   const { worker, env } = makeHarness({
     noExtract: true,
     noSettings: true,
     overrides: {
       SUPABASE_URL: "",
       SUPABASE_SERVICE_ROLE_KEY: "",
-      AZURE_TENANT_ID: "",
-      AZURE_CLIENT_ID: "",
-      AZURE_CLIENT_SECRET: "",
-      MAIL_FROM: "",
+      TEAMS_MANAGER_WEBHOOK: "",
     },
   });
   const result = await worker.fetch(
@@ -381,15 +387,75 @@ test("plan returns one authoritative manager readiness result", async () => {
     "scout_settings_digest_row_unavailable",
     "manager_briefing_configuration_unavailable",
     "supabase_configuration_incomplete",
-    "graph_configuration_incomplete",
+    "teams_manager_webhook_unavailable",
   ]);
+});
+
+test("missing Teams manager webhook fails closed before reservation", async () => {
+  const { worker, env, calls } = makeHarness({
+    overrides: { TEAMS_MANAGER_WEBHOOK: "" },
+  });
+  const result = await worker.fetch(
+    request("/briefings/send-pilot", {
+      method: "POST",
+      body: sendPayload("missing-webhook"),
+    }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 503);
+  assert.equal(body.error, "manager_pilot_not_ready");
   assert.equal(
-    body.readiness.warnings.includes("handler_email_mappings_incomplete"),
+    body.blockingReasons.includes("teams_manager_webhook_unavailable"),
+    true,
+  );
+  assert.equal(teamsCalls(calls).length, 0);
+});
+
+test("Teams manager webhook readiness requires a valid HTTPS URL", async () => {
+  for (const webhook of [
+    "not-a-url",
+    "http://teams.example.test/trigger",
+    "",
+  ]) {
+    const { worker, env } = makeHarness({
+      overrides: { TEAMS_MANAGER_WEBHOOK: webhook },
+    });
+    const result = await worker.fetch(
+      request("/briefings/plan", { method: "POST" }),
+      env,
+    );
+    const body = await bodyOf(result);
+    assert.equal(result.status, 200, webhook);
+    assert.equal(body.readiness.managerPilotReady, false, webhook);
+    assert.equal(
+      body.readiness.blockingReasons.includes(
+        "teams_manager_webhook_unavailable",
+      ),
+      true,
+      webhook,
+    );
+  }
+
+  const { worker, env } = makeHarness({
+    overrides: { TEAMS_MANAGER_WEBHOOK: "https://teams.example.test/trigger" },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.readiness.managerPilotReady, true);
+  assert.equal(
+    body.readiness.blockingReasons.includes(
+      "teams_manager_webhook_unavailable",
+    ),
     false,
   );
 });
 
-test("send recomputes readiness before reservation, audit, or Graph token", async () => {
+test("send recomputes readiness before reservation or Teams delivery", async () => {
   const { worker, env, calls } = makeHarness({
     noExtract: true,
     noSettings: true,
@@ -397,11 +463,7 @@ test("send recomputes readiness before reservation, audit, or Graph token", asyn
   const result = await worker.fetch(
     request("/briefings/send-pilot", {
       method: "POST",
-      body: {
-        pilotRecipient,
-        briefingType: "manager",
-        idempotencyKey: "blocked-key",
-      },
+      body: sendPayload("blocked-key"),
     }),
     env,
   );
@@ -413,42 +475,224 @@ test("send recomputes readiness before reservation, audit, or Graph token", asyn
     true,
   );
   assert.equal(
-    calls.some((call) => call.url.includes("login.microsoftonline.com")),
-    false,
-  );
-  assert.equal(
-    calls.some((call) => call.url.endsWith("/sendMail")),
-    false,
-  );
-  assert.equal(
     calls.some(
       (call) =>
         call.init.method === "POST" && call.url.includes("briefing_deliveries"),
     ),
     false,
   );
+  assert.equal(teamsCalls(calls).length, 0);
 });
 
-test("missing anomaly recipient configuration is not a manager-pilot blocker", async () => {
-  const { worker, env, calls } = makeHarness({
-    settings: { zero_estimate_email: "" },
-  });
+test("request-controlled destination fields are rejected", async () => {
+  for (const field of [
+    "pilotRecipient",
+    "recipient",
+    "webhook",
+    "webhookUrl",
+    "channel",
+    "destination",
+  ]) {
+    const { worker, env, calls } = makeHarness();
+    const result = await worker.fetch(
+      request("/briefings/send-pilot", {
+        method: "POST",
+        body: sendPayload(`destination-${field}`, {
+          [field]: "attacker-value",
+        }),
+      }),
+      env,
+    );
+    assert.equal(result.status, 400, field);
+    assert.equal((await bodyOf(result)).error, "destination_not_allowed");
+    assert.equal(teamsCalls(calls).length, 0);
+  }
+});
+
+test("only manager briefing type is accepted", async () => {
+  const { worker, env } = makeHarness();
   const result = await worker.fetch(
     request("/briefings/send-pilot", {
       method: "POST",
-      body: {
-        pilotRecipient,
-        briefingType: "manager",
-        idempotencyKey: "anomaly-warning-key",
-      },
+      body: sendPayload("handler-key", { briefingType: "handler" }),
+    }),
+    env,
+  );
+  assert.equal(result.status, 400);
+  assert.equal((await bodyOf(result)).error, "only_manager_pilot_supported");
+});
+
+test("missing idempotency key is rejected", async () => {
+  const { worker, env } = makeHarness();
+  const result = await worker.fetch(
+    request("/briefings/send-pilot", {
+      method: "POST",
+      body: { briefingType: "manager" },
+    }),
+    env,
+  );
+  assert.equal(result.status, 400);
+  assert.equal((await bodyOf(result)).error, "idempotency_key_required");
+});
+
+test("successful manager send is transport accepted with exactly one webhook call", async () => {
+  const { worker, env, calls, deliveries, runs, digests } = makeHarness();
+  const result = await worker.fetch(
+    request("/briefings/send-pilot", {
+      method: "POST",
+      body: sendPayload("success-key"),
     }),
     env,
   );
   assert.equal(result.status, 200);
+  assert.deepEqual(await bodyOf(result), {
+    ok: true,
+    status: "accepted",
+    transportAccepted: true,
+    deliveryConfirmed: false,
+    mode: "pilot",
+    briefingType: "manager",
+  });
+  assert.equal([...deliveries.values()][0].status, "accepted");
+  assert.equal([...runs.values()][0].status, "completed");
+  assert.equal([...digests.values()][0].sent_ok, true);
+  const sends = teamsCalls(calls);
+  assert.equal(sends.length, 1);
+  const payload = JSON.parse(sends[0].init.body);
+  assert.equal(payload.type, "message");
+  assert.equal(payload.attachments.length, 1);
   assert.equal(
-    calls.filter((call) => call.url.endsWith("/sendMail")).length,
+    payload.attachments[0].contentType,
+    "application/vnd.microsoft.card.adaptive",
+  );
+  assert.match(payload.attachments[0].content.body[1].text, /Active claims/);
+  assert.match(
+    payload.attachments[0].content.body[1].text,
+    /Management attention/,
+  );
+  assert.equal(
+    JSON.stringify(payload).includes("service-role-test-value"),
+    false,
+  );
+});
+
+test("same idempotency key cannot call Teams twice", async () => {
+  const { worker, env, calls } = makeHarness();
+  const payload = sendPayload("same-key");
+  const first = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  const second = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  assert.equal(first.status, 200);
+  assert.equal((await bodyOf(first)).status, "accepted");
+  assert.equal(second.status, 200);
+  assert.deepEqual(await bodyOf(second), {
+    ok: true,
+    status: "already-accepted",
+    duplicate: true,
+    transportAccepted: true,
+    deliveryConfirmed: false,
+    mode: "pilot",
+    briefingType: "manager",
+  });
+  assert.equal(teamsCalls(calls).length, 1);
+});
+
+test("concurrent same-key attempts reserve only once and invoke Teams once", async () => {
+  const { worker, env, calls } = makeHarness();
+  const payload = sendPayload("concurrent-key");
+  const [first, second] = await Promise.all([
+    worker.fetch(
+      request("/briefings/send-pilot", { method: "POST", body: payload }),
+      env,
+    ),
+    worker.fetch(
+      request("/briefings/send-pilot", { method: "POST", body: payload }),
+      env,
+    ),
+  ]);
+  const results = await Promise.all([bodyOf(first), bodyOf(second)]);
+  assert.equal(
+    results.filter((result) => result.status === "accepted").length,
     1,
   );
+  assert.equal(
+    results.some(
+      (result) =>
+        result.status === "already-accepted" ||
+        result.error === "delivery_in_progress",
+    ),
+    true,
+  );
+  assert.equal(teamsCalls(calls).length, 1);
+});
+
+test("clear Teams HTTP rejection is failed and does not retry", async () => {
+  const { worker, env, calls } = makeHarness({ teamsResponseStatus: 400 });
+  const payload = sendPayload("rejected-key");
+  const first = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  const firstBody = await bodyOf(first);
+  assert.equal(first.status, 502);
+  assert.equal(firstBody.error, "teams_delivery_failed");
+  const second = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  assert.equal(second.status, 409);
+  assert.equal((await bodyOf(second)).error, "idempotency_key_used");
+  assert.equal(teamsCalls(calls).length, 1);
+});
+
+test("ambiguous Teams failure is delivery_unknown and same key does not retry", async () => {
+  const { worker, env, calls } = makeHarness({ teamsSendFailure: true });
+  const payload = sendPayload("ambiguous-key");
+  const first = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  const firstBody = await bodyOf(first);
+  assert.equal(first.status, 502);
+  assert.equal(firstBody.error, "teams_delivery_ambiguous");
+  assert.equal(firstBody.transportAccepted, null);
+  assert.equal(firstBody.deliveryConfirmed, false);
+  const second = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  assert.equal(second.status, 409);
+  assert.equal((await bodyOf(second)).error, "idempotency_key_used");
+  assert.equal(teamsCalls(calls).length, 1);
+});
+
+test("accepted Teams delivery followed by audit failure is accepted_audit_incomplete", async () => {
+  const { worker, env, calls, deliveries } = makeHarness({
+    failPostSendAudit: true,
+  });
+  const payload = sendPayload("audit-failure-key");
+  const first = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  const firstBody = await bodyOf(first);
+  assert.equal(first.status, 502);
+  assert.equal(firstBody.error, "accepted_audit_incomplete");
+  assert.equal(firstBody.transportAccepted, true);
+  assert.equal(firstBody.deliveryConfirmed, false);
+  assert.equal([...deliveries.values()][0].status, "accepted_audit_incomplete");
+  const sendCount = teamsCalls(calls).length;
+  const second = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  assert.equal(second.status, 409);
+  assert.equal(teamsCalls(calls).length, sendCount);
 });
 
 test("briefing parity uses the accepted no-movement and Risk Watch rules", () => {
@@ -634,258 +878,86 @@ test("briefing parity covers zero estimate, mandate, overdue, and new-claim fixt
   );
 });
 
-test("pilot recipient outside recipient allowlist returns 403", async () => {
-  const { worker, env } = makeHarness();
-  const result = await worker.fetch(
-    request("/briefings/send-pilot", {
-      method: "POST",
-      body: {
-        pilotRecipient: "other@example.com",
-        briefingType: "manager",
-        idempotencyKey: "key-1",
-      },
-    }),
-    env,
+test("configuration has no scheduled trigger, routes, assets, or webhook var", async () => {
+  const config = await readFile("./wrangler.briefings.jsonc", "utf8");
+  assert.match(config, /"name"\s*:\s*"scout-briefings"/);
+  assert.doesNotMatch(config, /"triggers"|"crons"|"scheduled"/i);
+  assert.doesNotMatch(config, /"routes"|"assets"/i);
+  const secretsBlock = config.match(
+    /"secrets"\s*:\s*\{\s*"required"\s*:\s*\[([\s\S]*?)\]/,
   );
-  assert.equal(result.status, 403);
+  assert.ok(secretsBlock);
+  for (const secret of [
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "DELIVERY_ALLOWED_CALLERS_JSON",
+    "TEAMS_MANAGER_WEBHOOK",
+  ]) {
+    assert.match(secretsBlock[1], new RegExp(`"${secret}"`));
+  }
+  const varsBlock = config.match(/"vars"\s*:\s*\{([\s\S]*?)\n\s*\},/);
+  assert.ok(varsBlock);
+  for (const secret of [
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "DELIVERY_ALLOWED_CALLERS_JSON",
+    "TEAMS_MANAGER_WEBHOOK",
+  ]) {
+    assert.doesNotMatch(varsBlock[1], new RegExp(`"${secret}"`));
+  }
 });
 
-test("missing pilot allowlist fails closed", async () => {
+test("Graph application email and legacy proxy delivery are absent", async () => {
+  const source = await readFile("./scout-briefings.js", "utf8");
+  assert.doesNotMatch(
+    source,
+    /sendMail|client_credentials|AZURE_CLIENT_SECRET|MAIL_FROM|scout-teams-proxy/i,
+  );
+  assert.match(source, /graph\.microsoft\.com\/v1\.0\/me/);
+  assert.match(source, /sendTeamsManagerBriefing/);
+});
+
+test("Teams credential is not present in source, config, or API output", async () => {
+  const source = await readFile("./scout-briefings.js", "utf8");
+  const config = await readFile("./wrangler.briefings.jsonc", "utf8");
+  assert.equal(source.includes(teamsWebhook), false);
+  assert.equal(config.includes(teamsWebhook), false);
   const { worker, env } = makeHarness({
-    overrides: { DELIVERY_PILOT_RECIPIENTS_JSON: "" },
+    overrides: { TEAMS_MANAGER_WEBHOOK: "secret-value-that-must-not-leak" },
   });
-  const result = await worker.fetch(
-    request("/briefings/send-pilot", {
-      method: "POST",
-      body: {
-        pilotRecipient,
-        briefingType: "manager",
-        idempotencyKey: "key-2",
-      },
-    }),
-    env,
-  );
-  assert.equal(result.status, 503);
-});
-
-test("only manager pilot type is accepted", async () => {
-  const { worker, env } = makeHarness();
-  const result = await worker.fetch(
-    request("/briefings/send-pilot", {
-      method: "POST",
-      body: {
-        pilotRecipient,
-        briefingType: "handler",
-        idempotencyKey: "key-3",
-      },
-    }),
-    env,
-  );
-  assert.equal(result.status, 400);
-});
-
-test("production recipient is never used as pilot destination", async () => {
-  const { worker, env, calls } = makeHarness();
-  const result = await worker.fetch(
-    request("/briefings/send-pilot", {
-      method: "POST",
-      body: {
-        pilotRecipient,
-        briefingType: "manager",
-        idempotencyKey: "key-4",
-      },
-    }),
-    env,
-  );
-  assert.equal(result.status, 200);
-  const send = calls.find((call) => call.url.endsWith("/sendMail"));
-  const sent = JSON.parse(send.init.body);
+  const result = await worker.fetch(request("/health", { token: null }), env);
   assert.equal(
-    sent.message.toRecipients[0].emailAddress.address,
-    pilotRecipient,
-  );
-  assert.equal(JSON.stringify(sent).includes(productionRecipient), false);
-});
-
-test("missing Graph configuration fails before send", async () => {
-  const { worker, env, calls } = makeHarness({
-    overrides: { AZURE_CLIENT_SECRET: "", MAIL_FROM: "" },
-  });
-  const result = await worker.fetch(
-    request("/briefings/send-pilot", {
-      method: "POST",
-      body: {
-        pilotRecipient,
-        briefingType: "manager",
-        idempotencyKey: "key-5",
-      },
-    }),
-    env,
-  );
-  assert.equal(result.status, 503);
-  assert.equal(
-    calls.some((call) => call.url.endsWith("/sendMail")),
+    JSON.stringify(await bodyOf(result)).includes("secret-value"),
     false,
   );
 });
 
-test("first idempotency key is eligible and the same key cannot send twice", async () => {
-  const { worker, env, calls } = makeHarness();
-  const payload = {
-    pilotRecipient,
-    briefingType: "manager",
-    idempotencyKey: "same-key",
-  };
-  const first = await worker.fetch(
-    request("/briefings/send-pilot", { method: "POST", body: payload }),
-    env,
-  );
-  const second = await worker.fetch(
-    request("/briefings/send-pilot", { method: "POST", body: payload }),
-    env,
-  );
-  assert.equal(first.status, 200);
-  assert.equal((await bodyOf(first)).status, "sent");
-  assert.equal(second.status, 200);
-  assert.equal((await bodyOf(second)).status, "already-sent");
-  assert.equal(
-    calls.filter((call) => call.url.endsWith("/sendMail")).length,
-    1,
-  );
-});
-
-test("concurrent same-key attempts reserve only once and invoke Graph once", async () => {
-  const { worker, env, calls } = makeHarness();
-  const payload = {
-    pilotRecipient,
-    briefingType: "manager",
-    idempotencyKey: "concurrent-key",
-  };
-  const [first, second] = await Promise.all([
-    worker.fetch(
-      request("/briefings/send-pilot", { method: "POST", body: payload }),
-      env,
-    ),
-    worker.fetch(
-      request("/briefings/send-pilot", { method: "POST", body: payload }),
-      env,
-    ),
-  ]);
-  const results = await Promise.all([bodyOf(first), bodyOf(second)]);
-  assert.equal(results.filter((result) => result.status === "sent").length, 1);
-  assert.equal(
-    results.some(
-      (result) =>
-        result.status === "already-sent" ||
-        result.error === "delivery_in_progress",
-    ),
-    true,
-  );
-  assert.equal(
-    calls.filter((call) => call.url.endsWith("/sendMail")).length,
-    1,
-  );
-});
-
-test("Graph acceptance followed by audit failure is sent_audit_incomplete and remains consumed", async () => {
-  const { worker, env, calls } = makeHarness({ failPostSendAudit: true });
-  const payload = {
-    pilotRecipient,
-    briefingType: "manager",
-    idempotencyKey: "audit-failure-key",
-  };
-  const first = await worker.fetch(
-    request("/briefings/send-pilot", { method: "POST", body: payload }),
-    env,
-  );
-  const firstBody = await bodyOf(first);
-  assert.equal(first.status, 502);
-  assert.equal(firstBody.error, "sent_audit_incomplete");
-  assert.equal(firstBody.providerAccepted, true);
-
-  const sendCount = calls.filter((call) =>
-    call.url.endsWith("/sendMail"),
-  ).length;
-  const second = await worker.fetch(
-    request("/briefings/send-pilot", { method: "POST", body: payload }),
-    env,
-  );
-  assert.equal(second.status, 409);
-  assert.equal(
-    calls.filter((call) => call.url.endsWith("/sendMail")).length,
-    sendCount,
-  );
-});
-
-test("Graph network failure is ambiguous and same-key retry does not call Graph", async () => {
-  const { worker, env, calls } = makeHarness({ graphSendFailure: true });
-  const payload = {
-    pilotRecipient,
-    briefingType: "manager",
-    idempotencyKey: "ambiguous-key",
-  };
-  const first = await worker.fetch(
-    request("/briefings/send-pilot", { method: "POST", body: payload }),
-    env,
-  );
-  const firstBody = await bodyOf(first);
-  assert.equal(first.status, 502);
-  assert.equal(firstBody.error, "graph_delivery_ambiguous");
-  assert.equal(firstBody.providerAccepted, null);
-
-  const sendCount = calls.filter((call) =>
-    call.url.endsWith("/sendMail"),
-  ).length;
-  const second = await worker.fetch(
-    request("/briefings/send-pilot", { method: "POST", body: payload }),
-    env,
-  );
-  assert.equal(second.status, 409);
-  assert.equal((await bodyOf(second)).error, "idempotency_key_used");
-  assert.equal(
-    calls.filter((call) => call.url.endsWith("/sendMail")).length,
-    sendCount,
-  );
-});
-
-test("configuration has no scheduled trigger", async () => {
-  const config = await readFile("./wrangler.briefings.jsonc", "utf8");
-  assert.match(config, /"name"\s*:\s*"scout-briefings"/);
-  assert.doesNotMatch(config, /"triggers"|"crons"|"scheduled"/i);
-});
-
-test("new Worker has no unrelated delivery implementation", async () => {
-  const source = await readFile("./scout-briefings.js", "utf8");
-  assert.doesNotMatch(
-    source,
-    /chat creation|webhook send|ChatMessage\.Send|channel send|sendDM|Teams token/i,
-  );
-});
-
-test("new Worker has no hard-coded production recipient fallback", async () => {
-  const source = await readFile("./scout-briefings.js", "utf8");
-  assert.doesNotMatch(source, /@smartsure2020\.co\.za/i);
-  assert.doesNotMatch(source, /DEFAULT_MANAGER_EMAIL|MANAGER_EMAIL\s*\|\|/);
-});
-
-test("shared briefing model drives generated manager content", async () => {
-  const { worker, env, calls } = makeHarness();
+test("manager message is capped and retains accepted operational meaning", async () => {
+  const claims = Array.from({ length: 328 }, (_, index) => ({
+    claim_no: `CLM-${String(index + 1).padStart(3, "0")}`,
+    status: index % 2 ? "Active" : "Repudiated",
+    working_age: index + 1,
+    outstanding: 1000,
+    estimate: 1000,
+  }));
+  const { worker, env, calls } = makeHarness({ claims });
   const result = await worker.fetch(
     request("/briefings/send-pilot", {
       method: "POST",
-      body: {
-        pilotRecipient,
-        briefingType: "manager",
-        idempotencyKey: "model-key",
-      },
+      body: sendPayload("capped-key"),
     }),
     env,
   );
   assert.equal(result.status, 200);
-  const send = calls.find((call) => call.url.endsWith("/sendMail"));
-  const sent = JSON.parse(send.init.body);
-  assert.match(sent.message.body.content, /CLM-001/);
-  assert.match(sent.message.body.content, /Critical|Management attention/);
+  const payload = JSON.parse(teamsCalls(calls)[0].init.body);
+  const text = payload.attachments[0].content.body[1].text;
+  assert.match(text, /Data as at/);
+  assert.match(text, /Active claims/);
+  assert.match(text, /Critical SLA/);
+  assert.match(text, /Stale \/ at-risk/);
+  assert.match(text, /Outstanding exposure/);
+  assert.match(text, /Management attention/);
+  assert.match(text, /Top risk watch/);
+  assert.ok(text.length < 12000);
+  assert.equal(text.includes("CLM-328"), false);
 });
 
 test("history endpoints omit recipient fields", async () => {
