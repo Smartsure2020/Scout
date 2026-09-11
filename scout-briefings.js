@@ -66,10 +66,11 @@ const ASSESSOR_MARKERS = [
 const SAFE_TABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 class RequestError extends Error {
-  constructor(status, code) {
+  constructor(status, code, details = {}) {
     super(code);
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 
@@ -84,6 +85,7 @@ class StorageError extends Error {
 function json(data, status, origin) {
   const headers = {
     "Content-Type": "application/json",
+    "Cache-Control": "no-store",
     Vary: "Origin",
   };
   if (origin === PRODUCTION_ORIGIN) {
@@ -224,45 +226,72 @@ function claimFlags(claim) {
   const status = normaliseStatus(claimStatus(claim));
   const estimate = claimEstimate(claim);
   const outstanding = claimOutstanding(claim);
+  const isPaymentStatus =
+    PAYMENT_STATUSES.has(status) || status.includes("payment requested");
+  const isActiveOrAssessor =
+    status.includes("active") ||
+    status.includes("registered") ||
+    status.includes("authorised") ||
+    status.includes("in progress") ||
+    isAssessorClaim(claim);
   const flags = [];
 
-  if (PAYMENT_STATUSES.has(status) && estimate === 0) {
-    flags.push("Zero estimate — payment or closure review");
-  } else if (!isTerminalClaim(claim) && estimate === 0 && age > 14) {
-    flags.push("No estimate captured — update required");
+  if (isPaymentStatus && estimate === 0) {
+    flags.push(
+      status === "payment requested"
+        ? "Zero estimate — cannot pay without estimate"
+        : "Payment requested — zero estimate: review for closure or data error",
+    );
+  } else if (isActiveOrAssessor && estimate === 0 && age > 14) {
+    flags.push("No estimate captured — assessor update needed");
   }
   if (outstanding > 0 && estimate === 0)
-    flags.push("Estimate missing — outstanding value set");
-  if (status === "fraud") flags.push("Fraud matter — urgent review");
+    flags.push("Estimate missing — outstanding value set, estimate not");
+  else if (
+    estimate === 0 &&
+    outstanding === 0 &&
+    !isPaymentStatus &&
+    !isTerminalClaim(claim)
+  ) {
+    flags.push("Zero value claim — possible data error or NTU candidate");
+  }
+  if (status === "fraud") flags.push("Fraud matter — urgent insurer liaison");
   if (status.includes("ombudsman") || status.includes("nfo"))
-    flags.push("Complaint active — urgent review");
-  if (status.includes("mandate") || outstanding >= 100000)
-    flags.push("Mandate authority required");
+    flags.push("NFO complaint active — urgent management attention");
+  if (status.includes("mandate") || outstanding >= 100000) {
+    flags.push(
+      outstanding >= 100000 && age > 30
+        ? "High value — mandate authority required"
+        : "Mandate check",
+    );
+  }
   if (!isTerminalClaim(claim) && !isLegalClaim(claim)) {
     const movementDays = Number(
       claim?.daysSinceMovement ?? claim?.days_since_movement,
     );
     if (Number.isFinite(movementDays) && movementDays > 30)
-      flags.push("No movement in 30 days — review");
+      flags.push("No movement in 30 days - review or close");
     else if (Number.isFinite(movementDays) && movementDays > 14)
       flags.push("No movement in 14+ days — review");
   }
   if (status === "repudiated" && age > 270)
-    flags.push("9-month window closed — escalate");
+    flags.push("9-month window closed — close or escalate");
   if (status === "awaiting assessor report" && age > 14)
-    flags.push("Assessor report overdue");
+    flags.push("Assessor report overdue (target: 7–14 days)");
   if (status === "awaiting investigators report" && age > 14)
-    flags.push("Investigator report overdue");
+    flags.push("Investigator report overdue (target: 7–12 days)");
   if (status === "awaiting broker feedback" && age > 7)
-    flags.push("Broker unresponsive > 7 days");
+    flags.push("Broker unresponsive > 7 days — escalate");
   if (status === "registered" && age > 5)
-    flags.push("New claim unactioned — assign handler");
+    flags.push("New claim unactioned — assign handler immediately");
   if (claim?.possibleDuplicate || claim?.possible_duplicate)
-    flags.push("Possible duplicate — verify");
+    flags.push("Possible duplicate — verify before processing");
   if (isLegalClaim(claim) && age > 60)
-    flags.push("Recovery overdue — request update");
+    flags.push("Recovery overdue — monthly attorney update needed");
   if (outstanding > 0 && estimate > 0 && outstanding > estimate * 1.5)
-    flags.push("Outstanding exceeds estimate by 50%+");
+    flags.push("Outstanding exceeds estimate by 50%+ — review");
+  const closureCandidate = getReadyToCloseCandidate(claim);
+  if (closureCandidate) flags.push(closureCandidate.flag);
   if (!flags.length && !isTerminalClaim(claim) && age >= 30)
     flags.push("Aged open claim");
   return flags;
@@ -279,7 +308,16 @@ function claimPriorityScore(claim) {
 function isCriticalClaim(claim) {
   const flags = claimFlags(claim);
   return (
-    flags.some((flag) => /urgent|mandate|9-month|unactioned/i.test(flag)) ||
+    flags.some(
+      (flag) =>
+        flag.includes("cannot pay") ||
+        flag.includes("Fraud") ||
+        flag.includes("NFO") ||
+        flag.includes("High value") ||
+        flag.includes("mandate") ||
+        flag.includes("9-month") ||
+        flag.includes("New claim unactioned"),
+    ) ||
     claimAge(claim) >= 30 ||
     claimPriorityScore(claim) >= 60
   );
@@ -301,13 +339,7 @@ function isMandateClaim(claim) {
 }
 
 function isClosureClaim(claim) {
-  const status = normaliseStatus(claimStatus(claim));
-  return (
-    (status.includes("settled") ||
-      status === "payment released" ||
-      status === "payment - payments made") &&
-    claimAge(claim) > 14
-  );
+  return !!getReadyToCloseCandidate(claim);
 }
 
 function isNoMovementClaim(claim) {
@@ -318,7 +350,7 @@ function isNoMovementClaim(claim) {
     !isTerminalClaim(claim) &&
     !isLegalClaim(claim) &&
     Number.isFinite(movementDays) &&
-    movementDays > 14
+    movementDays > 30
   );
 }
 
@@ -328,20 +360,114 @@ function isAwaitingExternalClaim(claim) {
     status.includes("awaiting broker") ||
     status.includes("broker feedback") ||
     status.includes("awaiting client") ||
-    status.includes("assessor report")
+    status.includes("reply from broker") ||
+    status.includes("broker/client") ||
+    status.includes("instructions from broker")
   );
 }
 
 function isAssessorReportOverdueClaim(claim) {
   const status = normaliseStatus(claimStatus(claim));
   return (
-    isAssessorClaim(claim) && status.includes("report") && claimAge(claim) >= 7
+    isAssessorClaim(claim) &&
+    (status.includes("report") ||
+      status.includes("feedback") ||
+      status.includes("assessor")) &&
+    claimAge(claim) >= 7
   );
 }
 
 function isPaymentClaim(claim) {
   const status = normaliseStatus(claimStatus(claim));
-  return PAYMENT_STATUSES.has(status) || status.includes("payment requested");
+  return (
+    PAYMENT_STATUSES.has(status) ||
+    status.includes("payment requested") ||
+    status.includes("payment - approved")
+  );
+}
+
+function hasRecoveryPending(claim) {
+  const text =
+    `${claimStatus(claim)} ${claim?.description || ""} ${claim?.comments || ""}`.toLowerCase();
+  return (
+    text.includes("recovery pending") ||
+    text.includes("awaiting recovery") ||
+    text.includes("recoveries pending")
+  );
+}
+
+function getReadyToCloseCandidate(claim) {
+  const status = normaliseStatus(claimStatus(claim));
+  if (isTerminalClaim(claim) && !status.startsWith("settled")) return null;
+  const age = claimAge(claim);
+  const estimate = claimEstimate(claim);
+  const recoveryPending = hasRecoveryPending(claim);
+
+  if (status === "repudiated - awaiting closure" && age > 7) {
+    return {
+      ruleNo: 1,
+      priority: "P1",
+      flag: "Consider closing — repudiated awaiting closure",
+      action: "Close immediately",
+    };
+  }
+  if (status === "payment - payments made" && age > 21) {
+    return {
+      ruleNo: 2,
+      priority: "P2",
+      flag: "Consider closing — payments confirmed",
+      action: recoveryPending
+        ? "Check recovery before closure"
+        : "Close unless recovery",
+    };
+  }
+  if (status === "payment released" && age > 14) {
+    return {
+      ruleNo: 3,
+      priority: "P2",
+      flag: "Consider closing — payment released",
+      action: "Close unless excess outstanding",
+    };
+  }
+  if (
+    status.startsWith("settled") &&
+    status !== "settled - awaiting recovery" &&
+    age > 14
+  ) {
+    return {
+      ruleNo: 4,
+      priority: "P2",
+      flag: "Settlement complete — close claim",
+      action: "Close claim",
+    };
+  }
+  if (status === "payment requested" && estimate === 0 && age > 30) {
+    return {
+      ruleNo: 5,
+      priority: "P2",
+      flag: "Zero estimate payment request — data error or NTU",
+      action: "Review data error or NTU",
+    };
+  }
+  if (status === "registered" && age > 60) {
+    return {
+      ruleNo: 6,
+      priority: "P2",
+      flag: "Registered 60+ days — likely abandoned/NTU",
+      action: "Likely abandoned / NTU",
+    };
+  }
+  return null;
+}
+
+function isRiskWatchClaim(claim) {
+  const status = normaliseStatus(claimStatus(claim));
+  return (
+    isLegalClaim(claim) ||
+    status.includes("repudiat") ||
+    status.includes("mandate") ||
+    claimOutstanding(claim) >= 100000
+  );
 }
 
 function isNewClaim(claim) {
@@ -365,11 +491,11 @@ function nextAction(claim) {
   if (isZeroEstimateClaim(claim))
     return "Validate estimate and payment or closure state";
   if (isAssessorReportOverdueClaim(claim)) return "Chase assessor report";
-  if (isAwaitingExternalClaim(claim))
-    return "Follow up with the external party";
+  if (isAwaitingExternalClaim(claim)) return "Follow up with broker or client";
   if (isPaymentClaim(claim))
     return "Confirm payment status and close if complete";
-  if (isClosureClaim(claim)) return "Close unless recovery or excess remains";
+  const closure = getReadyToCloseCandidate(claim);
+  if (closure) return closure.action;
   return "Review and progress claim";
 }
 
@@ -446,10 +572,7 @@ function modelFor(claims, previousClaims, extract, settings, env) {
       isCritical: isCriticalClaim,
       isStale: isStaleClaim,
       isZeroEstimate: isZeroEstimateClaim,
-      isRisk: (claim) =>
-        isLegalClaim(claim) ||
-        isMandateClaim(claim) ||
-        claimOutstanding(claim) >= 100000,
+      isRisk: isRiskWatchClaim,
       isMandate: isMandateClaim,
       isClosure: isClosureClaim,
       isNoMovement: isNoMovementClaim,
@@ -470,7 +593,28 @@ function modelFor(claims, previousClaims, extract, settings, env) {
       previousClaims,
       comparisonAvailable: previousClaims.length > 0,
       includeTerminalClaims: settings.includeTerminalClaims,
+      includeSettled: true,
     },
+  );
+}
+
+export function buildPilotBriefingModel({
+  claims = [],
+  previousClaims = [],
+  extract = null,
+  settings = {},
+  env = {},
+} = {}) {
+  const resolvedSettings =
+    settings && Object.prototype.hasOwnProperty.call(settings, "managerEmail")
+      ? settings
+      : normaliseSettings(settings);
+  return modelFor(
+    Array.isArray(claims) ? claims : [],
+    Array.isArray(previousClaims) ? previousClaims : [],
+    extract,
+    resolvedSettings,
+    env,
   );
 }
 
@@ -706,14 +850,29 @@ async function loadSettings(env, httpFetch) {
     {},
     httpFetch,
   );
-  return normaliseSettings(Array.isArray(rows) && rows[0] ? rows[0].value : {});
+  const row = Array.isArray(rows) ? rows[0] || null : null;
+  return {
+    settings: normaliseSettings(row?.value || {}),
+    rowAvailable: Boolean(row),
+  };
 }
 
 async function loadPlanData(env, httpFetch) {
-  const [data, settings] = await Promise.all([
-    loadExtractClaims(env, httpFetch),
-    loadSettings(env, httpFetch),
-  ]);
+  const [data, settingsResult] = hasStorageConfig(env)
+    ? await Promise.all([
+        loadExtractClaims(env, httpFetch),
+        loadSettings(env, httpFetch),
+      ])
+    : [
+        {
+          extract: null,
+          previousExtract: null,
+          claims: [],
+          previousClaims: [],
+        },
+        { settings: normaliseSettings({}), rowAvailable: false },
+      ];
+  const settings = settingsResult.settings;
   const model = modelFor(
     data.claims,
     data.previousClaims,
@@ -734,6 +893,7 @@ async function loadPlanData(env, httpFetch) {
   return {
     ...data,
     settings,
+    settingsRowAvailable: settingsResult.rowAvailable,
     model,
     handlerNames,
     missingHandlers,
@@ -748,7 +908,9 @@ function isAllowlistConfigured(raw, recipient = false) {
   );
 }
 
-function planResult(data, env) {
+function managerPilotReadiness(data, env) {
+  const blockingReasons = [];
+  const warnings = [];
   const callerListConfigured = isAllowlistConfigured(
     env.DELIVERY_ALLOWED_CALLERS_JSON,
   );
@@ -756,19 +918,37 @@ function planResult(data, env) {
     env.DELIVERY_PILOT_RECIPIENTS_JSON,
     true,
   );
-  const managerConfigured = Boolean(data.settings.managerEmail);
-  const zeroEstimateConfigured = Boolean(data.settings.zeroEstimateEmail);
-  const dataConfigured = Boolean(data.extract);
-  const pilotReady =
-    dataConfigured &&
-    data.settings.available &&
-    managerConfigured &&
-    zeroEstimateConfigured &&
-    data.missingHandlers.length === 0 &&
-    hasStorageConfig(env) &&
-    hasGraphConfig(env) &&
-    callerListConfigured &&
-    pilotListConfigured;
+
+  if (!data.extract) blockingReasons.push("current_extract_unavailable");
+  if (!data.settingsRowAvailable)
+    blockingReasons.push("scout_settings_digest_row_unavailable");
+  if (!data.settings.managerEmail)
+    blockingReasons.push("manager_briefing_configuration_unavailable");
+  if (!hasStorageConfig(env))
+    blockingReasons.push("supabase_configuration_incomplete");
+  if (!hasGraphConfig(env))
+    blockingReasons.push("graph_configuration_incomplete");
+  if (!callerListConfigured)
+    blockingReasons.push("caller_allowlist_unavailable");
+  if (!pilotListConfigured)
+    blockingReasons.push("pilot_recipient_allowlist_unavailable");
+
+  if (data.missingHandlers.length)
+    warnings.push("handler_email_mappings_incomplete");
+  if (!data.settings.zeroEstimateEmail && data.model.metrics.zeroEstimate > 0)
+    warnings.push(
+      "anomaly_recipient_configuration_not_required_for_manager_pilot",
+    );
+
+  return {
+    managerPilotReady: blockingReasons.length === 0,
+    blockingReasons,
+    warnings,
+  };
+}
+
+function planResult(data, env) {
+  const readiness = managerPilotReadiness(data, env);
   return {
     mode: "pilot",
     extractDate:
@@ -777,13 +957,13 @@ function planResult(data, env) {
       data.extract?.effective_date || data.extract?.extract_date || null,
     claimCount: data.claims.length,
     activeClaimCount: data.model.metrics.active,
-    managerConfigured,
+    managerConfigured: Boolean(data.settings.managerEmail),
     handlerCount: data.handlerNames.length,
     mappedHandlerCount: data.mappedHandlerCount,
     missingHandlers: data.missingHandlers,
     anomalyDigestRequired: data.model.metrics.zeroEstimate > 0,
     comparisonAvailable: data.model.comparisonAvailable,
-    pilotReady,
+    readiness,
   };
 }
 
@@ -1076,7 +1256,9 @@ async function sendGraphEmail(env, recipient, message, httpFetch) {
       },
     );
   } catch {
-    throw new RequestError(502, "graph_delivery_failed");
+    throw new RequestError(502, "graph_delivery_ambiguous", {
+      providerAccepted: null,
+    });
   }
   if (!response.ok) throw new RequestError(502, "graph_delivery_failed");
   return { ok: true };
@@ -1097,21 +1279,17 @@ async function sendPilot(request, env, caller, httpFetch, now) {
   const pilotRecipients = parseRecipientAllowlist(
     env.DELIVERY_PILOT_RECIPIENTS_JSON,
   );
-  if (!pilotRecipients.length)
-    throw new RequestError(503, "pilot_recipient_allowlist_unavailable");
-  if (!pilotRecipients.includes(recipient))
+  if (pilotRecipients.length && !pilotRecipients.includes(recipient))
     throw new RequestError(403, "pilot_recipient_not_allowed");
   const idempotencyKey = normaliseText(
     body?.idempotencyKey || body?.idempotency_key,
   );
   if (!idempotencyKey || idempotencyKey.length > 200)
     throw new RequestError(400, "idempotency_key_required");
-  if (!hasGraphConfig(env))
-    throw new RequestError(503, "graph_configuration_incomplete");
-
   const data = await loadPlanData(env, httpFetch);
-  if (!data.extract || !data.settings.managerEmail)
-    throw new RequestError(503, "manager_briefing_not_ready");
+  const readiness = managerPilotReadiness(data, env);
+  if (!readiness.managerPilotReady)
+    throw new RequestError(503, "manager_pilot_not_ready", readiness);
   const message = buildManagerBriefing(data.model, data.extract, now);
   const deliveryId = await deterministicUuid(idempotencyKey);
   const reservation = await reserveDelivery(
@@ -1138,6 +1316,7 @@ async function sendPilot(request, env, caller, httpFetch, now) {
 
   let run = null;
   let digest = null;
+  let providerAccepted = false;
   try {
     run = await createRun(
       env,
@@ -1160,6 +1339,7 @@ async function sendPilot(request, env, caller, httpFetch, now) {
     );
     digest = await createDigestLog(env, message, recipient, httpFetch);
     await sendGraphEmail(env, recipient, message, httpFetch);
+    providerAccepted = true;
     await patchDelivery(
       env,
       deliveryId,
@@ -1179,6 +1359,75 @@ async function sendPilot(request, env, caller, httpFetch, now) {
       error instanceof RequestError
         ? error
         : new RequestError(502, "pilot_delivery_failed");
+    if (providerAccepted) {
+      try {
+        await patchDelivery(
+          env,
+          deliveryId,
+          { status: "sent_audit_incomplete", error: "sent_audit_incomplete" },
+          httpFetch,
+        );
+      } catch {
+        /* preserve the provider-accepted outcome */
+      }
+      if (digest?.id) {
+        try {
+          await patchDigestLog(env, digest.id, { sent_ok: true }, httpFetch);
+        } catch {
+          /* preserve the provider-accepted outcome */
+        }
+      }
+      if (run?.id) {
+        try {
+          await patchRun(
+            env,
+            run.id,
+            {
+              status: "sent_audit_incomplete",
+              completed_at: now.toISOString(),
+            },
+            httpFetch,
+          );
+        } catch {
+          /* preserve the provider-accepted outcome */
+        }
+      }
+      throw new RequestError(502, "sent_audit_incomplete", {
+        providerAccepted: true,
+      });
+    }
+    if (failure.code === "graph_delivery_ambiguous") {
+      try {
+        await patchDelivery(
+          env,
+          deliveryId,
+          { status: "delivery_unknown", error: failure.code },
+          httpFetch,
+        );
+      } catch {
+        /* preserve the ambiguous provider outcome */
+      }
+      if (digest?.id) {
+        try {
+          await patchDigestLog(env, digest.id, { sent_ok: false }, httpFetch);
+        } catch {
+          /* preserve the ambiguous provider outcome */
+        }
+      }
+      if (run?.id) {
+        try {
+          await patchRun(
+            env,
+            run.id,
+            { status: "delivery_unknown", completed_at: now.toISOString() },
+            httpFetch,
+          );
+        } catch {
+          /* preserve the ambiguous provider outcome */
+        }
+      }
+      throw failure;
+    }
     try {
       await patchDelivery(
         env,
@@ -1214,7 +1463,11 @@ async function sendPilot(request, env, caller, httpFetch, now) {
 
 function errorResponse(error, origin) {
   if (error instanceof RequestError)
-    return json({ ok: false, error: error.code }, error.status, origin);
+    return json(
+      { ok: false, error: error.code, ...error.details },
+      error.status,
+      origin,
+    );
   if (error instanceof StorageError)
     return json({ ok: false, error: "storage_unavailable" }, 503, origin);
   return json({ ok: false, error: "internal_error" }, 500, origin);

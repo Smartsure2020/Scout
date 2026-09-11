@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createBriefingsWorker, PRODUCTION_ORIGIN } from "./scout-briefings.js";
+import {
+  buildPilotBriefingModel,
+  createBriefingsWorker,
+  PRODUCTION_ORIGIN,
+} from "./scout-briefings.js";
 
 const productionRecipient = "manager@example.com";
 const pilotRecipient = "pilot@example.com";
@@ -63,12 +67,20 @@ function makeHarness({
   settings = {},
   overrides = {},
   graphIdentity = "caller@example.com",
+  claims = sampleClaims(),
+  previousClaims = sampleClaims().slice(1),
+  noExtract = false,
+  noSettings = false,
+  storageFailure = null,
+  graphSendFailure = false,
+  failPostSendAudit = false,
 } = {}) {
   const deliveries = new Map();
   const runs = new Map();
   const digests = new Map();
   const calls = [];
   let sequence = 0;
+  let graphAccepted = false;
   const extracts = [
     {
       id: "extract-latest",
@@ -107,23 +119,36 @@ function makeHarness({
     if (
       parsed.hostname === "graph.microsoft.com" &&
       parsed.pathname.endsWith("/sendMail")
-    )
+    ) {
+      if (graphSendFailure) throw new Error("Graph network failure");
+      graphAccepted = true;
       return response(null, 202);
+    }
     if (parsed.hostname !== "supabase.example.test")
       throw new Error(`Unexpected URL ${url}`);
 
     const table = parsed.pathname.split("/").pop();
     const method = init.method || "GET";
+    const failure =
+      failPostSendAudit &&
+      graphAccepted &&
+      table === "briefing_deliveries" &&
+      method === "PATCH"
+        ? { status: 500 }
+        : storageFailure?.({ table, method, url: parsed.toString() });
+    if (failure)
+      return response(
+        failure.body || { error: "injected storage failure" },
+        failure.status || 500,
+      );
     if (method === "GET" && table === "claim_extracts")
-      return response(extracts);
+      return response(noExtract ? [] : extracts);
     if (method === "GET" && table === "claims") {
       const id = parsed.searchParams.get("extract_id") || "";
-      return response(
-        id.includes("previous") ? sampleClaims().slice(1) : sampleClaims(),
-      );
+      return response(id.includes("previous") ? previousClaims : claims);
     }
     if (method === "GET" && table === "scout_settings")
-      return response([{ value: defaultSettings }]);
+      return response(noSettings ? [] : [{ value: defaultSettings }]);
     if (table === "briefing_deliveries") {
       const id = parsed.searchParams.get("id")?.replace(/^eq\./, "");
       if (method === "GET")
@@ -216,10 +241,20 @@ async function bodyOf(result) {
   return result.json();
 }
 
+function pilotModel(claims, { previousClaims = [], settings = {} } = {}) {
+  return buildPilotBriefingModel({
+    claims,
+    previousClaims,
+    extract: { extract_date: "2026-09-10" },
+    settings: { manager_email: productionRecipient, ...settings },
+  });
+}
+
 test("exact production CORS origin is accepted", async () => {
   const { worker, env } = makeHarness();
   const result = await worker.fetch(request("/health"), env);
   assert.equal(result.status, 200);
+  assert.equal(result.headers.get("Cache-Control"), "no-store");
   assert.equal(
     result.headers.get("Access-Control-Allow-Origin"),
     PRODUCTION_ORIGIN,
@@ -302,15 +337,301 @@ test("plan performs no sends", async () => {
   );
 });
 
-test("plan surfaces missing handler mappings", async () => {
-  const { worker, env } = makeHarness();
+test("plan surfaces missing handler mappings as a warning", async () => {
+  const { worker, env } = makeHarness({
+    settings: { zero_estimate_email: "" },
+  });
   const result = await worker.fetch(
     request("/briefings/plan", { method: "POST" }),
     env,
   );
   const body = await bodyOf(result);
   assert.deepEqual(body.missingHandlers, ["Unmapped Handler"]);
-  assert.equal(body.pilotReady, false);
+  assert.equal(body.pilotReady, undefined);
+  assert.equal(body.readiness.managerPilotReady, true);
+  assert.deepEqual(body.readiness.blockingReasons, []);
+  assert.deepEqual(body.readiness.warnings, [
+    "handler_email_mappings_incomplete",
+    "anomaly_recipient_configuration_not_required_for_manager_pilot",
+  ]);
+});
+
+test("plan returns one authoritative manager readiness result", async () => {
+  const { worker, env } = makeHarness({
+    noExtract: true,
+    noSettings: true,
+    overrides: {
+      SUPABASE_URL: "",
+      SUPABASE_SERVICE_ROLE_KEY: "",
+      AZURE_TENANT_ID: "",
+      AZURE_CLIENT_ID: "",
+      AZURE_CLIENT_SECRET: "",
+      MAIL_FROM: "",
+    },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.readiness.managerPilotReady, false);
+  assert.deepEqual(body.readiness.blockingReasons, [
+    "current_extract_unavailable",
+    "scout_settings_digest_row_unavailable",
+    "manager_briefing_configuration_unavailable",
+    "supabase_configuration_incomplete",
+    "graph_configuration_incomplete",
+  ]);
+  assert.equal(
+    body.readiness.warnings.includes("handler_email_mappings_incomplete"),
+    false,
+  );
+});
+
+test("send recomputes readiness before reservation, audit, or Graph token", async () => {
+  const { worker, env, calls } = makeHarness({
+    noExtract: true,
+    noSettings: true,
+  });
+  const result = await worker.fetch(
+    request("/briefings/send-pilot", {
+      method: "POST",
+      body: {
+        pilotRecipient,
+        briefingType: "manager",
+        idempotencyKey: "blocked-key",
+      },
+    }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 503);
+  assert.equal(body.error, "manager_pilot_not_ready");
+  assert.equal(
+    body.blockingReasons.includes("current_extract_unavailable"),
+    true,
+  );
+  assert.equal(
+    calls.some((call) => call.url.includes("login.microsoftonline.com")),
+    false,
+  );
+  assert.equal(
+    calls.some((call) => call.url.endsWith("/sendMail")),
+    false,
+  );
+  assert.equal(
+    calls.some(
+      (call) =>
+        call.init.method === "POST" && call.url.includes("briefing_deliveries"),
+    ),
+    false,
+  );
+});
+
+test("missing anomaly recipient configuration is not a manager-pilot blocker", async () => {
+  const { worker, env, calls } = makeHarness({
+    settings: { zero_estimate_email: "" },
+  });
+  const result = await worker.fetch(
+    request("/briefings/send-pilot", {
+      method: "POST",
+      body: {
+        pilotRecipient,
+        briefingType: "manager",
+        idempotencyKey: "anomaly-warning-key",
+      },
+    }),
+    env,
+  );
+  assert.equal(result.status, 200);
+  assert.equal(
+    calls.filter((call) => call.url.endsWith("/sendMail")).length,
+    1,
+  );
+});
+
+test("briefing parity uses the accepted no-movement and Risk Watch rules", () => {
+  const fifteenDays = pilotModel([
+    {
+      claim_no: "NM-15",
+      status: "Active",
+      working_age: 10,
+      outstanding: 100,
+      estimate: 100,
+      days_since_movement: 15,
+    },
+  ]);
+  assert.equal(fifteenDays.metrics.noMovement, 0);
+
+  const thirtyOneDays = pilotModel([
+    {
+      claim_no: "NM-31",
+      status: "Active",
+      working_age: 10,
+      outstanding: 100,
+      estimate: 100,
+      days_since_movement: 31,
+    },
+  ]);
+  assert.equal(thirtyOneDays.metrics.noMovement, 1);
+
+  const repudiated = pilotModel([
+    {
+      claim_no: "REP-1",
+      status: "Repudiated",
+      working_age: 2,
+      outstanding: 100,
+      estimate: 100,
+    },
+  ]);
+  assert.deepEqual(
+    repudiated.topRisks.items.map((item) => item.claimNo),
+    ["REP-1"],
+  );
+});
+
+test("briefing parity uses the deterministic six-rule closure model", () => {
+  const model = pilotModel(
+    [
+      {
+        claim_no: "CLOSE-1",
+        status: "Repudiated - Awaiting Closure",
+        working_age: 8,
+        outstanding: 100,
+        estimate: 100,
+      },
+      {
+        claim_no: "CLOSE-2",
+        status: "Payment - Payments Made",
+        working_age: 22,
+        outstanding: 100,
+        estimate: 100,
+      },
+      {
+        claim_no: "CLOSE-3",
+        status: "Payment Released",
+        working_age: 15,
+        outstanding: 100,
+        estimate: 100,
+      },
+      {
+        claim_no: "CLOSE-4",
+        status: "Settled",
+        working_age: 15,
+        outstanding: 100,
+        estimate: 100,
+      },
+      {
+        claim_no: "CLOSE-5",
+        status: "Settled - Awaiting Recovery",
+        working_age: 15,
+        outstanding: 100,
+        estimate: 100,
+      },
+      {
+        claim_no: "CLOSE-6",
+        status: "Payment Requested",
+        working_age: 31,
+        outstanding: 100,
+        estimate: 0,
+      },
+      {
+        claim_no: "CLOSE-7",
+        status: "Registered",
+        working_age: 61,
+        outstanding: 100,
+        estimate: 100,
+      },
+    ],
+    { settings: { include_terminal_claims: true } },
+  );
+
+  assert.equal(model.metrics.closure, 6);
+  assert.equal(
+    model.handler.items.some((item) => item.claimNo === "CLOSE-5"),
+    false,
+  );
+  assert.equal(
+    model.handler.items.some((item) => item.claimNo === "CLOSE-4"),
+    true,
+  );
+});
+
+test("briefing parity covers zero estimate, mandate, overdue, and new-claim fixtures", () => {
+  const model = pilotModel(
+    [
+      {
+        claim_no: "ZERO-1",
+        status: "Payment Requested",
+        working_age: 1,
+        outstanding: 100,
+        estimate: 0,
+      },
+      {
+        claim_no: "MANDATE-1",
+        status: "Active",
+        working_age: 2,
+        outstanding: 100000,
+        estimate: 100000,
+      },
+      {
+        claim_no: "ASSESSOR-1",
+        status: "Awaiting Assessor Report",
+        working_age: 7,
+        outstanding: 100,
+        estimate: 100,
+        possible_duplicate: true,
+      },
+      {
+        claim_no: "BROKER-1",
+        status: "Awaiting Broker Feedback",
+        working_age: 8,
+        outstanding: 100,
+        estimate: 100,
+      },
+      {
+        claim_no: "NEW-1",
+        status: "Registered",
+        working_age: 0,
+        outstanding: 100,
+        estimate: 100,
+        last_updated_source: "new-claim",
+      },
+    ],
+    {
+      previousClaims: [
+        {
+          claim_no: "OLD-1",
+          status: "Active",
+          working_age: 1,
+          outstanding: 100,
+          estimate: 100,
+        },
+      ],
+    },
+  );
+
+  assert.equal(model.metrics.zeroEstimate, 1);
+  assert.equal(model.metrics.mandate, 1);
+  assert.equal(model.metrics.newClaims, 1);
+  assert.equal(
+    model.attention.some((section) => section.key === "mandate"),
+    true,
+  );
+  assert.equal(
+    model.handler.items.find((item) => item.claimNo === "ASSESSOR-1")
+      ?.nextAction,
+    "Chase assessor report",
+  );
+  assert.equal(
+    model.handler.items.find((item) => item.claimNo === "BROKER-1")?.nextAction,
+    "Follow up with broker or client",
+  );
+  assert.equal(
+    model.handler.items.some((item) => item.claimNo === "NEW-1"),
+    true,
+  );
 });
 
 test("pilot recipient outside recipient allowlist returns 403", async () => {
@@ -430,6 +751,100 @@ test("first idempotency key is eligible and the same key cannot send twice", asy
   assert.equal(
     calls.filter((call) => call.url.endsWith("/sendMail")).length,
     1,
+  );
+});
+
+test("concurrent same-key attempts reserve only once and invoke Graph once", async () => {
+  const { worker, env, calls } = makeHarness();
+  const payload = {
+    pilotRecipient,
+    briefingType: "manager",
+    idempotencyKey: "concurrent-key",
+  };
+  const [first, second] = await Promise.all([
+    worker.fetch(
+      request("/briefings/send-pilot", { method: "POST", body: payload }),
+      env,
+    ),
+    worker.fetch(
+      request("/briefings/send-pilot", { method: "POST", body: payload }),
+      env,
+    ),
+  ]);
+  const results = await Promise.all([bodyOf(first), bodyOf(second)]);
+  assert.equal(results.filter((result) => result.status === "sent").length, 1);
+  assert.equal(
+    results.some(
+      (result) =>
+        result.status === "already-sent" ||
+        result.error === "delivery_in_progress",
+    ),
+    true,
+  );
+  assert.equal(
+    calls.filter((call) => call.url.endsWith("/sendMail")).length,
+    1,
+  );
+});
+
+test("Graph acceptance followed by audit failure is sent_audit_incomplete and remains consumed", async () => {
+  const { worker, env, calls } = makeHarness({ failPostSendAudit: true });
+  const payload = {
+    pilotRecipient,
+    briefingType: "manager",
+    idempotencyKey: "audit-failure-key",
+  };
+  const first = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  const firstBody = await bodyOf(first);
+  assert.equal(first.status, 502);
+  assert.equal(firstBody.error, "sent_audit_incomplete");
+  assert.equal(firstBody.providerAccepted, true);
+
+  const sendCount = calls.filter((call) =>
+    call.url.endsWith("/sendMail"),
+  ).length;
+  const second = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  assert.equal(second.status, 409);
+  assert.equal(
+    calls.filter((call) => call.url.endsWith("/sendMail")).length,
+    sendCount,
+  );
+});
+
+test("Graph network failure is ambiguous and same-key retry does not call Graph", async () => {
+  const { worker, env, calls } = makeHarness({ graphSendFailure: true });
+  const payload = {
+    pilotRecipient,
+    briefingType: "manager",
+    idempotencyKey: "ambiguous-key",
+  };
+  const first = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  const firstBody = await bodyOf(first);
+  assert.equal(first.status, 502);
+  assert.equal(firstBody.error, "graph_delivery_ambiguous");
+  assert.equal(firstBody.providerAccepted, null);
+
+  const sendCount = calls.filter((call) =>
+    call.url.endsWith("/sendMail"),
+  ).length;
+  const second = await worker.fetch(
+    request("/briefings/send-pilot", { method: "POST", body: payload }),
+    env,
+  );
+  assert.equal(second.status, 409);
+  assert.equal((await bodyOf(second)).error, "idempotency_key_used");
+  assert.equal(
+    calls.filter((call) => call.url.endsWith("/sendMail")).length,
+    sendCount,
   );
 });
 
