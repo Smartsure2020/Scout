@@ -1,8 +1,8 @@
 /**
- * Scout Briefings — isolated manual email pilot.
+ * Scout Briefings — isolated manual Teams manager pilot.
  *
- * This Worker deliberately owns only production email briefing generation,
- * email delivery, and delivery history. It has no scheduled entrypoint.
+ * This Worker deliberately owns only production manager briefing generation,
+ * Teams delivery, and delivery history. It has no scheduled entrypoint.
  */
 
 import { buildBriefingModel } from "./scout-smartsure/claims/briefing-model.mjs";
@@ -507,56 +507,9 @@ function formatCurrency(value) {
   return `R${Math.round(number(value)).toLocaleString("en-ZA")}`;
 }
 
-function escapeHtml(value) {
-  return String(value == null ? "" : value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
 function formatDate(value) {
   const text = normaliseText(value);
   return text ? text.slice(0, 10) : "Unavailable";
-}
-
-function emailLayout(title, subtitle, bodyHtml) {
-  return `<!doctype html>
-<html><body style="margin:0;background:#f4f8f8;font-family:Segoe UI,Arial,sans-serif;color:#1a2e2e;">
-  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;background:#f4f8f8;">
-    <tr><td align="center" style="padding:24px 12px;">
-      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="680" style="width:100%;max-width:680px;background:#fff;border:1px solid #e2ecea;border-collapse:separate;border-radius:8px;overflow:hidden;">
-        <tr><td style="background:#1e6363;color:#fff;padding:20px 24px;">
-          <div style="font-size:20px;font-weight:700;line-height:1.25;">${escapeHtml(title)}</div>
-          <div style="font-size:13px;color:#e7f4f1;margin-top:5px;line-height:1.45;">${escapeHtml(subtitle)}</div>
-        </td></tr>
-        <tr><td style="padding:24px;">${bodyHtml}</td></tr>
-        <tr><td style="background:#f4f8f8;border-top:1px solid #e2ecea;padding:14px 24px;text-align:center;color:#6b8582;font-size:12px;line-height:1.5;">Scout · Smartsure Twenty20 · Manual pilot briefing</td></tr>
-      </table>
-    </td></tr>
-  </table>
-</body></html>`;
-}
-
-function claimLine(item) {
-  return `<tr>
-    <td style="padding:9px;border-bottom:1px solid #e2ecea;"><strong>${escapeHtml(item.claimNo)}</strong><br><span style="color:#6b8582;">${escapeHtml(item.insured)}</span></td>
-    <td style="padding:9px;border-bottom:1px solid #e2ecea;">${escapeHtml(item.handler)}<br><span style="color:#6b8582;">${escapeHtml(item.primaryReason)}</span></td>
-    <td style="padding:9px;border-bottom:1px solid #e2ecea;text-align:right;white-space:nowrap;">${escapeHtml(item.age)}wd<br>${formatCurrency(item.outstanding)}</td>
-  </tr>`;
-}
-
-function claimTable(items, emptyText) {
-  if (!items.length)
-    return `<p style="color:#6b8582;">${escapeHtml(emptyText)}</p>`;
-  return `<table style="width:100%;border-collapse:collapse;font-size:13px;">
-    <thead><tr style="background:#f4f8f8;">
-      <th style="text-align:left;padding:9px;border-bottom:1px solid #e2ecea;">Claim</th>
-      <th style="text-align:left;padding:9px;border-bottom:1px solid #e2ecea;">Owner / focus</th>
-      <th style="text-align:right;padding:9px;border-bottom:1px solid #e2ecea;">Age / outstanding</th>
-    </tr></thead><tbody>${items.map(claimLine).join("")}</tbody>
-  </table>`;
 }
 
 function modelFor(claims, previousClaims, extract, settings, env) {
@@ -606,7 +559,8 @@ export function buildPilotBriefingModel({
   env = {},
 } = {}) {
   const resolvedSettings =
-    settings && Object.prototype.hasOwnProperty.call(settings, "managerEmail")
+    settings &&
+    Object.prototype.hasOwnProperty.call(settings, "includeTerminalClaims")
       ? settings
       : normaliseSettings(settings);
   return modelFor(
@@ -623,43 +577,96 @@ export function buildManagerBriefing(model, extract, now = new Date()) {
     model.extractDate || extract?.effective_date || extract?.extract_date,
   );
   const runDate = formatDate(now.toISOString());
+  const subject = `Scout manager briefing — ${runDate}`;
+  const itemByClaimNo = new Map(
+    model.handler.items.map((item) => [item.claimNo, item]),
+  );
   const attentionItems = model.attention
     .flatMap((section) =>
-      section.claims.map((claim) => ({
-        claimNo: claimNo(claim),
-        insured: claimInsured(claim),
-        handler: claimHandler(claim),
-        age: claimAge(claim),
-        outstanding: claimOutstanding(claim),
-        primaryReason: section.label,
-      })),
+      section.claims.map((claim) => {
+        const item = itemByClaimNo.get(String(claimNo(claim)));
+        return {
+          claimNo: claimNo(claim),
+          outstanding: claimOutstanding(claim),
+          primaryReason: section.label,
+          nextAction: nextAction(claim),
+          url: item?.url || "",
+        };
+      }),
     )
     .slice(0, 12);
-  const riskItems = model.topRisks.items;
-  const body = `
-    <p style="margin:0 0 16px;color:#6b8582;font-size:13px;">Run date: <strong style="color:#1a2e2e;">${escapeHtml(runDate)}</strong> · Data as at: <strong style="color:#1a2e2e;">${escapeHtml(extractDate)}</strong></p>
-    <table style="width:100%;border-collapse:collapse;margin-bottom:20px;">
-      <tr><td style="padding:10px;background:#f4f8f8;border-right:4px solid #fff;"><strong>${model.metrics.active}</strong><br><span style="font-size:12px;color:#6b8582;">Active claims</span></td>
-      <td style="padding:10px;background:#fff4ef;border-right:4px solid #fff;"><strong>${model.metrics.critical}</strong><br><span style="font-size:12px;color:#6b8582;">Critical</span></td>
-      <td style="padding:10px;background:#fff8e6;border-right:4px solid #fff;"><strong>${model.metrics.stale}</strong><br><span style="font-size:12px;color:#6b8582;">Stale / at risk</span></td>
-      <td style="padding:10px;background:#eef7f5;"><strong>${formatCurrency(model.metrics.exposure)}</strong><br><span style="font-size:12px;color:#6b8582;">Outstanding</span></td></tr>
-    </table>
-    <h3 style="margin:20px 0 8px;color:#1e6363;font-size:14px;">Management attention</h3>
-    ${claimTable(attentionItems, "No priority concerns in this extract.")}
-    <h3 style="margin:22px 0 8px;color:#1e6363;font-size:14px;">Top risk watch</h3>
-    ${claimTable(riskItems, "No risk-watch claims in this extract.")}
-    <p style="margin:20px 0 0;color:#6b8582;font-size:12px;">${escapeHtml(model.comparisonLabel)}. This pilot message is addressed only to the approved pilot recipient.</p>`;
-  const subject = `Scout manager briefing — ${runDate}`;
+  const riskItems = model.topRisks.items.slice(0, 5);
+  const closureItems = attentionItems.filter((item) =>
+    item.primaryReason.toLowerCase().includes("closure"),
+  );
+  const lines = [
+    `Scout Manager Briefing — ${runDate}`,
+    `Data as at: ${extractDate}`,
+    `Comparison: ${model.comparisonLabel}`,
+    "",
+    "Portfolio",
+    `- Active claims: ${model.metrics.active}`,
+    `- Critical SLA: ${model.metrics.critical}`,
+    `- Stale / at-risk: ${model.metrics.stale}`,
+    `- Outstanding exposure: ${formatCurrency(model.metrics.exposure)}`,
+    "",
+    "Management attention",
+  ];
+  if (attentionItems.length) {
+    lines.push(...attentionItems.map(managerItemLine));
+  } else {
+    lines.push("- No priority concerns in this extract.");
+  }
+  lines.push("", "Top risk watch");
+  if (riskItems.length) {
+    lines.push(...riskItems.map(managerItemLine));
+  } else {
+    lines.push("- No risk-watch claims in this extract.");
+  }
+  if (closureItems.length) {
+    lines.push(
+      "",
+      "Closure candidates",
+      ...closureItems.slice(0, 5).map(managerItemLine),
+    );
+  }
   return {
     subject,
-    html: emailLayout(
-      "Scout manager briefing",
-      `Data as at ${extractDate}`,
-      body,
-    ),
-    text: `Scout manager briefing. Active claims: ${model.metrics.active}. Critical: ${model.metrics.critical}. Data as at: ${extractDate}.`,
+    title: `Scout Manager Briefing — ${runDate}`,
+    text: lines.join("\n"),
     claimsCount: model.metrics.active,
     criticalCount: model.metrics.critical,
+  };
+}
+
+function managerItemLine(item) {
+  const link = item.url ? ` — ${item.url}` : "";
+  return `- ${item.claimNo} — ${item.primaryReason}; ${item.nextAction}; outstanding ${formatCurrency(item.outstanding)}${link}`;
+}
+
+export function buildTeamsManagerWebhookPayload(message) {
+  return {
+    type: "message",
+    attachments: [
+      {
+        contentType: "application/vnd.microsoft.card.adaptive",
+        content: {
+          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
+          type: "AdaptiveCard",
+          version: "1.4",
+          body: [
+            {
+              type: "TextBlock",
+              text: message.title,
+              weight: "Bolder",
+              size: "Medium",
+              wrap: true,
+            },
+            { type: "TextBlock", text: message.text, wrap: true },
+          ],
+        },
+      },
+    ],
   };
 }
 
@@ -674,15 +681,6 @@ function hasStorageConfig(env) {
   return Boolean(
     normaliseText(env.SUPABASE_URL) &&
     normaliseText(env.SUPABASE_SERVICE_ROLE_KEY),
-  );
-}
-
-function hasGraphConfig(env) {
-  return Boolean(
-    normaliseText(env.AZURE_TENANT_ID) &&
-    normaliseText(env.AZURE_CLIENT_ID) &&
-    normaliseText(env.AZURE_CLIENT_SECRET) &&
-    normaliseEmail(env.MAIL_FROM),
   );
 }
 
@@ -710,12 +708,6 @@ function parseIdentityAllowlist(raw) {
   }
 }
 
-function parseRecipientAllowlist(raw) {
-  return parseIdentityAllowlist(raw).filter((entry) =>
-    Boolean(normaliseEmail(entry)),
-  );
-}
-
 function normaliseSettings(value) {
   let raw = value;
   if (typeof raw === "string") {
@@ -737,8 +729,6 @@ function normaliseSettings(value) {
         )
       : {};
   return {
-    managerEmail: normaliseEmail(raw.manager_email),
-    zeroEstimateEmail: normaliseEmail(raw.zero_estimate_email),
     handlerEmails,
     includeTerminalClaims: raw.include_terminal_claims === true,
     available: Object.keys(raw).length > 0,
@@ -901,11 +891,12 @@ async function loadPlanData(env, httpFetch) {
   };
 }
 
-function isAllowlistConfigured(raw, recipient = false) {
-  return (
-    (recipient ? parseRecipientAllowlist(raw) : parseIdentityAllowlist(raw))
-      .length > 0
-  );
+function isAllowlistConfigured(raw) {
+  return parseIdentityAllowlist(raw).length > 0;
+}
+
+function hasTeamsManagerWebhook(env) {
+  return Boolean(normaliseText(env.TEAMS_MANAGER_WEBHOOK));
 }
 
 function managerPilotReadiness(data, env) {
@@ -914,31 +905,21 @@ function managerPilotReadiness(data, env) {
   const callerListConfigured = isAllowlistConfigured(
     env.DELIVERY_ALLOWED_CALLERS_JSON,
   );
-  const pilotListConfigured = isAllowlistConfigured(
-    env.DELIVERY_PILOT_RECIPIENTS_JSON,
-    true,
-  );
 
   if (!data.extract) blockingReasons.push("current_extract_unavailable");
   if (!data.settingsRowAvailable)
     blockingReasons.push("scout_settings_digest_row_unavailable");
-  if (!data.settings.managerEmail)
+  if (!data.settings.available)
     blockingReasons.push("manager_briefing_configuration_unavailable");
   if (!hasStorageConfig(env))
     blockingReasons.push("supabase_configuration_incomplete");
-  if (!hasGraphConfig(env))
-    blockingReasons.push("graph_configuration_incomplete");
+  if (!hasTeamsManagerWebhook(env))
+    blockingReasons.push("teams_manager_webhook_unavailable");
   if (!callerListConfigured)
     blockingReasons.push("caller_allowlist_unavailable");
-  if (!pilotListConfigured)
-    blockingReasons.push("pilot_recipient_allowlist_unavailable");
 
   if (data.missingHandlers.length)
     warnings.push("handler_email_mappings_incomplete");
-  if (!data.settings.zeroEstimateEmail && data.model.metrics.zeroEstimate > 0)
-    warnings.push(
-      "anomaly_recipient_configuration_not_required_for_manager_pilot",
-    );
 
   return {
     managerPilotReady: blockingReasons.length === 0,
@@ -957,11 +938,10 @@ function planResult(data, env) {
       data.extract?.effective_date || data.extract?.extract_date || null,
     claimCount: data.claims.length,
     activeClaimCount: data.model.metrics.active,
-    managerConfigured: Boolean(data.settings.managerEmail),
+    managerBriefingConfigured: Boolean(data.settings.available),
     handlerCount: data.handlerNames.length,
     mappedHandlerCount: data.mappedHandlerCount,
     missingHandlers: data.missingHandlers,
-    anomalyDigestRequired: data.model.metrics.zeroEstimate > 0,
     comparisonAvailable: data.model.comparisonAvailable,
     readiness,
   };
@@ -1077,7 +1057,7 @@ async function existingDelivery(env, deliveryId, httpFetch) {
   return Array.isArray(rows) ? rows[0] || null : null;
 }
 
-async function reserveDelivery(env, deliveryId, recipient, subject, httpFetch) {
+async function reserveDelivery(env, deliveryId, subject, httpFetch) {
   const table = tableFor(
     env,
     "SUPABASE_BRIEFING_DELIVERIES_TABLE",
@@ -1093,8 +1073,7 @@ async function reserveDelivery(env, deliveryId, recipient, subject, httpFetch) {
           id: deliveryId,
           run_id: null,
           type: "manager",
-          recipient_name: "pilot",
-          recipient_email: recipient,
+          recipient_name: "Claims Manager Teams",
           subject,
           status: "reserved",
           error: null,
@@ -1165,7 +1144,7 @@ async function patchRun(env, runId, details, httpFetch) {
   );
 }
 
-async function createDigestLog(env, message, recipient, httpFetch) {
+async function createDigestLog(env, message, httpFetch) {
   const table = tableFor(env, "SUPABASE_DIGEST_LOG_TABLE", "digestLog");
   const rows = await storageRequest(
     env,
@@ -1174,11 +1153,10 @@ async function createDigestLog(env, message, recipient, httpFetch) {
       method: "POST",
       body: JSON.stringify({
         type: "manager",
-        recipient,
         subject: message.subject,
         claims_count: message.claimsCount,
         critical_count: message.criticalCount,
-        html_body: message.html,
+        html_body: message.text,
         sent_ok: false,
       }),
     },
@@ -1203,65 +1181,65 @@ async function patchDigestLog(env, digestId, details, httpFetch) {
   );
 }
 
-async function graphToken(env, httpFetch) {
-  if (!hasGraphConfig(env))
-    throw new RequestError(503, "graph_configuration_incomplete");
-  const tokenUrl = `https://login.microsoftonline.com/${encodeURIComponent(env.AZURE_TENANT_ID)}/oauth2/v2.0/token`;
+async function sendTeamsManagerBriefing(env, message, httpFetch) {
+  const webhook = normaliseText(env.TEAMS_MANAGER_WEBHOOK);
+  if (!webhook)
+    throw new RequestError(503, "teams_manager_webhook_unavailable");
   let response;
   try {
-    response = await httpFetch(tokenUrl, {
+    response = await httpFetch(webhook, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: env.AZURE_CLIENT_ID,
-        client_secret: env.AZURE_CLIENT_SECRET,
-        grant_type: "client_credentials",
-        scope: "https://graph.microsoft.com/.default",
-      }),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(buildTeamsManagerWebhookPayload(message)),
     });
   } catch {
-    throw new RequestError(502, "graph_authentication_failed");
-  }
-  let data;
-  try {
-    data = await response.json();
-  } catch {
-    data = null;
-  }
-  if (!response.ok || !data?.access_token)
-    throw new RequestError(502, "graph_authentication_failed");
-  return data.access_token;
-}
-
-async function sendGraphEmail(env, recipient, message, httpFetch) {
-  const token = await graphToken(env, httpFetch);
-  let response;
-  try {
-    response = await httpFetch(
-      `https://graph.microsoft.com/v1.0/users/${encodeURIComponent(env.MAIL_FROM)}/sendMail`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          message: {
-            subject: message.subject,
-            body: { contentType: "HTML", content: message.html },
-            toRecipients: [{ emailAddress: { address: recipient } }],
-          },
-          saveToSentItems: false,
-        }),
-      },
-    );
-  } catch {
-    throw new RequestError(502, "graph_delivery_ambiguous", {
+    throw new RequestError(502, "teams_delivery_ambiguous", {
       providerAccepted: null,
     });
   }
-  if (!response.ok) throw new RequestError(502, "graph_delivery_failed");
+  if (!response.ok) throw new RequestError(502, "teams_delivery_failed");
   return { ok: true };
+}
+
+const DESTINATION_FIELDS = new Set([
+  "pilotRecipient",
+  "pilot_recipient",
+  "pilotRecipientEmail",
+  "pilot_recipient_email",
+  "recipient",
+  "recipientEmail",
+  "recipient_email",
+  "to",
+  "toEmail",
+  "to_email",
+  "toName",
+  "to_name",
+  "webhook",
+  "webhookUrl",
+  "webhook_url",
+  "webhookURL",
+  "teamsWebhook",
+  "teams_webhook",
+  "channel",
+  "channelId",
+  "channel_id",
+  "destination",
+  "destinationUrl",
+  "destination_url",
+  "teamsDestination",
+  "teams_destination",
+  "managerEmail",
+  "manager_email",
+]);
+
+const SEND_REQUEST_FIELDS = new Set(["briefingType", "idempotencyKey"]);
+
+function hasDestinationField(body) {
+  return (
+    body &&
+    typeof body === "object" &&
+    Object.keys(body).some((key) => DESTINATION_FIELDS.has(key))
+  );
 }
 
 async function sendPilot(request, env, caller, httpFetch, now) {
@@ -1271,19 +1249,16 @@ async function sendPilot(request, env, caller, httpFetch, now) {
   } catch {
     throw new RequestError(400, "invalid_json");
   }
-  const type = normaliseText(body?.briefingType || body?.type).toLowerCase();
+  if (!body || typeof body !== "object" || Array.isArray(body))
+    throw new RequestError(400, "invalid_json");
+  if (hasDestinationField(body))
+    throw new RequestError(400, "destination_not_allowed");
+  if (Object.keys(body).some((key) => !SEND_REQUEST_FIELDS.has(key)))
+    throw new RequestError(400, "unsupported_request_field");
+  const type = normaliseText(body.briefingType).toLowerCase();
   if (type !== "manager")
     throw new RequestError(400, "only_manager_pilot_supported");
-  const recipient = normaliseEmail(body?.pilotRecipient || body?.recipient);
-  if (!recipient) throw new RequestError(400, "pilot_recipient_required");
-  const pilotRecipients = parseRecipientAllowlist(
-    env.DELIVERY_PILOT_RECIPIENTS_JSON,
-  );
-  if (pilotRecipients.length && !pilotRecipients.includes(recipient))
-    throw new RequestError(403, "pilot_recipient_not_allowed");
-  const idempotencyKey = normaliseText(
-    body?.idempotencyKey || body?.idempotency_key,
-  );
+  const idempotencyKey = normaliseText(body.idempotencyKey);
   if (!idempotencyKey || idempotencyKey.length > 200)
     throw new RequestError(400, "idempotency_key_required");
   const data = await loadPlanData(env, httpFetch);
@@ -1295,7 +1270,6 @@ async function sendPilot(request, env, caller, httpFetch, now) {
   const reservation = await reserveDelivery(
     env,
     deliveryId,
-    recipient,
     message.subject,
     httpFetch,
   );
@@ -1337,8 +1311,8 @@ async function sendPilot(request, env, caller, httpFetch, now) {
       { run_id: run.id, status: "sending" },
       httpFetch,
     );
-    digest = await createDigestLog(env, message, recipient, httpFetch);
-    await sendGraphEmail(env, recipient, message, httpFetch);
+    digest = await createDigestLog(env, message, httpFetch);
+    await sendTeamsManagerBriefing(env, message, httpFetch);
     providerAccepted = true;
     await patchDelivery(
       env,
@@ -1396,7 +1370,7 @@ async function sendPilot(request, env, caller, httpFetch, now) {
         providerAccepted: true,
       });
     }
-    if (failure.code === "graph_delivery_ambiguous") {
+    if (failure.code === "teams_delivery_ambiguous") {
       try {
         await patchDelivery(
           env,
@@ -1491,6 +1465,7 @@ export function createBriefingsWorker({
               ok: true,
               service: "scout-briefings",
               mode: "pilot",
+              delivery: "teams-manager",
               scheduledDelivery: false,
             },
             200,

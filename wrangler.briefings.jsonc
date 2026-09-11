@@ -7,6 +7,9 @@
   "observability": {
     "enabled": true,
   },
+  "secrets": {
+    "required": ["TEAMS_MANAGER_WEBHOOK"],
+  },
   "vars": {
     "SUPABASE_EXTRACTS_TABLE": "claim_extracts",
     "SUPABASE_CLAIMS_TABLE": "claims",
