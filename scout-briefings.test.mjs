@@ -122,7 +122,7 @@ function makeHarness({
     const failure =
       failPostSendAudit &&
       teamsAccepted &&
-      table === "briefing_deliveries" &&
+      table === "digest_log" &&
       method === "PATCH"
         ? { status: 500 }
         : storageFailure?.({ table, method, url: parsed.toString() });
@@ -412,6 +412,49 @@ test("missing Teams manager webhook fails closed before reservation", async () =
   assert.equal(teamsCalls(calls).length, 0);
 });
 
+test("Teams manager webhook readiness requires a valid HTTPS URL", async () => {
+  for (const webhook of [
+    "not-a-url",
+    "http://teams.example.test/trigger",
+    "",
+  ]) {
+    const { worker, env } = makeHarness({
+      overrides: { TEAMS_MANAGER_WEBHOOK: webhook },
+    });
+    const result = await worker.fetch(
+      request("/briefings/plan", { method: "POST" }),
+      env,
+    );
+    const body = await bodyOf(result);
+    assert.equal(result.status, 200, webhook);
+    assert.equal(body.readiness.managerPilotReady, false, webhook);
+    assert.equal(
+      body.readiness.blockingReasons.includes(
+        "teams_manager_webhook_unavailable",
+      ),
+      true,
+      webhook,
+    );
+  }
+
+  const { worker, env } = makeHarness({
+    overrides: { TEAMS_MANAGER_WEBHOOK: "https://teams.example.test/trigger" },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.readiness.managerPilotReady, true);
+  assert.equal(
+    body.readiness.blockingReasons.includes(
+      "teams_manager_webhook_unavailable",
+    ),
+    false,
+  );
+});
+
 test("send recomputes readiness before reservation or Teams delivery", async () => {
   const { worker, env, calls } = makeHarness({
     noExtract: true,
@@ -492,8 +535,8 @@ test("missing idempotency key is rejected", async () => {
   assert.equal((await bodyOf(result)).error, "idempotency_key_required");
 });
 
-test("successful manager send makes exactly one Teams webhook call", async () => {
-  const { worker, env, calls } = makeHarness();
+test("successful manager send is transport accepted with exactly one webhook call", async () => {
+  const { worker, env, calls, deliveries, runs, digests } = makeHarness();
   const result = await worker.fetch(
     request("/briefings/send-pilot", {
       method: "POST",
@@ -504,10 +547,15 @@ test("successful manager send makes exactly one Teams webhook call", async () =>
   assert.equal(result.status, 200);
   assert.deepEqual(await bodyOf(result), {
     ok: true,
-    status: "sent",
+    status: "accepted",
+    transportAccepted: true,
+    deliveryConfirmed: false,
     mode: "pilot",
     briefingType: "manager",
   });
+  assert.equal([...deliveries.values()][0].status, "accepted");
+  assert.equal([...runs.values()][0].status, "completed");
+  assert.equal([...digests.values()][0].sent_ok, true);
   const sends = teamsCalls(calls);
   assert.equal(sends.length, 1);
   const payload = JSON.parse(sends[0].init.body);
@@ -540,9 +588,17 @@ test("same idempotency key cannot call Teams twice", async () => {
     env,
   );
   assert.equal(first.status, 200);
-  assert.equal((await bodyOf(first)).status, "sent");
+  assert.equal((await bodyOf(first)).status, "accepted");
   assert.equal(second.status, 200);
-  assert.equal((await bodyOf(second)).status, "already-sent");
+  assert.deepEqual(await bodyOf(second), {
+    ok: true,
+    status: "already-accepted",
+    duplicate: true,
+    transportAccepted: true,
+    deliveryConfirmed: false,
+    mode: "pilot",
+    briefingType: "manager",
+  });
   assert.equal(teamsCalls(calls).length, 1);
 });
 
@@ -560,11 +616,14 @@ test("concurrent same-key attempts reserve only once and invoke Teams once", asy
     ),
   ]);
   const results = await Promise.all([bodyOf(first), bodyOf(second)]);
-  assert.equal(results.filter((result) => result.status === "sent").length, 1);
+  assert.equal(
+    results.filter((result) => result.status === "accepted").length,
+    1,
+  );
   assert.equal(
     results.some(
       (result) =>
-        result.status === "already-sent" ||
+        result.status === "already-accepted" ||
         result.error === "delivery_in_progress",
     ),
     true,
@@ -601,7 +660,8 @@ test("ambiguous Teams failure is delivery_unknown and same key does not retry", 
   const firstBody = await bodyOf(first);
   assert.equal(first.status, 502);
   assert.equal(firstBody.error, "teams_delivery_ambiguous");
-  assert.equal(firstBody.providerAccepted, null);
+  assert.equal(firstBody.transportAccepted, null);
+  assert.equal(firstBody.deliveryConfirmed, false);
   const second = await worker.fetch(
     request("/briefings/send-pilot", { method: "POST", body: payload }),
     env,
@@ -611,8 +671,10 @@ test("ambiguous Teams failure is delivery_unknown and same key does not retry", 
   assert.equal(teamsCalls(calls).length, 1);
 });
 
-test("successful Teams delivery followed by audit failure is sent_audit_incomplete", async () => {
-  const { worker, env, calls } = makeHarness({ failPostSendAudit: true });
+test("accepted Teams delivery followed by audit failure is accepted_audit_incomplete", async () => {
+  const { worker, env, calls, deliveries } = makeHarness({
+    failPostSendAudit: true,
+  });
   const payload = sendPayload("audit-failure-key");
   const first = await worker.fetch(
     request("/briefings/send-pilot", { method: "POST", body: payload }),
@@ -620,8 +682,10 @@ test("successful Teams delivery followed by audit failure is sent_audit_incomple
   );
   const firstBody = await bodyOf(first);
   assert.equal(first.status, 502);
-  assert.equal(firstBody.error, "sent_audit_incomplete");
-  assert.equal(firstBody.providerAccepted, true);
+  assert.equal(firstBody.error, "accepted_audit_incomplete");
+  assert.equal(firstBody.transportAccepted, true);
+  assert.equal(firstBody.deliveryConfirmed, false);
+  assert.equal([...deliveries.values()][0].status, "accepted_audit_incomplete");
   const sendCount = teamsCalls(calls).length;
   const second = await worker.fetch(
     request("/briefings/send-pilot", { method: "POST", body: payload }),
@@ -819,8 +883,26 @@ test("configuration has no scheduled trigger, routes, assets, or webhook var", a
   assert.match(config, /"name"\s*:\s*"scout-briefings"/);
   assert.doesNotMatch(config, /"triggers"|"crons"|"scheduled"/i);
   assert.doesNotMatch(config, /"routes"|"assets"/i);
-  assert.match(config, /"secrets"[\s\S]*TEAMS_MANAGER_WEBHOOK/);
-  assert.doesNotMatch(config, /"vars"\s*:\s*\{[\s\S]*TEAMS_MANAGER_WEBHOOK/);
+  const secretsBlock = config.match(
+    /"secrets"\s*:\s*\{\s*"required"\s*:\s*\[([\s\S]*?)\]/,
+  );
+  assert.ok(secretsBlock);
+  for (const secret of [
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "DELIVERY_ALLOWED_CALLERS_JSON",
+    "TEAMS_MANAGER_WEBHOOK",
+  ]) {
+    assert.match(secretsBlock[1], new RegExp(`"${secret}"`));
+  }
+  const varsBlock = config.match(/"vars"\s*:\s*\{([\s\S]*?)\n\s*\},/);
+  assert.ok(varsBlock);
+  for (const secret of [
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "DELIVERY_ALLOWED_CALLERS_JSON",
+    "TEAMS_MANAGER_WEBHOOK",
+  ]) {
+    assert.doesNotMatch(varsBlock[1], new RegExp(`"${secret}"`));
+  }
 });
 
 test("Graph application email and legacy proxy delivery are absent", async () => {

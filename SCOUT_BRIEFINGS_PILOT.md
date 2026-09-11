@@ -44,25 +44,39 @@ reservation winner; later attempts cannot start a second webhook call.
 
 The outcome states are:
 
-- `sent` after a clear successful Teams HTTP response;
+- `accepted` after a clear successful Teams HTTP response. This means the
+  Teams Workflow/Webhook accepted the transport payload; it does not confirm
+  that Claims Manager received or rendered the Teams message;
 - `failed` after a clear Teams HTTP rejection;
 - `delivery_unknown` after a network or timeout ambiguity; and
-- `sent_audit_incomplete` if Teams accepted the message but later audit
-  persistence fails.
+- `accepted_audit_incomplete` if the Workflow/Webhook accepted the message but
+  later audit persistence fails.
 
-Ambiguous outcomes are never retried automatically. The same idempotency key
-remains consumed.
+An existing `accepted` delivery returns `already-accepted` without another
+webhook call. Ambiguous outcomes are never retried automatically. The same
+idempotency key remains consumed, including after
+`accepted_audit_incomplete`.
+
+The API reports `transportAccepted: true` and `deliveryConfirmed: false` for
+accepted transport and post-acceptance audit outcomes. The `digest_log.sent_ok`
+column remains unchanged for schema compatibility; for this Teams Workflow
+pilot, `sent_ok = true` means webhook transport accepted, not confirmed
+downstream Teams delivery. The first production pilot requires a human to
+verify that Claims Manager actually received the briefing.
 
 ## Runtime bindings
 
 The Worker expects the following runtime bindings to be supplied by the
 deployment owner. This checkpoint does not create or set them:
 
-`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DELIVERY_ALLOWED_CALLERS_JSON`,
-and `TEAMS_MANAGER_WEBHOOK`.
+`SUPABASE_URL` is non-secret configuration. The required sensitive bindings
+`SUPABASE_SERVICE_ROLE_KEY`, `DELIVERY_ALLOWED_CALLERS_JSON`, and
+`TEAMS_MANAGER_WEBHOOK` must each be provisioned as Worker secrets.
 
 `TEAMS_MANAGER_WEBHOOK` must be provisioned later as a Worker secret. Its value
-must never appear in Git, Wrangler vars, tests, logs, or API responses.
+must never appear in Git, Wrangler vars, tests, logs, or API responses. The
+webhook value must be a syntactically valid HTTPS URL; no endpoint hostname is
+hard-coded before the dedicated Claims Manager Workflow is approved.
 
 The Wrangler configuration contains only non-secret table names and retention
 metadata. It contains no webhook value, routes, assets, triggers, or cron

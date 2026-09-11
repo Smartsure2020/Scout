@@ -8,7 +8,11 @@
     "enabled": true,
   },
   "secrets": {
-    "required": ["TEAMS_MANAGER_WEBHOOK"],
+    "required": [
+      "SUPABASE_SERVICE_ROLE_KEY",
+      "DELIVERY_ALLOWED_CALLERS_JSON",
+      "TEAMS_MANAGER_WEBHOOK",
+    ],
   },
   "vars": {
     "SUPABASE_EXTRACTS_TABLE": "claim_extracts",

@@ -895,8 +895,19 @@ function isAllowlistConfigured(raw) {
   return parseIdentityAllowlist(raw).length > 0;
 }
 
+function teamsManagerWebhookUrl(env) {
+  const value = normaliseText(env.TEAMS_MANAGER_WEBHOOK);
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.hostname ? value : "";
+  } catch {
+    return "";
+  }
+}
+
 function hasTeamsManagerWebhook(env) {
-  return Boolean(normaliseText(env.TEAMS_MANAGER_WEBHOOK));
+  return Boolean(teamsManagerWebhookUrl(env));
 }
 
 function managerPilotReadiness(data, env) {
@@ -1182,7 +1193,7 @@ async function patchDigestLog(env, digestId, details, httpFetch) {
 }
 
 async function sendTeamsManagerBriefing(env, message, httpFetch) {
-  const webhook = normaliseText(env.TEAMS_MANAGER_WEBHOOK);
+  const webhook = teamsManagerWebhookUrl(env);
   if (!webhook)
     throw new RequestError(503, "teams_manager_webhook_unavailable");
   let response;
@@ -1194,11 +1205,15 @@ async function sendTeamsManagerBriefing(env, message, httpFetch) {
     });
   } catch {
     throw new RequestError(502, "teams_delivery_ambiguous", {
-      providerAccepted: null,
+      transportAccepted: null,
+      deliveryConfirmed: false,
     });
   }
   if (!response.ok) throw new RequestError(502, "teams_delivery_failed");
-  return { ok: true };
+  return {
+    transportAccepted: true,
+    deliveryConfirmed: false,
+  };
 }
 
 const DESTINATION_FIELDS = new Set([
@@ -1275,11 +1290,13 @@ async function sendPilot(request, env, caller, httpFetch, now) {
   );
   if (!reservation.created) {
     const status = String(reservation.row?.status || "").toLowerCase();
-    if (status === "sent")
+    if (status === "accepted")
       return {
         ok: true,
-        status: "already-sent",
+        status: "already-accepted",
         duplicate: true,
+        transportAccepted: true,
+        deliveryConfirmed: false,
         mode: "pilot",
         briefingType: "manager",
       };
@@ -1290,7 +1307,7 @@ async function sendPilot(request, env, caller, httpFetch, now) {
 
   let run = null;
   let digest = null;
-  let providerAccepted = false;
+  let transportAccepted = false;
   try {
     run = await createRun(
       env,
@@ -1312,12 +1329,13 @@ async function sendPilot(request, env, caller, httpFetch, now) {
       httpFetch,
     );
     digest = await createDigestLog(env, message, httpFetch);
-    await sendTeamsManagerBriefing(env, message, httpFetch);
-    providerAccepted = true;
+    transportAccepted = (
+      await sendTeamsManagerBriefing(env, message, httpFetch)
+    ).transportAccepted;
     await patchDelivery(
       env,
       deliveryId,
-      { status: "sent", error: null },
+      { status: "accepted", error: null },
       httpFetch,
     );
     await patchDigestLog(env, digest.id, { sent_ok: true }, httpFetch);
@@ -1327,28 +1345,38 @@ async function sendPilot(request, env, caller, httpFetch, now) {
       { status: "completed", completed_at: now.toISOString() },
       httpFetch,
     );
-    return { ok: true, status: "sent", mode: "pilot", briefingType: "manager" };
+    return {
+      ok: true,
+      status: "accepted",
+      transportAccepted: true,
+      deliveryConfirmed: false,
+      mode: "pilot",
+      briefingType: "manager",
+    };
   } catch (error) {
     const failure =
       error instanceof RequestError
         ? error
         : new RequestError(502, "pilot_delivery_failed");
-    if (providerAccepted) {
+    if (transportAccepted) {
       try {
         await patchDelivery(
           env,
           deliveryId,
-          { status: "sent_audit_incomplete", error: "sent_audit_incomplete" },
+          {
+            status: "accepted_audit_incomplete",
+            error: "accepted_audit_incomplete",
+          },
           httpFetch,
         );
       } catch {
-        /* preserve the provider-accepted outcome */
+        /* preserve the transport-accepted outcome */
       }
       if (digest?.id) {
         try {
           await patchDigestLog(env, digest.id, { sent_ok: true }, httpFetch);
         } catch {
-          /* preserve the provider-accepted outcome */
+          /* preserve the transport-accepted outcome */
         }
       }
       if (run?.id) {
@@ -1357,17 +1385,18 @@ async function sendPilot(request, env, caller, httpFetch, now) {
             env,
             run.id,
             {
-              status: "sent_audit_incomplete",
+              status: "accepted_audit_incomplete",
               completed_at: now.toISOString(),
             },
             httpFetch,
           );
         } catch {
-          /* preserve the provider-accepted outcome */
+          /* preserve the transport-accepted outcome */
         }
       }
-      throw new RequestError(502, "sent_audit_incomplete", {
-        providerAccepted: true,
+      throw new RequestError(502, "accepted_audit_incomplete", {
+        transportAccepted: true,
+        deliveryConfirmed: false,
       });
     }
     if (failure.code === "teams_delivery_ambiguous") {
