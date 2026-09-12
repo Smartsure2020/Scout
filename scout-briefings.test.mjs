@@ -8,6 +8,7 @@ import {
 } from "./scout-briefings.js";
 
 const teamsWebhook = "https://teams-webhook.example.test/trigger";
+const supabaseSecretKey = "sb_secret_test_value";
 
 function response(body, status = 200) {
   return new Response(body == null ? null : JSON.stringify(body), {
@@ -19,7 +20,7 @@ function response(body, status = 200) {
 function environment(overrides = {}) {
   return {
     SUPABASE_URL: "https://supabase.example.test",
-    SUPABASE_SERVICE_ROLE_KEY: "service-role-test-value",
+    SUPABASE_SECRET_KEY: supabaseSecretKey,
     DELIVERY_ALLOWED_CALLERS_JSON: JSON.stringify(["caller@example.com"]),
     TEAMS_MANAGER_WEBHOOK: teamsWebhook,
     SUPABASE_EXTRACTS_TABLE: "claim_extracts",
@@ -243,6 +244,12 @@ function teamsCalls(calls) {
   return calls.filter((call) => call.url === teamsWebhook);
 }
 
+function supabaseCalls(calls) {
+  return calls.filter((call) =>
+    call.url.startsWith("https://supabase.example.test/"),
+  );
+}
+
 function pilotModel(claims, { previousClaims = [], settings = {} } = {}) {
   return buildPilotBriefingModel({
     claims,
@@ -350,6 +357,42 @@ test("plan performs no sends", async () => {
   assert.equal(teamsCalls(calls).length, 0);
 });
 
+test("Supabase uses the dedicated secret API key without a bearer header", async () => {
+  const { worker, env, calls } = makeHarness();
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  assert.equal(result.status, 200);
+  const requests = supabaseCalls(calls);
+  assert.ok(requests.length > 0);
+  for (const call of requests) {
+    assert.equal(call.init.headers.apikey, supabaseSecretKey);
+    assert.equal(call.init.headers["Content-Type"], "application/json");
+    assert.equal(Object.hasOwn(call.init.headers, "Authorization"), false);
+  }
+});
+
+test("missing Supabase secret fails closed before any Supabase request", async () => {
+  const { worker, env, calls } = makeHarness({
+    overrides: { SUPABASE_SECRET_KEY: "" },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.readiness.managerPilotReady, false);
+  assert.equal(
+    body.readiness.blockingReasons.includes(
+      "supabase_configuration_incomplete",
+    ),
+    true,
+  );
+  assert.equal(supabaseCalls(calls).length, 0);
+});
+
 test("plan surfaces missing handler mappings as a warning only", async () => {
   const { worker, env } = makeHarness();
   const result = await worker.fetch(
@@ -371,7 +414,7 @@ test("plan returns the authoritative Teams readiness result", async () => {
     noSettings: true,
     overrides: {
       SUPABASE_URL: "",
-      SUPABASE_SERVICE_ROLE_KEY: "",
+      SUPABASE_SECRET_KEY: "",
       TEAMS_MANAGER_WEBHOOK: "",
     },
   });
@@ -570,10 +613,7 @@ test("successful manager send is transport accepted with exactly one webhook cal
     payload.attachments[0].content.body[1].text,
     /Management attention/,
   );
-  assert.equal(
-    JSON.stringify(payload).includes("service-role-test-value"),
-    false,
-  );
+  assert.equal(JSON.stringify(payload).includes(supabaseSecretKey), false);
 });
 
 test("same idempotency key cannot call Teams twice", async () => {
@@ -887,22 +927,46 @@ test("configuration has no scheduled trigger, routes, assets, or webhook var", a
     /"secrets"\s*:\s*\{\s*"required"\s*:\s*\[([\s\S]*?)\]/,
   );
   assert.ok(secretsBlock);
-  for (const secret of [
-    "SUPABASE_SERVICE_ROLE_KEY",
+  const requiredSecrets = [
+    "SUPABASE_SECRET_KEY",
     "DELIVERY_ALLOWED_CALLERS_JSON",
     "TEAMS_MANAGER_WEBHOOK",
-  ]) {
+  ];
+  assert.deepEqual(
+    [...secretsBlock[1].matchAll(/"([^\"]+)"/g)].map((match) => match[1]),
+    requiredSecrets,
+  );
+  for (const secret of requiredSecrets) {
     assert.match(secretsBlock[1], new RegExp(`"${secret}"`));
   }
+  assert.doesNotMatch(config, /SUPABASE_SERVICE_ROLE_KEY/);
   const varsBlock = config.match(/"vars"\s*:\s*\{([\s\S]*?)\n\s*\},/);
   assert.ok(varsBlock);
-  for (const secret of [
-    "SUPABASE_SERVICE_ROLE_KEY",
-    "DELIVERY_ALLOWED_CALLERS_JSON",
-    "TEAMS_MANAGER_WEBHOOK",
-  ]) {
+  for (const secret of requiredSecrets) {
     assert.doesNotMatch(varsBlock[1], new RegExp(`"${secret}"`));
   }
+});
+
+test("Supabase secret is absent from API responses, source, and configuration", async () => {
+  const source = await readFile("./scout-briefings.js", "utf8");
+  const config = await readFile("./wrangler.briefings.jsonc", "utf8");
+  assert.doesNotMatch(source, /SUPABASE_SERVICE_ROLE_KEY/);
+  assert.doesNotMatch(source, /console\.(log|warn|error)\s*\(/);
+  assert.equal(config.includes(supabaseSecretKey), false);
+  const { worker, env } = makeHarness();
+  const health = await worker.fetch(request("/health", { token: null }), env);
+  const plan = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  assert.equal(
+    JSON.stringify(await bodyOf(health)).includes(supabaseSecretKey),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(await bodyOf(plan)).includes(supabaseSecretKey),
+    false,
+  );
 });
 
 test("Graph application email and legacy proxy delivery are absent", async () => {
