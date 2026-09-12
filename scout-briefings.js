@@ -679,8 +679,7 @@ function tableFor(env, envKey, defaultKey) {
 
 function hasStorageConfig(env) {
   return Boolean(
-    normaliseText(env.SUPABASE_URL) &&
-    normaliseText(env.SUPABASE_SERVICE_ROLE_KEY),
+    normaliseText(env.SUPABASE_URL) && normaliseText(env.SUPABASE_SECRET_KEY),
   );
 }
 
@@ -737,8 +736,7 @@ function normaliseSettings(value) {
 
 function supabaseHeaders(env, preferRepresentation = false) {
   return {
-    apikey: env.SUPABASE_SERVICE_ROLE_KEY,
-    Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+    apikey: env.SUPABASE_SECRET_KEY,
     "Content-Type": "application/json",
     ...(preferRepresentation ? { Prefer: "return=representation" } : {}),
   };

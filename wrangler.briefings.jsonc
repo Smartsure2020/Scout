@@ -9,7 +9,7 @@
   },
   "secrets": {
     "required": [
-      "SUPABASE_SERVICE_ROLE_KEY",
+      "SUPABASE_SECRET_KEY",
       "DELIVERY_ALLOWED_CALLERS_JSON",
       "TEAMS_MANAGER_WEBHOOK",
     ],

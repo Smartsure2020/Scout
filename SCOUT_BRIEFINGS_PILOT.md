@@ -70,8 +70,11 @@ The Worker expects the following runtime bindings to be supplied by the
 deployment owner. This checkpoint does not create or set them:
 
 `SUPABASE_URL` is non-secret configuration. The required sensitive bindings
-`SUPABASE_SERVICE_ROLE_KEY`, `DELIVERY_ALLOWED_CALLERS_JSON`, and
-`TEAMS_MANAGER_WEBHOOK` must each be provisioned as Worker secrets.
+`SUPABASE_SECRET_KEY`, `DELIVERY_ALLOWED_CALLERS_JSON`, and
+`TEAMS_MANAGER_WEBHOOK` must each be provisioned as Worker secrets. The
+briefing Worker uses the dedicated Supabase Secret API key, not the legacy
+`service_role` JWT. Supabase requests send that key as the `apikey` header;
+they do not send it as an `Authorization` bearer token.
 
 `TEAMS_MANAGER_WEBHOOK` must be provisioned later as a Worker secret. Its value
 must never appear in Git, Wrangler vars, tests, logs, or API responses. The
