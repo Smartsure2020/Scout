@@ -936,6 +936,10 @@ test("configuration has no scheduled trigger, routes, assets, or webhook var", a
     [...secretsBlock[1].matchAll(/"([^\"]+)"/g)].map((match) => match[1]),
     requiredSecrets,
   );
+  assert.match(
+    config,
+    /"SUPABASE_URL"\s*:\s*"https:\/\/vsuoesiwifktyutmzxhx\.supabase\.co"/,
+  );
   for (const secret of requiredSecrets) {
     assert.match(secretsBlock[1], new RegExp(`"${secret}"`));
   }

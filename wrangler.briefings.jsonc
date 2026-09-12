@@ -15,6 +15,7 @@
     ],
   },
   "vars": {
+    "SUPABASE_URL": "https://vsuoesiwifktyutmzxhx.supabase.co",
     "SUPABASE_EXTRACTS_TABLE": "claim_extracts",
     "SUPABASE_CLAIMS_TABLE": "claims",
     "SUPABASE_BRIEFING_RUNS_TABLE": "briefing_runs",
