@@ -9,7 +9,7 @@ import {
 } from "./scout-briefings.js";
 
 const teamsWebhook = "https://teams-webhook.example.test/trigger";
-const supabaseSecretKey = "sb_secret_test_value";
+const supabaseSecretKey = "synthetic-secret-not-production";
 
 function response(body, status = 200) {
   return new Response(body == null ? null : JSON.stringify(body), {
