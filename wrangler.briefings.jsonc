@@ -16,8 +16,8 @@
   },
   "vars": {
     "SUPABASE_URL": "https://vsuoesiwifktyutmzxhx.supabase.co",
-    "SUPABASE_EXTRACTS_TABLE": "claim_extracts",
-    "SUPABASE_CLAIMS_TABLE": "claims",
+    "SUPABASE_EXTRACTS_TABLE": "scout_history_extracts",
+    "SUPABASE_CLAIMS_TABLE": "scout_history_snapshots",
     "SUPABASE_BRIEFING_RUNS_TABLE": "briefing_runs",
     "SUPABASE_BRIEFING_DELIVERIES_TABLE": "briefing_deliveries",
     "SUPABASE_DIGEST_LOG_TABLE": "digest_log",
