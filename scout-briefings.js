@@ -1181,6 +1181,17 @@ function managerPilotReadiness(data, env) {
   );
 
   if (!data.extract) blockingReasons.push("current_extract_unavailable");
+  if (data.extract) {
+    const currentExtractId = normaliseText(data.extract.id);
+    const configuredApproval =
+      typeof env.PILOT_APPROVED_EXTRACT_ID === "string"
+        ? env.PILOT_APPROVED_EXTRACT_ID
+        : "";
+    if (!configuredApproval.trim())
+      blockingReasons.push("pilot_extract_approval_required");
+    else if (configuredApproval !== currentExtractId)
+      blockingReasons.push("pilot_extract_approval_mismatch");
+  }
   if (!data.settingsRowAvailable)
     blockingReasons.push("scout_settings_digest_row_unavailable");
   if (!data.settings.available)
@@ -1206,6 +1217,7 @@ function planResult(data, env) {
   const readiness = managerPilotReadiness(data, env);
   return {
     mode: "pilot",
+    extractId: data.extract?.id || null,
     extractDate:
       data.extract?.extract_date || data.extract?.effective_date || null,
     effectiveDate:

@@ -82,6 +82,15 @@ briefing Worker uses the dedicated Supabase Secret API key, not the legacy
 `service_role` JWT. Supabase requests send that key as the `apikey` header;
 they do not send it as an `Authorization` bearer token.
 
+Before the first manager pilot, a human must approve the exact immutable
+history extract that will be used. The optional runtime-only binding
+`PILOT_APPROVED_EXTRACT_ID` records that approval; it is not a required
+delivery secret and is not configured in Wrangler `vars`. A missing or blank
+binding, or a value that does not exactly match the current extract ID, keeps
+the pilot blocked. A newly accepted extract or correction invalidates any
+previous approval and requires a new exact approval. Accepted status alone is
+not freshness approval.
+
 `TEAMS_MANAGER_WEBHOOK` must be provisioned later as a Worker secret. Its value
 must never appear in Git, Wrangler vars, tests, logs, or API responses. The
 webhook value must be a syntactically valid HTTPS URL; no endpoint hostname is
