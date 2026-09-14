@@ -22,6 +22,7 @@ function environment(overrides = {}) {
   return {
     SUPABASE_URL: "https://supabase.example.test",
     SUPABASE_SECRET_KEY: supabaseSecretKey,
+    PILOT_APPROVED_EXTRACT_ID: "extract-latest",
     DELIVERY_ALLOWED_CALLERS_JSON: JSON.stringify(["caller@example.com"]),
     TEAMS_MANAGER_WEBHOOK: teamsWebhook,
     SUPABASE_EXTRACTS_TABLE: "scout_history_extracts",
@@ -479,6 +480,66 @@ test("missing Supabase secret fails closed before any Supabase request", async (
   assert.equal(supabaseCalls(calls).length, 0);
 });
 
+test("plan requires an exact current extract approval without exposing the value", async () => {
+  const approvalValue = "approval-value-must-not-leak";
+  const { worker, env, calls } = makeHarness({
+    overrides: { PILOT_APPROVED_EXTRACT_ID: "" },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.extractId, "extract-latest");
+  assert.equal(body.readiness.managerPilotReady, false);
+  assert.deepEqual(body.readiness.blockingReasons, [
+    "pilot_extract_approval_required",
+  ]);
+  assert.equal(JSON.stringify(body).includes(approvalValue), false);
+  assert.equal(teamsCalls(calls).length, 0);
+  assert.equal(
+    supabaseCalls(calls).some((call) => (call.init.method || "GET") !== "GET"),
+    false,
+  );
+  const health = await worker.fetch(request("/health", { token: null }), env);
+  assert.equal(health.status, 200);
+});
+
+test("plan rejects an approval for a different extract", async () => {
+  const approvalValue = "extract-not-current";
+  const { worker, env } = makeHarness({
+    overrides: { PILOT_APPROVED_EXTRACT_ID: approvalValue },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.extractId, "extract-latest");
+  assert.equal(body.readiness.managerPilotReady, false);
+  assert.deepEqual(body.readiness.blockingReasons, [
+    "pilot_extract_approval_mismatch",
+  ]);
+  assert.equal(JSON.stringify(body).includes(approvalValue), false);
+});
+
+test("plan readiness passes the exact current extract approval", async () => {
+  const { worker, env } = makeHarness({
+    overrides: { PILOT_APPROVED_EXTRACT_ID: "extract-latest" },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.extractId, "extract-latest");
+  assert.equal(body.readiness.managerPilotReady, true);
+  assert.deepEqual(body.readiness.blockingReasons, []);
+});
+
 test("history source accepts persisted accepted manifests and excludes other statuses", async () => {
   const manifests = [
     historyManifest({
@@ -732,6 +793,60 @@ test("history correction leaves comparison unavailable without a valid prior per
   );
 });
 
+test("approval follows the current correction head and invalidates the original", async () => {
+  const manifests = [
+    historyManifest({
+      id: "original-current",
+      effectiveDate: "2026-09-10",
+      claimCount: 1,
+    }),
+    historyManifest({
+      id: "corrected-current",
+      effectiveDate: "2026-09-10",
+      claimCount: 1,
+      correctionOfExtractId: "original-current",
+    }),
+  ];
+  const historySnapshots = {
+    "corrected-current": [
+      historySnapshot(
+        { claim_no: "CORRECTED-APPROVAL", status: "Active" },
+        "corrected-current",
+        0,
+      ),
+    ],
+  };
+  const oldApproval = makeHarness({
+    historyManifests: manifests,
+    historySnapshots,
+    overrides: { PILOT_APPROVED_EXTRACT_ID: "original-current" },
+  });
+  const oldResult = await oldApproval.worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    oldApproval.env,
+  );
+  const oldBody = await bodyOf(oldResult);
+  assert.equal(oldBody.extractId, "corrected-current");
+  assert.equal(oldBody.readiness.managerPilotReady, false);
+  assert.deepEqual(oldBody.readiness.blockingReasons, [
+    "pilot_extract_approval_mismatch",
+  ]);
+
+  const currentApproval = makeHarness({
+    historyManifests: manifests,
+    historySnapshots,
+    overrides: { PILOT_APPROVED_EXTRACT_ID: "corrected-current" },
+  });
+  const currentResult = await currentApproval.worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    currentApproval.env,
+  );
+  const currentBody = await bodyOf(currentResult);
+  assert.equal(currentBody.extractId, "corrected-current");
+  assert.equal(currentBody.readiness.managerPilotReady, true);
+  assert.deepEqual(currentBody.readiness.blockingReasons, []);
+});
+
 test("history snapshots fail closed when persisted cardinality is inconsistent", async () => {
   const { worker, env, calls } = makeHarness({
     historyManifests: [
@@ -969,6 +1084,63 @@ test("send recomputes readiness before reservation or Teams delivery", async () 
     false,
   );
   assert.equal(teamsCalls(calls).length, 0);
+});
+
+test("send rejects missing extract approval before any write or Teams call", async () => {
+  const { worker, env, calls, deliveries, runs, digests } = makeHarness({
+    overrides: { PILOT_APPROVED_EXTRACT_ID: "" },
+  });
+  const result = await worker.fetch(
+    request("/briefings/send-pilot", {
+      method: "POST",
+      body: sendPayload("missing-extract-approval"),
+    }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 503);
+  assert.equal(body.error, "manager_pilot_not_ready");
+  assert.equal(
+    body.blockingReasons.includes("pilot_extract_approval_required"),
+    true,
+  );
+  assert.equal(teamsCalls(calls).length, 0);
+  assert.equal(
+    supabaseCalls(calls).some((call) => (call.init.method || "GET") !== "GET"),
+    false,
+  );
+  assert.equal(deliveries.size, 0);
+  assert.equal(runs.size, 0);
+  assert.equal(digests.size, 0);
+});
+
+test("send rejects mismatched extract approval before any write or Teams call", async () => {
+  const { worker, env, calls, deliveries, runs, digests } = makeHarness({
+    overrides: { PILOT_APPROVED_EXTRACT_ID: "extract-not-current" },
+  });
+  const result = await worker.fetch(
+    request("/briefings/send-pilot", {
+      method: "POST",
+      body: sendPayload("mismatched-extract-approval"),
+    }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 503);
+  assert.equal(body.error, "manager_pilot_not_ready");
+  assert.equal(
+    body.blockingReasons.includes("pilot_extract_approval_mismatch"),
+    true,
+  );
+  assert.equal(JSON.stringify(body).includes("extract-not-current"), false);
+  assert.equal(teamsCalls(calls).length, 0);
+  assert.equal(
+    supabaseCalls(calls).some((call) => (call.init.method || "GET") !== "GET"),
+    false,
+  );
+  assert.equal(deliveries.size, 0);
+  assert.equal(runs.size, 0);
+  assert.equal(digests.size, 0);
 });
 
 test("request-controlled destination fields are rejected", async () => {
@@ -1406,6 +1578,8 @@ test("configuration has no scheduled trigger, routes, assets, or webhook var", a
   for (const secret of requiredSecrets) {
     assert.doesNotMatch(varsBlock[1], new RegExp(`"${secret}"`));
   }
+  assert.doesNotMatch(secretsBlock[1], /PILOT_APPROVED_EXTRACT_ID/);
+  assert.doesNotMatch(varsBlock[1], /PILOT_APPROVED_EXTRACT_ID/);
 });
 
 test("Supabase secret is absent from API responses, source, and configuration", async () => {
