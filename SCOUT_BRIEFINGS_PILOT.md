@@ -2,8 +2,8 @@
 
 `scout-briefings` is a deliberately isolated, manual-only Worker for the
 manager briefing pilot. It generates one concise manager briefing from the
-current production extract and delivers it only to the server-side
-Claims Manager Teams Workflow destination.
+accepted immutable production history snapshot and delivers it only to the
+server-side Claims Manager Teams Workflow destination.
 
 ## Safety boundary
 
@@ -26,6 +26,12 @@ Claims Manager Teams Workflow destination.
 - There is no cron or scheduled delivery entrypoint.
 
 ## Manager briefing content
+
+Briefings read manifests from `scout_history_extracts` and claim snapshots
+from `scout_history_snapshots`. Only `accepted` and `accepted_with_warnings`
+manifests with persisted historical evidence are eligible. `processing`,
+`rejected`, and `partial_failure` manifests are excluded, and an accepted
+correction supersedes the manifest it references.
 
 The accepted deterministic Scout predicates and shared briefing model remain
 the source of truth. The Teams message is capped and prioritises the extract

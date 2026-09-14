@@ -10,13 +10,69 @@ import { buildBriefingModel } from "./scout-smartsure/claims/briefing-model.mjs"
 export const PRODUCTION_ORIGIN =
   "https://scout-smartsure.marketing-854.workers.dev";
 export const TABLE_DEFAULTS = Object.freeze({
-  extracts: "claim_extracts",
-  claims: "claims",
+  extracts: "scout_history_extracts",
+  claims: "scout_history_snapshots",
   runs: "briefing_runs",
   deliveries: "briefing_deliveries",
   digestLog: "digest_log",
   settings: "scout_settings",
 });
+
+const HISTORY_ELIGIBLE_STATUSES = new Set([
+  "accepted",
+  "accepted_with_warnings",
+]);
+
+const HISTORY_MANIFEST_SELECT = [
+  "id",
+  "source_system",
+  "schema_version",
+  "effective_at",
+  "effective_date",
+  "received_at",
+  "created_at",
+  "claim_count",
+  "accepted_claim_count",
+  "quality_summary",
+  "source_metadata",
+  "previous_extract_id",
+  "correction_of_extract_id",
+  "status",
+  "historical_persisted",
+].join(",");
+
+const HISTORY_SNAPSHOT_SELECT = [
+  "id",
+  "extract_id",
+  "source_claim_number",
+  "handler_source",
+  "handler_email",
+  "status_raw",
+  "status_normalized",
+  "terminal",
+  "open",
+  "registered_date",
+  "dol_date",
+  "movement_date",
+  "repudiation_date",
+  "outstanding",
+  "estimate",
+  "paid",
+  "mandate",
+  "insurer",
+  "peril",
+  "peril_type",
+  "insured",
+  "description",
+  "comments",
+  "calendar_age",
+  "working_age",
+  "priority_score",
+  "priority_band",
+  "priority_flags",
+  "operational_flags",
+  "data_quality_flags",
+].join(",");
 
 const TERMINAL_STATUSES = new Set([
   "closed paid",
@@ -773,60 +829,239 @@ async function storageRequest(env, path, init, httpFetch) {
   return body;
 }
 
-async function loadExtractClaims(env, httpFetch) {
-  const extractsTable = tableFor(env, "SUPABASE_EXTRACTS_TABLE", "extracts");
-  const claimsTable = tableFor(env, "SUPABASE_CLAIMS_TABLE", "claims");
-  let extractRows;
-  try {
-    extractRows = await storageRequest(
-      env,
-      `${extractsTable}?select=*&order=extract_date.desc,uploaded_at.desc&limit=2`,
-      {},
-      httpFetch,
-    );
-  } catch (error) {
-    if (error instanceof RequestError) throw error;
-    extractRows = await storageRequest(
-      env,
-      `${extractsTable}?select=*&order=created_at.desc&limit=2`,
-      {},
-      httpFetch,
-    );
+function historyDateOnly(value) {
+  if (!value) return null;
+  const text = String(value).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const [year, month, day] = text.split("-").map(Number);
+  const timestamp = Date.UTC(year, month - 1, day);
+  const date = new Date(timestamp);
+  return date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+    ? text
+    : null;
+}
+
+function historyManifestPeriod(manifest) {
+  return (
+    historyDateOnly(manifest?.effective_date) ||
+    historyDateOnly(manifest?.effective_at) ||
+    historyDateOnly(manifest?.received_at) ||
+    historyDateOnly(manifest?.created_at) ||
+    ""
+  );
+}
+
+function historyManifestSortValue(manifest) {
+  return [
+    historyManifestPeriod(manifest),
+    manifest?.effective_at || "",
+    manifest?.received_at || "",
+    manifest?.created_at || "",
+    manifest?.id || "",
+  ].map((value) => String(value));
+}
+
+function compareHistoryManifests(left, right) {
+  const leftValues = historyManifestSortValue(left);
+  const rightValues = historyManifestSortValue(right);
+  for (let index = 0; index < leftValues.length; index += 1) {
+    if (leftValues[index] === rightValues[index]) continue;
+    return leftValues[index] < rightValues[index] ? 1 : -1;
   }
-  const extracts = Array.isArray(extractRows) ? extractRows : [];
-  const extract = extracts[0] || null;
-  const previousExtract = extracts[1] || null;
-  if (!extract)
+  return 0;
+}
+
+function historyManifestIsEligible(manifest) {
+  return (
+    HISTORY_ELIGIBLE_STATUSES.has(normaliseStatus(manifest?.status)) &&
+    manifest?.historical_persisted === true
+  );
+}
+
+function historyScope(manifest) {
+  return manifest?.source_metadata?.portfolio_scope ?? null;
+}
+
+function historyManifestsComparable(current, previous) {
+  if (!current || !previous) return false;
+  const currentQuality = current.quality_summary || {};
+  if (
+    Object.prototype.hasOwnProperty.call(
+      currentQuality,
+      "comparable_to_previous",
+    ) &&
+    currentQuality.comparable_to_previous !== true
+  )
+    return false;
+  if (current.source_system && previous.source_system !== current.source_system)
+    return false;
+  if (
+    current.schema_version &&
+    previous.schema_version !== current.schema_version
+  )
+    return false;
+  if (
+    currentQuality.completeness_state === "incomplete" ||
+    previous.quality_summary?.completeness_state === "incomplete"
+  )
+    return false;
+  if (historyScope(current) !== historyScope(previous)) return false;
+  return true;
+}
+
+export function selectHistoryManifests(rows) {
+  const eligible = (Array.isArray(rows) ? rows : [])
+    .filter(historyManifestIsEligible)
+    .sort(compareHistoryManifests);
+  const supersededIds = new Set(
+    eligible
+      .map((manifest) => manifest.correction_of_extract_id)
+      .filter(Boolean)
+      .map((id) => String(id)),
+  );
+  const authoritative = eligible.filter(
+    (manifest) => !supersededIds.has(String(manifest.id)),
+  );
+  const current = authoritative[0] || null;
+  if (!current) return { current: null, previous: null };
+  const currentPeriod = historyManifestPeriod(current);
+  const previousCandidates = authoritative.filter(
+    (manifest) =>
+      String(manifest.id) !== String(current.id) &&
+      historyManifestPeriod(manifest) < currentPeriod &&
+      historyManifestsComparable(current, manifest),
+  );
+  const previous = current.previous_extract_id
+    ? previousCandidates.find(
+        (manifest) =>
+          String(manifest.id) === String(current.previous_extract_id),
+      ) || null
+    : previousCandidates[0] || null;
+  return { current, previous };
+}
+
+function historyManifestForBriefing(manifest) {
+  if (!manifest) return null;
+  const effectiveDate = historyManifestPeriod(manifest) || null;
+  return {
+    ...manifest,
+    extract_date: effectiveDate,
+    effective_date: historyDateOnly(manifest.effective_date) || effectiveDate,
+  };
+}
+
+function historyMovementAge(manifest, movementDate) {
+  const effectiveDate = historyManifestPeriod(manifest) || null;
+  const movement = historyDateOnly(movementDate);
+  if (!effectiveDate || !movement) return null;
+  const effectiveTimestamp = Date.parse(`${effectiveDate}T00:00:00Z`);
+  const movementTimestamp = Date.parse(`${movement}T00:00:00Z`);
+  if (Number.isNaN(effectiveTimestamp) || Number.isNaN(movementTimestamp))
+    return null;
+  return Math.max(
+    0,
+    Math.floor((effectiveTimestamp - movementTimestamp) / 86400000),
+  );
+}
+
+function historyQualityFlags(snapshot) {
+  const flags = snapshot?.data_quality_flags;
+  if (Array.isArray(flags)) return flags.map((flag) => String(flag));
+  return [];
+}
+
+export function historySnapshotForBriefing(snapshot, manifest) {
+  const qualityFlags = historyQualityFlags(snapshot);
+  const status = snapshot?.status_normalized || snapshot?.status_raw || "";
+  const handler =
+    snapshot?.handler_source || snapshot?.handler_email || "Unassigned";
+  const movementDate = historyDateOnly(snapshot?.movement_date);
+  return {
+    ...snapshot,
+    claimNo: snapshot?.source_claim_number || "",
+    claim_no: snapshot?.source_claim_number || "",
+    status,
+    handler,
+    handler_name: handler,
+    handler_email: snapshot?.handler_email || "",
+    insured: snapshot?.insured || "",
+    insured_name: snapshot?.insured || "",
+    workingAge: snapshot?.working_age ?? null,
+    working_age: snapshot?.working_age ?? null,
+    calendarAge: snapshot?.calendar_age ?? null,
+    calendar_age: snapshot?.calendar_age ?? null,
+    daysSinceMovement: historyMovementAge(manifest, movementDate),
+    days_since_movement: historyMovementAge(manifest, movementDate),
+    possibleDuplicate:
+      qualityFlags.includes("duplicate_claim_number") ||
+      qualityFlags.includes("identity_ambiguity"),
+    priorityScore: snapshot?.priority_score ?? null,
+    priorityFlags: snapshot?.priority_flags ?? [],
+    operationalFlags: snapshot?.operational_flags ?? [],
+    registered_date: snapshot?.registered_date || null,
+    movement_date: movementDate,
+    repudiation_date: snapshot?.repudiation_date || null,
+    terminal: snapshot?.terminal === true,
+    open: snapshot?.open === true,
+    data_quality_flags: qualityFlags,
+  };
+}
+
+async function loadHistorySnapshots(env, table, manifest, httpFetch) {
+  if (!manifest?.id) throw new RequestError(503, "production_data_unavailable");
+  const rows = await storageRequest(
+    env,
+    `${table}?select=${HISTORY_SNAPSHOT_SELECT}&extract_id=eq.${encodeURIComponent(manifest.id)}&limit=5000`,
+    {},
+    httpFetch,
+  );
+  const snapshots = Array.isArray(rows) ? rows : [];
+  const expected = Number(
+    manifest.accepted_claim_count ?? manifest.claim_count ?? 0,
+  );
+  if (
+    !Number.isFinite(expected) ||
+    snapshots.length !== expected ||
+    snapshots.some(
+      (snapshot) => String(snapshot?.extract_id) !== String(manifest.id),
+    )
+  )
+    throw new RequestError(503, "production_data_unavailable");
+  return snapshots.map((snapshot) =>
+    historySnapshotForBriefing(snapshot, manifest),
+  );
+}
+
+async function loadHistorySource(env, httpFetch) {
+  const manifestsTable = tableFor(env, "SUPABASE_EXTRACTS_TABLE", "extracts");
+  const snapshotsTable = tableFor(env, "SUPABASE_CLAIMS_TABLE", "claims");
+  const rows = await storageRequest(
+    env,
+    `${manifestsTable}?status=in.(accepted,accepted_with_warnings)&select=${HISTORY_MANIFEST_SELECT}&order=effective_date.desc,effective_at.desc,received_at.desc,created_at.desc&limit=5000`,
+    {},
+    httpFetch,
+  );
+  const selection = selectHistoryManifests(rows);
+  if (!selection.current)
     return {
       extract: null,
       previousExtract: null,
       claims: [],
       previousClaims: [],
     };
-
-  async function claimsFor(candidate) {
-    const snapshot = Array.isArray(candidate?.claim_snapshot)
-      ? candidate.claim_snapshot
-      : null;
-    const extractId = candidate?.id || candidate?.extract_id;
-    try {
-      const query = extractId
-        ? `${claimsTable}?select=*&extract_id=eq.${encodeURIComponent(extractId)}&limit=5000`
-        : `${claimsTable}?select=*&order=created_at.desc&limit=5000`;
-      const rows = await storageRequest(env, query, {}, httpFetch);
-      return Array.isArray(rows) ? rows : [];
-    } catch (error) {
-      if (error instanceof RequestError) throw error;
-      if (snapshot) return snapshot;
-      throw new RequestError(503, "production_data_unavailable");
-    }
-  }
-
+  const [claims, previousClaims] = await Promise.all([
+    loadHistorySnapshots(env, snapshotsTable, selection.current, httpFetch),
+    selection.previous
+      ? loadHistorySnapshots(env, snapshotsTable, selection.previous, httpFetch)
+      : Promise.resolve([]),
+  ]);
   return {
-    extract,
-    previousExtract,
-    claims: await claimsFor(extract),
-    previousClaims: previousExtract ? await claimsFor(previousExtract) : [],
+    extract: historyManifestForBriefing(selection.current),
+    previousExtract: historyManifestForBriefing(selection.previous),
+    claims,
+    previousClaims,
   };
 }
 
@@ -848,7 +1083,7 @@ async function loadSettings(env, httpFetch) {
 async function loadPlanData(env, httpFetch) {
   const [data, settingsResult] = hasStorageConfig(env)
     ? await Promise.all([
-        loadExtractClaims(env, httpFetch),
+        loadHistorySource(env, httpFetch),
         loadSettings(env, httpFetch),
       ])
     : [

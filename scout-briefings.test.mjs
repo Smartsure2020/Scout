@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildPilotBriefingModel,
   createBriefingsWorker,
+  historySnapshotForBriefing,
   PRODUCTION_ORIGIN,
 } from "./scout-briefings.js";
 
@@ -23,8 +24,8 @@ function environment(overrides = {}) {
     SUPABASE_SECRET_KEY: supabaseSecretKey,
     DELIVERY_ALLOWED_CALLERS_JSON: JSON.stringify(["caller@example.com"]),
     TEAMS_MANAGER_WEBHOOK: teamsWebhook,
-    SUPABASE_EXTRACTS_TABLE: "claim_extracts",
-    SUPABASE_CLAIMS_TABLE: "claims",
+    SUPABASE_EXTRACTS_TABLE: "scout_history_extracts",
+    SUPABASE_CLAIMS_TABLE: "scout_history_snapshots",
     SUPABASE_BRIEFING_RUNS_TABLE: "briefing_runs",
     SUPABASE_BRIEFING_DELIVERIES_TABLE: "briefing_deliveries",
     SUPABASE_DIGEST_LOG_TABLE: "digest_log",
@@ -59,6 +60,75 @@ function sampleClaims() {
   ];
 }
 
+function historySnapshot(claim, extractId, index) {
+  const claimNumber = claim.claim_no ?? claim.claimNo ?? `CLM-${index + 1}`;
+  const handler = claim.handler_name ?? claim.handler ?? null;
+  const status = claim.status ?? claim.status_normalized ?? "Active";
+  return {
+    id: `${extractId}-snapshot-${index + 1}`,
+    extract_id: extractId,
+    source_claim_number: claimNumber,
+    handler_source: handler,
+    handler_email: claim.handler_email ?? "",
+    status_raw: status,
+    status_normalized: String(status).toLowerCase(),
+    terminal: claim.terminal === true,
+    open: claim.open !== false,
+    registered_date: claim.registered_date ?? null,
+    dol_date: claim.dol ?? claim.dol_date ?? null,
+    movement_date: claim.movement_date ?? null,
+    repudiation_date: claim.repudiation_date ?? null,
+    outstanding: claim.outstanding ?? 0,
+    estimate: claim.estimate ?? 0,
+    paid: claim.paid ?? 0,
+    mandate: claim.mandate ?? 0,
+    insurer: claim.insurer ?? null,
+    peril: claim.peril ?? null,
+    peril_type: claim.peril_type ?? null,
+    insured: claim.insured ?? claim.insured_name ?? null,
+    description: claim.description ?? null,
+    comments: claim.comments ?? null,
+    calendar_age: claim.calendar_age ?? null,
+    working_age: claim.working_age ?? claim.age_days ?? claim.age ?? null,
+    priority_score: claim.priority_score ?? 0,
+    priority_band: claim.priority_band ?? "P3",
+    priority_flags: claim.priority_flags ?? [],
+    operational_flags: claim.operational_flags ?? [],
+    data_quality_flags: claim.data_quality_flags ?? [],
+  };
+}
+
+function historyManifest({
+  id,
+  effectiveDate,
+  claimCount,
+  status = "accepted",
+  qualitySummary = {
+    comparable_to_previous: true,
+    completeness_state: "complete",
+  },
+  previousExtractId = null,
+  correctionOfExtractId = null,
+} = {}) {
+  return {
+    id,
+    source_system: "cardinal_claims",
+    schema_version: "scout-history-v1",
+    effective_at: `${effectiveDate}T06:00:00Z`,
+    effective_date: effectiveDate,
+    received_at: `${effectiveDate}T06:01:00Z`,
+    created_at: `${effectiveDate}T06:02:00Z`,
+    claim_count: claimCount,
+    accepted_claim_count: claimCount,
+    quality_summary: qualitySummary,
+    source_metadata: { portfolio_scope: null },
+    previous_extract_id: previousExtractId,
+    correction_of_extract_id: correctionOfExtractId,
+    status,
+    historical_persisted: true,
+  };
+}
+
 function makeHarness({
   settings = {},
   overrides = {},
@@ -67,6 +137,8 @@ function makeHarness({
   previousClaims = sampleClaims().slice(1),
   noExtract = false,
   noSettings = false,
+  historyManifests = null,
+  historySnapshots = null,
   storageFailure = null,
   teamsSendFailure = false,
   teamsResponseStatus = 202,
@@ -78,20 +150,27 @@ function makeHarness({
   const calls = [];
   let sequence = 0;
   let teamsAccepted = false;
-  const extracts = [
-    {
+  const extracts = historyManifests || [
+    historyManifest({
       id: "extract-latest",
-      extract_date: "2026-09-10",
-      effective_date: "2026-09-10",
-      uploaded_at: "2026-09-10T06:00:00Z",
-    },
-    {
+      effectiveDate: "2026-09-10",
+      claimCount: claims.length,
+      previousExtractId: "extract-previous",
+    }),
+    historyManifest({
       id: "extract-previous",
-      extract_date: "2026-09-09",
-      effective_date: "2026-09-09",
-      uploaded_at: "2026-09-09T06:00:00Z",
-    },
+      effectiveDate: "2026-09-09",
+      claimCount: previousClaims.length,
+    }),
   ];
+  const snapshots = historySnapshots || {
+    "extract-latest": claims.map((claim, index) =>
+      historySnapshot(claim, "extract-latest", index),
+    ),
+    "extract-previous": previousClaims.map((claim, index) =>
+      historySnapshot(claim, "extract-previous", index),
+    ),
+  };
   const defaultSettings = {
     handler_emails: { "Mapped Handler": "mapped@example.com" },
     ...settings,
@@ -132,11 +211,14 @@ function makeHarness({
         failure.body || { error: "injected storage failure" },
         failure.status || 500,
       );
-    if (method === "GET" && table === "claim_extracts")
+    if (method === "GET" && table === "scout_history_extracts")
       return response(noExtract ? [] : extracts);
-    if (method === "GET" && table === "claims") {
-      const id = parsed.searchParams.get("extract_id") || "";
-      return response(id.includes("previous") ? previousClaims : claims);
+    if (method === "GET" && table === "scout_history_snapshots") {
+      const id = (parsed.searchParams.get("extract_id") || "").replace(
+        /^eq\./,
+        "",
+      );
+      return response(snapshots[id] || []);
     }
     if (method === "GET" && table === "scout_settings")
       return response(noSettings ? [] : [{ value: defaultSettings }]);
@@ -355,6 +437,10 @@ test("plan performs no sends", async () => {
   );
   assert.equal(result.status, 200);
   assert.equal(teamsCalls(calls).length, 0);
+  assert.equal(
+    supabaseCalls(calls).some((call) => (call.init.method || "GET") !== "GET"),
+    false,
+  );
 });
 
 test("Supabase uses the dedicated secret API key without a bearer header", async () => {
@@ -391,6 +477,261 @@ test("missing Supabase secret fails closed before any Supabase request", async (
     true,
   );
   assert.equal(supabaseCalls(calls).length, 0);
+});
+
+test("history source accepts persisted accepted manifests and excludes other statuses", async () => {
+  const manifests = [
+    historyManifest({
+      id: "accepted-current",
+      effectiveDate: "2026-09-10",
+      claimCount: 1,
+      status: "accepted_with_warnings",
+      previousExtractId: "accepted-previous",
+    }),
+    historyManifest({
+      id: "accepted-previous",
+      effectiveDate: "2026-09-09",
+      claimCount: 1,
+    }),
+    historyManifest({
+      id: "processing",
+      effectiveDate: "2026-09-11",
+      claimCount: 1,
+      status: "processing",
+    }),
+    historyManifest({
+      id: "rejected",
+      effectiveDate: "2026-09-12",
+      claimCount: 1,
+      status: "rejected",
+    }),
+    historyManifest({
+      id: "partial",
+      effectiveDate: "2026-09-13",
+      claimCount: 1,
+      status: "partial_failure",
+    }),
+    {
+      ...historyManifest({
+        id: "not-persisted",
+        effectiveDate: "2026-09-14",
+        claimCount: 1,
+      }),
+      historical_persisted: false,
+    },
+  ];
+  const { worker, env, calls } = makeHarness({
+    historyManifests: manifests,
+    historySnapshots: {
+      "accepted-current": [
+        historySnapshot(
+          { claim_no: "HIST-1", status: "Active" },
+          "accepted-current",
+          0,
+        ),
+      ],
+      "accepted-previous": [
+        historySnapshot(
+          { claim_no: "HIST-1", status: "Active" },
+          "accepted-previous",
+          0,
+        ),
+      ],
+    },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.extractDate, "2026-09-10");
+  assert.equal(body.claimCount, 1);
+  assert.equal(body.comparisonAvailable, true);
+  const sourceRequests = supabaseCalls(calls).filter((call) =>
+    call.url.includes("scout_history_"),
+  );
+  assert.equal(sourceRequests.length, 3);
+  assert.equal(
+    sourceRequests.some((call) => call.url.includes("extract_date")),
+    false,
+  );
+  assert.equal(
+    sourceRequests.some((call) =>
+      /(?:claim_extracts|[?&]table=claims)/.test(call.url),
+    ),
+    false,
+  );
+});
+
+test("history correction supersedes its original and follows the prior lineage head", async () => {
+  const manifests = [
+    historyManifest({
+      id: "original-same-period",
+      effectiveDate: "2026-09-10",
+      claimCount: 1,
+    }),
+    historyManifest({
+      id: "corrected-current",
+      effectiveDate: "2026-09-10",
+      claimCount: 1,
+      previousExtractId: "prior-head",
+      correctionOfExtractId: "original-same-period",
+    }),
+    historyManifest({
+      id: "prior-head",
+      effectiveDate: "2026-09-09",
+      claimCount: 1,
+    }),
+  ];
+  const { worker, env, calls } = makeHarness({
+    historyManifests: manifests,
+    historySnapshots: {
+      "corrected-current": [
+        historySnapshot(
+          { claim_no: "CORRECTED-1", status: "Active" },
+          "corrected-current",
+          0,
+        ),
+      ],
+      "prior-head": [
+        historySnapshot(
+          { claim_no: "CORRECTED-1", status: "Active" },
+          "prior-head",
+          0,
+        ),
+      ],
+    },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.extractDate, "2026-09-10");
+  assert.equal(body.comparisonAvailable, true);
+  const snapshotRequests = supabaseCalls(calls).filter((call) =>
+    call.url.includes("scout_history_snapshots"),
+  );
+  assert.equal(snapshotRequests.length, 2);
+  assert.equal(
+    snapshotRequests.some((call) => call.url.includes("corrected-current")),
+    true,
+  );
+  assert.equal(
+    snapshotRequests.some((call) => call.url.includes("prior-head")),
+    true,
+  );
+  assert.equal(
+    snapshotRequests.some((call) => call.url.includes("original-same-period")),
+    false,
+  );
+});
+
+test("history snapshots fail closed when persisted cardinality is inconsistent", async () => {
+  const { worker, env, calls } = makeHarness({
+    historyManifests: [
+      historyManifest({
+        id: "inconsistent-current",
+        effectiveDate: "2026-09-10",
+        claimCount: 2,
+      }),
+    ],
+    historySnapshots: {
+      "inconsistent-current": [
+        historySnapshot(
+          { claim_no: "ONLY-1", status: "Active" },
+          "inconsistent-current",
+          0,
+        ),
+      ],
+    },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  assert.equal(result.status, 503);
+  assert.equal((await bodyOf(result)).error, "production_data_unavailable");
+  assert.equal(
+    supabaseCalls(calls).some((call) =>
+      /(?:claim_extracts|[?&]table=claims)/.test(call.url),
+    ),
+    false,
+  );
+});
+
+test("history snapshot adapter maps briefing fields and derives safe movement and duplicate values", () => {
+  const manifest = { effective_date: "2026-09-10" };
+  const adapted = historySnapshotForBriefing(
+    {
+      id: "history-snapshot-1",
+      extract_id: "history-extract-1",
+      source_claim_number: "HIST-42",
+      handler_source: "History Handler",
+      handler_email: "handler@example.com",
+      status_raw: "Awaiting assessor report",
+      status_normalized: "awaiting assessor report",
+      terminal: false,
+      open: true,
+      registered_date: "2026-08-01",
+      dol_date: "2026-07-30",
+      movement_date: "2026-09-01",
+      repudiation_date: null,
+      outstanding: 12000,
+      estimate: 15000,
+      paid: 1000,
+      mandate: 0,
+      insurer: "Insurer",
+      peril: "Fire",
+      peril_type: "Property",
+      insured: "Insured",
+      description: "Description",
+      comments: "Comments",
+      calendar_age: 40,
+      working_age: 20,
+      priority_score: 40,
+      priority_band: "P2",
+      priority_flags: ["stale"],
+      operational_flags: ["open"],
+      data_quality_flags: ["duplicate_claim_number", "identity_ambiguity"],
+    },
+    manifest,
+  );
+  assert.equal(adapted.claimNo, "HIST-42");
+  assert.equal(adapted.claim_no, "HIST-42");
+  assert.equal(adapted.status, "awaiting assessor report");
+  assert.equal(adapted.handler, "History Handler");
+  assert.equal(adapted.insured, "Insured");
+  assert.equal(adapted.workingAge, 20);
+  assert.equal(adapted.calendarAge, 40);
+  assert.equal(adapted.outstanding, 12000);
+  assert.equal(adapted.estimate, 15000);
+  assert.equal(adapted.paid, 1000);
+  assert.equal(adapted.mandate, 0);
+  assert.equal(adapted.daysSinceMovement, 9);
+  assert.equal(adapted.possibleDuplicate, true);
+  assert.deepEqual(adapted.priorityFlags, ["stale"]);
+  assert.deepEqual(adapted.operationalFlags, ["open"]);
+  assert.deepEqual(adapted.data_quality_flags, [
+    "duplicate_claim_number",
+    "identity_ambiguity",
+  ]);
+  assert.equal(
+    historySnapshotForBriefing(
+      { movement_date: "2026-09-20", data_quality_flags: [] },
+      manifest,
+    ).daysSinceMovement,
+    0,
+  );
+  assert.equal(
+    historySnapshotForBriefing(
+      { movement_date: "not-a-date", data_quality_flags: [] },
+      manifest,
+    ).daysSinceMovement,
+    null,
+  );
 });
 
 test("plan surfaces missing handler mappings as a warning only", async () => {
@@ -940,6 +1281,19 @@ test("configuration has no scheduled trigger, routes, assets, or webhook var", a
     config,
     /"SUPABASE_URL"\s*:\s*"https:\/\/vsuoesiwifktyutmzxhx\.supabase\.co"/,
   );
+  assert.match(
+    config,
+    /"SUPABASE_EXTRACTS_TABLE"\s*:\s*"scout_history_extracts"/,
+  );
+  assert.match(
+    config,
+    /"SUPABASE_CLAIMS_TABLE"\s*:\s*"scout_history_snapshots"/,
+  );
+  assert.doesNotMatch(
+    config,
+    /"SUPABASE_EXTRACTS_TABLE"\s*:\s*"claim_extracts"/,
+  );
+  assert.doesNotMatch(config, /"SUPABASE_CLAIMS_TABLE"\s*:\s*"claims"/);
   for (const secret of requiredSecrets) {
     assert.match(secretsBlock[1], new RegExp(`"${secret}"`));
   }
