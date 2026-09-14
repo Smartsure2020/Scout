@@ -567,21 +567,22 @@ test("history source accepts persisted accepted manifests and excludes other sta
 test("history correction supersedes its original and follows the prior lineage head", async () => {
   const manifests = [
     historyManifest({
+      id: "prior-head",
+      effectiveDate: "2026-09-09",
+      claimCount: 1,
+    }),
+    historyManifest({
       id: "original-same-period",
       effectiveDate: "2026-09-10",
       claimCount: 1,
+      previousExtractId: "prior-head",
     }),
     historyManifest({
       id: "corrected-current",
       effectiveDate: "2026-09-10",
       claimCount: 1,
-      previousExtractId: "prior-head",
+      previousExtractId: "original-same-period",
       correctionOfExtractId: "original-same-period",
-    }),
-    historyManifest({
-      id: "prior-head",
-      effectiveDate: "2026-09-09",
-      claimCount: 1,
     }),
   ];
   const { worker, env, calls } = makeHarness({
@@ -625,6 +626,108 @@ test("history correction supersedes its original and follows the prior lineage h
   );
   assert.equal(
     snapshotRequests.some((call) => call.url.includes("original-same-period")),
+    false,
+  );
+});
+
+test("history correction resolves a superseded previous-period pointer", async () => {
+  const manifests = [
+    historyManifest({
+      id: "previous-original",
+      effectiveDate: "2026-09-09",
+      claimCount: 1,
+    }),
+    historyManifest({
+      id: "previous-correction",
+      effectiveDate: "2026-09-09",
+      claimCount: 1,
+      correctionOfExtractId: "previous-original",
+    }),
+    historyManifest({
+      id: "current",
+      effectiveDate: "2026-09-10",
+      claimCount: 1,
+      previousExtractId: "previous-original",
+    }),
+  ];
+  const { worker, env, calls } = makeHarness({
+    historyManifests: manifests,
+    historySnapshots: {
+      current: [
+        historySnapshot(
+          { claim_no: "CURRENT-1", status: "Active" },
+          "current",
+          0,
+        ),
+      ],
+      "previous-correction": [
+        historySnapshot(
+          { claim_no: "CURRENT-1", status: "Active" },
+          "previous-correction",
+          0,
+        ),
+      ],
+    },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.comparisonAvailable, true);
+  const snapshotRequests = supabaseCalls(calls).filter((call) =>
+    call.url.includes("scout_history_snapshots"),
+  );
+  assert.equal(snapshotRequests.length, 2);
+  assert.equal(
+    snapshotRequests.some((call) => call.url.includes("previous-correction")),
+    true,
+  );
+  assert.equal(
+    snapshotRequests.some((call) => call.url.includes("previous-original")),
+    false,
+  );
+});
+
+test("history correction leaves comparison unavailable without a valid prior period", async () => {
+  const manifests = [
+    historyManifest({
+      id: "original-only-period",
+      effectiveDate: "2026-09-10",
+      claimCount: 1,
+    }),
+    historyManifest({
+      id: "correction-only-period",
+      effectiveDate: "2026-09-10",
+      claimCount: 1,
+      previousExtractId: "original-only-period",
+      correctionOfExtractId: "original-only-period",
+    }),
+  ];
+  const { worker, env, calls } = makeHarness({
+    historyManifests: manifests,
+    historySnapshots: {
+      "correction-only-period": [
+        historySnapshot(
+          { claim_no: "ONLY-CURRENT", status: "Active" },
+          "correction-only-period",
+          0,
+        ),
+      ],
+    },
+  });
+  const result = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  const body = await bodyOf(result);
+  assert.equal(result.status, 200);
+  assert.equal(body.comparisonAvailable, false);
+  assert.equal(
+    supabaseCalls(calls).some((call) =>
+      call.url.includes("original-only-period"),
+    ),
     false,
   );
 });

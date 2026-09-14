@@ -933,12 +933,42 @@ export function selectHistoryManifests(rows) {
       historyManifestPeriod(manifest) < currentPeriod &&
       historyManifestsComparable(current, manifest),
   );
-  const previous = current.previous_extract_id
-    ? previousCandidates.find(
-        (manifest) =>
-          String(manifest.id) === String(current.previous_extract_id),
-      ) || null
-    : previousCandidates[0] || null;
+  const authoritativeById = new Map(
+    authoritative.map((manifest) => [String(manifest.id), manifest]),
+  );
+  const correctionsByTarget = new Map();
+  for (const manifest of eligible) {
+    const targetId = manifest.correction_of_extract_id;
+    if (!targetId) continue;
+    const key = String(targetId);
+    const corrections = correctionsByTarget.get(key) || [];
+    corrections.push(manifest);
+    correctionsByTarget.set(key, corrections);
+  }
+  for (const corrections of correctionsByTarget.values())
+    corrections.sort(compareHistoryManifests);
+
+  function resolveLineageHead(pointerId, visited = new Set()) {
+    const key = String(pointerId || "");
+    if (!key || visited.has(key)) return null;
+    visited.add(key);
+    const exact = authoritativeById.get(key);
+    if (exact) return exact;
+    for (const correction of correctionsByTarget.get(key) || []) {
+      const head = resolveLineageHead(correction.id, visited);
+      if (head) return head;
+    }
+    return null;
+  }
+
+  const hintedPrevious = resolveLineageHead(current.previous_extract_id);
+  const previous =
+    previousCandidates.find(
+      (manifest) =>
+        hintedPrevious && String(manifest.id) === String(hintedPrevious.id),
+    ) ||
+    previousCandidates[0] ||
+    null;
   return { current, previous };
 }
 
