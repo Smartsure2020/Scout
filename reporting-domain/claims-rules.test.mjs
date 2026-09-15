@@ -69,6 +69,27 @@ test("Cardinal source status variants use the authoritative SLA taxonomy", () =>
   assert.equal(recovery.mapped, true);
   assert.equal(recovery.category, "legal");
 
+  assert.deepEqual(
+    [2, 3, 7].map(
+      (workingAge) =>
+        evaluateSla({
+          status: "Awaiting Final Documents",
+          workingAge,
+        }).classification,
+    ),
+    ["on_track", "stale", "critical"],
+  );
+  assert.deepEqual(
+    [13, 14, 30].map(
+      (workingAge) =>
+        evaluateSla({
+          status: "Recovery in Progress",
+          workingAge,
+        }).classification,
+    ),
+    ["on_track", "stale", "critical"],
+  );
+
   const sectionTwoExcess = getStatusEvaluation(
     "TP insurer awaits Section 2 excess",
   );

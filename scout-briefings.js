@@ -562,13 +562,13 @@ function primaryReason(claim) {
 }
 
 function nextAction(claim) {
-  if (isAwaitingExternalClaim(claim)) return "Follow up with broker or client";
   if (isCriticalClaim(claim))
     return "Review the critical queue and progress the next step";
   if (isMandateClaim(claim)) return "Review authority and management decision";
   if (isZeroEstimateClaim(claim))
     return "Validate estimate and payment or closure state";
   if (isAssessorReportOverdueClaim(claim)) return "Chase assessor report";
+  if (isAwaitingExternalClaim(claim)) return "Follow up with broker or client";
   if (isPaymentClaim(claim))
     return "Confirm payment status and close if complete";
   const closure = getReadyToCloseCandidate(claim);

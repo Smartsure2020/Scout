@@ -1551,7 +1551,7 @@ test("briefing parity covers zero estimate, mandate, overdue, and new-claim fixt
   );
   assert.equal(
     model.handler.items.find((item) => item.claimNo === "BROKER-1")?.nextAction,
-    "Follow up with broker or client",
+    "Review the critical queue and progress the next step",
   );
   assert.equal(
     model.handler.items.some((item) => item.claimNo === "NEW-1"),
