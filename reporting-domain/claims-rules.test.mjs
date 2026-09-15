@@ -70,10 +70,33 @@ test("Cardinal source status variants use the authoritative SLA taxonomy", () =>
   assert.equal(recovery.category, "legal");
 
   const sectionTwoExcess = getStatusEvaluation(
-    "TP insurer awaits section 2 excess",
+    "TP insurer awaits Section 2 excess",
   );
-  assert.equal(sectionTwoExcess.mapped, false);
-  assert.equal(sectionTwoExcess.category, "unmapped");
+  assert.equal(sectionTwoExcess.mapped, true);
+  assert.equal(sectionTwoExcess.category, "payment");
+  assert.equal(sectionTwoExcess.staleThreshold, 7);
+  assert.equal(sectionTwoExcess.criticalThreshold, 14);
+  assert.equal(
+    evaluateSla({
+      status: "TP insurer awaits Section 2 excess",
+      workingAge: 6,
+    }).classification,
+    "on_track",
+  );
+  assert.equal(
+    evaluateSla({
+      status: "TP insurer awaits Section 2 excess",
+      workingAge: 7,
+    }).classification,
+    "stale",
+  );
+  assert.equal(
+    evaluateSla({
+      status: "TP insurer awaits Section 2 excess",
+      workingAge: 14,
+    }).classification,
+    "critical",
+  );
 });
 
 test("calendar age and management bands use explicit as-of dates", () => {

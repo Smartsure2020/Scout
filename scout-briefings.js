@@ -456,6 +456,7 @@ function isAssessorReportOverdueClaim(claim) {
 function isPaymentClaim(claim) {
   const status = normaliseStatus(claimStatus(claim));
   return (
+    getStatusEvaluation(claimStatus(claim)).category === "payment" ||
     PAYMENT_STATUSES.has(status) ||
     status.includes("payment requested") ||
     status.includes("payment - approved")

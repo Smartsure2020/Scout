@@ -261,6 +261,10 @@ test("source dates are explicit and missing Cardinal age is not treated as a dis
     claimsUi.includes('"Awaiting Agreement of Loss \\\\ Invoice"'),
     true,
   );
+  assert.match(
+    claimsUi,
+    /"TP insurer awaits Section 2 excess":\s*\{ stale:7,\s*critical:14,\s*cat:"payment",\s*action:"Follow up on Section 2 excess so TP insurer can proceed" \}/,
+  );
   assert.match(claimsUi, /"Repudiated"/);
   assert.doesNotMatch(claimsUi, /firstValidDate\([^\n]*row\["Repudiated"\]/);
 });
