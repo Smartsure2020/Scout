@@ -3917,8 +3917,9 @@ const STATUS_RULES = {
   "Awaiting signed release from Insured":     { stale:3,  critical:7,   cat:"awaiting_docs",  action:"Chase signed release from insured" },
   "Awaiting signed release from TP":          { stale:5,  critical:10,  cat:"awaiting_docs",  action:"Chase signed release from TP" },
   "Awaiting signed AOL from client":          { stale:3,  critical:5,   cat:"awaiting_docs",  action:"Chase AOL signature  -  3-5 day SLA" },
-  "Awaiting Agreement of Loss \ Invoice":    { stale:3,  critical:5,   cat:"awaiting_docs",  action:"Chase AOL / invoice  -  3-5 day SLA" },
+  "Awaiting Agreement of Loss \\ Invoice":   { stale:3,  critical:5,   cat:"awaiting_docs",  action:"Chase AOL / invoice  -  3-5 day SLA" },
   "Awaiting Agreement of Loss / Invoice":     { stale:3,  critical:5,   cat:"awaiting_docs",  action:"Chase AOL / invoice  -  3-5 day SLA" },
+  "Awaiting Final Documents":                 { stale:3,  critical:7,   cat:"awaiting_docs",  action:"Chase final claim documents" },
   "Agreement of Loss signed":                 { stale:2,  critical:5,   cat:"active",         action:"Process AOL and proceed to payment" },
   "Awaiting police case details":             { stale:5,  critical:10,  cat:"awaiting_docs",  action:"Follow up on police case number" },
   "Awaiting blood alcohol test results":      { stale:7,  critical:14,  cat:"awaiting_docs",  action:"Follow up on BAT results" },
@@ -4101,6 +4102,7 @@ const STATUS_RULES = {
   "CSI Complete - Further Investigation":     { stale:5,  critical:10,  cat:"legal",          action:"Action CSI findings" },
   "Fraud":                                    { stale:3,  critical:7,   cat:"legal",          action:"URGENT: Manage fraud matter with insurer" },
   "Settled - Awaiting Recovery":              { stale:14, critical:30,  cat:"legal",          action:"Follow up on recovery for settled claim" },
+  "Recovery in Progress":                     { stale:14, critical:30,  cat:"legal",          action:"Progress recovery and obtain update" },
 
   // REPUDIATION
   "Repudiation pending":                      { stale:3,  critical:7,   cat:"repudiated",     action:"Finalise and issue repudiation" },
@@ -8637,7 +8639,7 @@ function handleFileUpload(file) {
       const KNOWN_COLS = new Set([
         "Claim No.", "Claim No", "Claims Status", "Status", "Claim Handler", "Age", "Insurer",
         "Claim Registered", "DOL", "Description of Loss", "Insured",
-        "Repudiation Date", "Repudiation Notification Date", "Repudiation Letter Date", "Date Repudiated", "Manual Repudiation Date", "Settled Date",
+        "Repudiation Date", "Repudiation Notification Date", "Repudiation Letter Date", "Date Repudiated", "Manual Repudiation Date", "Settled Date", "Repudiated",
         "Last Updated", "Last Modified", "Status Updated", "Status Date", "Last Movement Date", "Modified Date", "Updated At",
         "Origional Estimate", "Original Estimate", "Own Damage Original Estimate", "Sum Insured", "Outstanding", "Nett Claim", "Claim Value", "Value",
         "Paid", "RepudiateAmount", "Mandate", "Peril", "Settled", "Comments"

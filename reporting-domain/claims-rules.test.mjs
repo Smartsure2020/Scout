@@ -54,6 +54,28 @@ test("status normalization, terminal/open, mapped, and unmapped states", () => {
   );
 });
 
+test("Cardinal source status variants use the authoritative SLA taxonomy", () => {
+  const aol = getStatusEvaluation("Awaiting Agreement of Loss \\ Invoice");
+  assert.equal(aol.mapped, true);
+  assert.equal(aol.category, "awaiting_docs");
+  assert.equal(aol.staleThreshold, 3);
+  assert.equal(aol.criticalThreshold, 5);
+
+  const finalDocuments = getStatusEvaluation("Awaiting Final Documents");
+  assert.equal(finalDocuments.mapped, true);
+  assert.equal(finalDocuments.category, "awaiting_docs");
+
+  const recovery = getStatusEvaluation("Recovery in Progress");
+  assert.equal(recovery.mapped, true);
+  assert.equal(recovery.category, "legal");
+
+  const sectionTwoExcess = getStatusEvaluation(
+    "TP insurer awaits section 2 excess",
+  );
+  assert.equal(sectionTwoExcess.mapped, false);
+  assert.equal(sectionTwoExcess.category, "unmapped");
+});
+
 test("calendar age and management bands use explicit as-of dates", () => {
   assert.equal(calendarDaysBetween("2026-01-01", "2026-01-01"), 0);
   assert.equal(calendarDaysBetween("2026-01-01", "2026-01-31"), 30);

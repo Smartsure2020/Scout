@@ -6,6 +6,7 @@
  */
 
 import { buildBriefingModel } from "./scout-smartsure/claims/briefing-model.mjs";
+import { getStatusEvaluation } from "./reporting-domain/claims-rules.mjs";
 
 export const PRODUCTION_ORIGIN =
   "https://scout-smartsure.marketing-854.workers.dev";
@@ -244,6 +245,21 @@ function isTerminalClaim(claim) {
   return TERMINAL_STATUSES.has(normaliseStatus(claimStatus(claim)));
 }
 
+function authoritativeStatusSla(claim) {
+  const evaluation = getStatusEvaluation(claimStatus(claim));
+  const age = claimAge(claim);
+  return {
+    stale:
+      evaluation.mapped &&
+      evaluation.staleThreshold !== null &&
+      age >= evaluation.staleThreshold,
+    critical:
+      evaluation.mapped &&
+      evaluation.criticalThreshold !== null &&
+      age >= evaluation.criticalThreshold,
+  };
+}
+
 function isLegalClaim(claim) {
   const status = normaliseStatus(claimStatus(claim));
   return (
@@ -363,6 +379,7 @@ function claimPriorityScore(claim) {
 
 function isCriticalClaim(claim) {
   const flags = claimFlags(claim);
+  const statusSla = authoritativeStatusSla(claim);
   return (
     flags.some(
       (flag) =>
@@ -374,15 +391,18 @@ function isCriticalClaim(claim) {
         flag.includes("9-month") ||
         flag.includes("New claim unactioned"),
     ) ||
+    statusSla.critical ||
     claimAge(claim) >= 30 ||
     claimPriorityScore(claim) >= 60
   );
 }
 
 function isStaleClaim(claim) {
+  const statusSla = authoritativeStatusSla(claim);
   return (
     !isCriticalClaim(claim) &&
-    (claimAge(claim) >= 14 ||
+    (statusSla.stale ||
+      claimAge(claim) >= 14 ||
       claimFlags(claim).some((flag) => flag.includes("14+ days")))
   );
 }
@@ -541,13 +561,13 @@ function primaryReason(claim) {
 }
 
 function nextAction(claim) {
+  if (isAwaitingExternalClaim(claim)) return "Follow up with broker or client";
   if (isCriticalClaim(claim))
     return "Review the critical queue and progress the next step";
   if (isMandateClaim(claim)) return "Review authority and management decision";
   if (isZeroEstimateClaim(claim))
     return "Validate estimate and payment or closure state";
   if (isAssessorReportOverdueClaim(claim)) return "Chase assessor report";
-  if (isAwaitingExternalClaim(claim)) return "Follow up with broker or client";
   if (isPaymentClaim(claim))
     return "Confirm payment status and close if complete";
   const closure = getReadyToCloseCandidate(claim);

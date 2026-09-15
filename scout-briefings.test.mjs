@@ -1391,6 +1391,31 @@ test("briefing parity uses the accepted no-movement and Risk Watch rules", () =>
   );
 });
 
+test("briefing uses the authoritative critical SLA for the exact AOL source status", () => {
+  const model = pilotModel([
+    {
+      claim_no: "AOL-12",
+      status: "Awaiting Agreement of Loss \\ Invoice",
+      working_age: 12,
+      outstanding: 100,
+      estimate: 100,
+    },
+    {
+      claim_no: "AOL-13",
+      status: "Awaiting Agreement of Loss \\ Invoice",
+      working_age: 13,
+      outstanding: 100,
+      estimate: 100,
+    },
+  ]);
+
+  assert.equal(model.metrics.critical, 2);
+  assert.deepEqual(
+    model.handler.critical.map((claim) => claim.claim_no),
+    ["AOL-12", "AOL-13"],
+  );
+});
+
 test("briefing parity uses the deterministic six-rule closure model", () => {
   const model = pilotModel(
     [
