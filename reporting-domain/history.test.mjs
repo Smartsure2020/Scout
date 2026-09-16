@@ -124,6 +124,21 @@ test("first extract normalization preserves source fields and derived rule versi
   assert.equal(snapshot.source_evidence.claimNo, " C-001 ");
 });
 
+test("Boolean Repudiated source evidence never populates a repudiation date", () => {
+  const result = normalize([
+    {
+      claimNo: "REP-BOOLEAN",
+      status: "Repudiated",
+      repudiated: true,
+      handler: "handler-a@example.test",
+    },
+  ]);
+
+  assert.equal(result.snapshots.length, 1);
+  assert.equal(result.snapshots[0].repudiation_date, null);
+  assert.equal("repudiated" in result.snapshots[0].source_evidence, false);
+});
+
 test("malformed rows are rejected while partial valid extracts are preserved", () => {
   const result = normalize([
     { status: "Registered", handler: "handler-a@example.test" },

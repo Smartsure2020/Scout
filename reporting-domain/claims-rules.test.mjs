@@ -54,6 +54,72 @@ test("status normalization, terminal/open, mapped, and unmapped states", () => {
   );
 });
 
+test("Cardinal source status variants use the authoritative SLA taxonomy", () => {
+  const aol = getStatusEvaluation("Awaiting Agreement of Loss \\ Invoice");
+  assert.equal(aol.mapped, true);
+  assert.equal(aol.category, "awaiting_docs");
+  assert.equal(aol.staleThreshold, 3);
+  assert.equal(aol.criticalThreshold, 5);
+
+  const finalDocuments = getStatusEvaluation("Awaiting Final Documents");
+  assert.equal(finalDocuments.mapped, true);
+  assert.equal(finalDocuments.category, "awaiting_docs");
+
+  const recovery = getStatusEvaluation("Recovery in Progress");
+  assert.equal(recovery.mapped, true);
+  assert.equal(recovery.category, "legal");
+
+  assert.deepEqual(
+    [2, 3, 7].map(
+      (workingAge) =>
+        evaluateSla({
+          status: "Awaiting Final Documents",
+          workingAge,
+        }).classification,
+    ),
+    ["on_track", "stale", "critical"],
+  );
+  assert.deepEqual(
+    [13, 14, 30].map(
+      (workingAge) =>
+        evaluateSla({
+          status: "Recovery in Progress",
+          workingAge,
+        }).classification,
+    ),
+    ["on_track", "stale", "critical"],
+  );
+
+  const sectionTwoExcess = getStatusEvaluation(
+    "TP insurer awaits Section 2 excess",
+  );
+  assert.equal(sectionTwoExcess.mapped, true);
+  assert.equal(sectionTwoExcess.category, "payment");
+  assert.equal(sectionTwoExcess.staleThreshold, 7);
+  assert.equal(sectionTwoExcess.criticalThreshold, 14);
+  assert.equal(
+    evaluateSla({
+      status: "TP insurer awaits Section 2 excess",
+      workingAge: 6,
+    }).classification,
+    "on_track",
+  );
+  assert.equal(
+    evaluateSla({
+      status: "TP insurer awaits Section 2 excess",
+      workingAge: 7,
+    }).classification,
+    "stale",
+  );
+  assert.equal(
+    evaluateSla({
+      status: "TP insurer awaits Section 2 excess",
+      workingAge: 14,
+    }).classification,
+    "critical",
+  );
+});
+
 test("calendar age and management bands use explicit as-of dates", () => {
   assert.equal(calendarDaysBetween("2026-01-01", "2026-01-01"), 0);
   assert.equal(calendarDaysBetween("2026-01-01", "2026-01-31"), 30);
