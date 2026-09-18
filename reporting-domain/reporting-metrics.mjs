@@ -112,6 +112,7 @@ function manifestIsAccepted(manifest) {
   const quality = asObject(manifest?.quality_summary);
   return (
     ACCEPTED_STATUSES.has(manifest?.status) &&
+    manifest?.historical_persisted === true &&
     quality.completeness_state !== "incomplete" &&
     quality.hard_rejection !== true
   );
@@ -137,18 +138,128 @@ function manifestSort(left, right, timeZone) {
   return String(left?.id ?? "").localeCompare(String(right?.id ?? ""));
 }
 
-function supersededIds(candidates) {
-  const ids = new Set();
-  const candidateIds = new Set(candidates.map((manifest) => manifest.id));
-  for (const manifest of candidates) {
-    if (
-      manifest?.correction_of_extract_id &&
-      candidateIds.has(manifest.correction_of_extract_id)
-    ) {
-      ids.add(manifest.correction_of_extract_id);
+function hasCorrectionPointer(manifest) {
+  return (
+    manifest?.correction_of_extract_id !== null &&
+    manifest?.correction_of_extract_id !== undefined
+  );
+}
+
+function structurallyValidCorrectionEdge(child, parent) {
+  return Boolean(
+    parent &&
+    child?.id &&
+    child.id !== parent.id &&
+    child.source_system === parent.source_system &&
+    child.effective_date === parent.effective_date,
+  );
+}
+
+function correctionCycleNodes(edges) {
+  const visited = new Set();
+  const cycleNodes = new Set();
+
+  for (const start of edges.keys()) {
+    if (visited.has(start)) continue;
+    const path = [];
+    const indexById = new Map();
+    let current = start;
+    while (edges.has(current) && !visited.has(current)) {
+      if (indexById.has(current)) {
+        for (let index = indexById.get(current); index < path.length; index++)
+          cycleNodes.add(path[index]);
+        break;
+      }
+      indexById.set(current, path.length);
+      path.push(current);
+      current = edges.get(current);
+    }
+    for (const id of path) visited.add(id);
+  }
+  return cycleNodes;
+}
+
+function correctionAuthorityGraph(candidates) {
+  const manifestsById = new Map(
+    candidates.filter((manifest) => manifest?.id).map((manifest) => [manifest.id, manifest]),
+  );
+  const correctionEdges = new Map();
+  const malformedCorrectionIds = new Set();
+
+  for (const child of candidates) {
+    if (!hasCorrectionPointer(child)) continue;
+    const parent = manifestsById.get(child.correction_of_extract_id);
+    if (!structurallyValidCorrectionEdge(child, parent)) {
+      malformedCorrectionIds.add(child.id);
+      continue;
+    }
+    correctionEdges.set(child.id, parent.id);
+  }
+
+  for (const id of correctionCycleNodes(correctionEdges))
+    malformedCorrectionIds.add(id);
+
+  const childrenByParent = new Map();
+  for (const [childId, parentId] of correctionEdges) {
+    if (malformedCorrectionIds.has(childId)) continue;
+    if (malformedCorrectionIds.has(parentId)) continue;
+    const children = childrenByParent.get(parentId) || [];
+    children.push(childId);
+    childrenByParent.set(parentId, children);
+  }
+
+  for (const children of childrenByParent.values()) {
+    if (children.length <= 1) continue;
+    for (const childId of children) malformedCorrectionIds.add(childId);
+  }
+
+  // A correction of a malformed correction is malformed as well. Iterate so
+  // an invalid branch cannot re-enter the graph through a later child.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [childId, parentId] of correctionEdges) {
+      if (malformedCorrectionIds.has(childId)) continue;
+      const parent = manifestsById.get(parentId);
+      if (hasCorrectionPointer(parent) && malformedCorrectionIds.has(parentId)) {
+        malformedCorrectionIds.add(childId);
+        changed = true;
+      }
     }
   }
-  return ids;
+
+  const superseded = new Set();
+  const validCorrectionIds = new Set();
+  for (const [childId, parentId] of correctionEdges) {
+    if (malformedCorrectionIds.has(childId)) continue;
+    if (malformedCorrectionIds.has(parentId)) continue;
+    validCorrectionIds.add(childId);
+    superseded.add(parentId);
+  }
+
+  return { malformedCorrectionIds, superseded, validCorrectionIds };
+}
+
+function authoritativeManifestModel(manifests, scope) {
+  const candidates = asArray(manifests).filter(
+    (manifest) => manifestIsAccepted(manifest) && scopeMatches(manifest, scope),
+  );
+  const authorityGraph = correctionAuthorityGraph(candidates);
+  const authoritative = candidates.filter(
+    (manifest) =>
+      !authorityGraph.malformedCorrectionIds.has(manifest.id) &&
+      !authorityGraph.superseded.has(manifest.id),
+  );
+  return {
+    candidates,
+    superseded: authorityGraph.superseded,
+    authoritative,
+    authoritativeIds: new Set(authoritative.map((manifest) => manifest.id)),
+  };
+}
+
+export function selectAuthoritativeManifests(manifests, { scope = {} } = {}) {
+  return authoritativeManifestModel(manifests, scope).authoritative;
 }
 
 /**
@@ -170,17 +281,14 @@ export function selectBoundaryExtract(
       candidatesConsidered: 0,
     };
   }
-  const candidates = asArray(manifests).filter((manifest) => {
+  const model = authoritativeManifestModel(manifests, scope);
+  const candidates = model.candidates.filter((manifest) => {
     const instant = manifestInstant(manifest, timeZone);
-    return (
-      manifestIsAccepted(manifest) &&
-      scopeMatches(manifest, scope) &&
-      instant !== null &&
-      instant <= boundaryInstant
-    );
+    return instant !== null && instant <= boundaryInstant;
   });
-  const superseded = supersededIds(candidates);
-  const current = candidates.filter((manifest) => !superseded.has(manifest.id));
+  const current = candidates.filter((manifest) =>
+    model.authoritativeIds.has(manifest.id),
+  );
   current.sort((left, right) => manifestSort(right, left, timeZone));
   const manifest = current[0] || null;
   return {
@@ -260,12 +368,9 @@ function periodSnapshotRows(
   scope,
 ) {
   const rows = [];
-  const relevantManifests = asArray(manifests)
-    .filter(
-      (manifest) =>
-        manifestIsAccepted(manifest) &&
-        scopeMatches(manifest, scope) &&
-        periodMembership(manifestInstant(manifest, timeZone), period),
+  const relevantManifests = authoritativeManifestModel(manifests, scope)
+    .authoritative.filter((manifest) =>
+      periodMembership(manifestInstant(manifest, timeZone), period),
     )
     .sort((left, right) => manifestSort(left, right, timeZone));
   for (const manifest of relevantManifests) {
@@ -1070,6 +1175,7 @@ function buildReportClaimRows(
   manifests,
   timeZone,
   preferredExtractId = null,
+  authoritativeManifestIds = null,
 ) {
   const membership = new Map();
   for (const [metricId, value] of Object.entries(metrics)) {
@@ -1099,15 +1205,20 @@ function buildReportClaimRows(
       }
     }
   }
+  const isAuthoritativeSnapshot = (snapshot) =>
+    !authoritativeManifestIds ||
+    authoritativeManifestIds.has(snapshot?.extract_id);
   const byClaim = new Map();
   for (const snapshot of snapshotsForExtract(
     snapshotsByExtract,
     preferredExtractId,
   )) {
+    if (!isAuthoritativeSnapshot(snapshot)) continue;
     const claimId = snapshotReference(snapshot);
     if (claimId) byClaim.set(String(claimId), snapshot);
   }
   for (const snapshot of allSnapshots(snapshotsByExtract)) {
+    if (!isAuthoritativeSnapshot(snapshot)) continue;
     const claimId = snapshotReference(snapshot);
     if (claimId && !byClaim.has(String(claimId)))
       byClaim.set(String(claimId), snapshot);
@@ -1195,6 +1306,8 @@ export function buildReportSnapshot({
   configurationWarnings = [],
 } = {}) {
   const period = reportingPeriod(reportType, periodStart, timeZone);
+  const authoritativeModel = authoritativeManifestModel(manifests, scope);
+  const authoritativeManifests = authoritativeModel.authoritative;
   const openingSelection = selectBoundaryExtract(manifests, period.start, {
     timeZone,
     scope,
@@ -1211,7 +1324,7 @@ export function buildReportSnapshot({
   );
   const coverage = coverageAssessment({
     period,
-    manifests,
+    manifests: authoritativeManifests,
     openingSelection,
     closingSelection,
     timeZone,
@@ -1229,8 +1342,11 @@ export function buildReportSnapshot({
     precision: closingSelection.precision,
     boundary: period.end.toISOString(),
   };
-  const periodChanges = asArray(changes).filter((change) =>
-    periodMembership(changeInstant(change), period),
+  const periodChanges = asArray(changes).filter(
+    (change) =>
+      (!change?.source_extract_id ||
+        authoritativeModel.authoritativeIds.has(change.source_extract_id)) &&
+      periodMembership(changeInstant(change), period),
   );
   const metrics = {};
   metrics.opening_inventory = stateMetric(
@@ -1271,7 +1387,7 @@ export function buildReportSnapshot({
         );
 
   const periodRows = periodSnapshotRows(
-    manifests,
+    authoritativeManifests,
     snapshotsByExtract,
     period,
     timeZone,
@@ -1429,9 +1545,10 @@ export function buildReportSnapshot({
     claim_rows: buildReportClaimRows(
       metrics,
       snapshotsByExtract,
-      manifests,
+      authoritativeManifests,
       timeZone,
       closingSelection.manifest?.id ?? null,
+      authoritativeModel.authoritativeIds,
     ),
   };
 }
