@@ -138,38 +138,121 @@ function manifestSort(left, right, timeZone) {
   return String(left?.id ?? "").localeCompare(String(right?.id ?? ""));
 }
 
-function supersededIds(candidates) {
-  const childrenByParent = new Map();
-  const manifestsById = new Map(
-    candidates.map((manifest) => [manifest.id, manifest]),
+function hasCorrectionPointer(manifest) {
+  return (
+    manifest?.correction_of_extract_id !== null &&
+    manifest?.correction_of_extract_id !== undefined
   );
-  for (const manifest of candidates) {
-    const parent = manifestsById.get(manifest?.correction_of_extract_id);
-    if (!parent || manifest.id === parent.id) continue;
-    if (manifest.source_system !== parent.source_system) continue;
-    if (manifest.effective_date !== parent.effective_date) continue;
-    const children = childrenByParent.get(parent.id) || [];
-    children.push(manifest);
-    childrenByParent.set(parent.id, children);
+}
+
+function structurallyValidCorrectionEdge(child, parent) {
+  return Boolean(
+    parent &&
+    child?.id &&
+    child.id !== parent.id &&
+    child.source_system === parent.source_system &&
+    child.effective_date === parent.effective_date,
+  );
+}
+
+function correctionCycleNodes(edges) {
+  const visited = new Set();
+  const cycleNodes = new Set();
+
+  for (const start of edges.keys()) {
+    if (visited.has(start)) continue;
+    const path = [];
+    const indexById = new Map();
+    let current = start;
+    while (edges.has(current) && !visited.has(current)) {
+      if (indexById.has(current)) {
+        for (let index = indexById.get(current); index < path.length; index++)
+          cycleNodes.add(path[index]);
+        break;
+      }
+      indexById.set(current, path.length);
+      path.push(current);
+      current = edges.get(current);
+    }
+    for (const id of path) visited.add(id);
   }
-  const ids = new Set();
-  for (const [parentId, children] of childrenByParent) {
-    if (children.length === 1) ids.add(parentId);
+  return cycleNodes;
+}
+
+function correctionAuthorityGraph(candidates) {
+  const manifestsById = new Map(
+    candidates.filter((manifest) => manifest?.id).map((manifest) => [manifest.id, manifest]),
+  );
+  const correctionEdges = new Map();
+  const malformedCorrectionIds = new Set();
+
+  for (const child of candidates) {
+    if (!hasCorrectionPointer(child)) continue;
+    const parent = manifestsById.get(child.correction_of_extract_id);
+    if (!structurallyValidCorrectionEdge(child, parent)) {
+      malformedCorrectionIds.add(child.id);
+      continue;
+    }
+    correctionEdges.set(child.id, parent.id);
   }
-  return ids;
+
+  for (const id of correctionCycleNodes(correctionEdges))
+    malformedCorrectionIds.add(id);
+
+  const childrenByParent = new Map();
+  for (const [childId, parentId] of correctionEdges) {
+    if (malformedCorrectionIds.has(childId)) continue;
+    if (malformedCorrectionIds.has(parentId)) continue;
+    const children = childrenByParent.get(parentId) || [];
+    children.push(childId);
+    childrenByParent.set(parentId, children);
+  }
+
+  for (const children of childrenByParent.values()) {
+    if (children.length <= 1) continue;
+    for (const childId of children) malformedCorrectionIds.add(childId);
+  }
+
+  // A correction of a malformed correction is malformed as well. Iterate so
+  // an invalid branch cannot re-enter the graph through a later child.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [childId, parentId] of correctionEdges) {
+      if (malformedCorrectionIds.has(childId)) continue;
+      const parent = manifestsById.get(parentId);
+      if (hasCorrectionPointer(parent) && malformedCorrectionIds.has(parentId)) {
+        malformedCorrectionIds.add(childId);
+        changed = true;
+      }
+    }
+  }
+
+  const superseded = new Set();
+  const validCorrectionIds = new Set();
+  for (const [childId, parentId] of correctionEdges) {
+    if (malformedCorrectionIds.has(childId)) continue;
+    if (malformedCorrectionIds.has(parentId)) continue;
+    validCorrectionIds.add(childId);
+    superseded.add(parentId);
+  }
+
+  return { malformedCorrectionIds, superseded, validCorrectionIds };
 }
 
 function authoritativeManifestModel(manifests, scope) {
   const candidates = asArray(manifests).filter(
     (manifest) => manifestIsAccepted(manifest) && scopeMatches(manifest, scope),
   );
-  const superseded = supersededIds(candidates);
+  const authorityGraph = correctionAuthorityGraph(candidates);
   const authoritative = candidates.filter(
-    (manifest) => !superseded.has(manifest.id),
+    (manifest) =>
+      !authorityGraph.malformedCorrectionIds.has(manifest.id) &&
+      !authorityGraph.superseded.has(manifest.id),
   );
   return {
     candidates,
-    superseded,
+    superseded: authorityGraph.superseded,
     authoritative,
     authoritativeIds: new Set(authoritative.map((manifest) => manifest.id)),
   };

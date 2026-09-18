@@ -466,6 +466,149 @@ test("a later ordinary period remains authoritative after an earlier correction"
   );
 });
 
+test("ambiguous correction siblings remain excluded without superseding their parent", () => {
+  const original = manifest("original-14", "2026-09-14", 1, {
+    receivedAt: "2026-09-14T08:00:00.000Z",
+  });
+  const siblingA = manifest("sibling-a", "2026-09-14", 1, {
+    correctionOfExtractId: original.id,
+    receivedAt: "2026-09-14T09:00:00.000Z",
+  });
+  const siblingB = manifest("sibling-b", "2026-09-14", 1, {
+    correctionOfExtractId: original.id,
+    receivedAt: "2026-09-14T10:00:00.000Z",
+  });
+
+  assert.deepEqual(
+    selectAuthoritativeManifests([original, siblingA, siblingB]).map(
+      (current) => current.id,
+    ),
+    [original.id],
+  );
+  assert.equal(
+    selectBoundaryExtract(
+      [original, siblingA, siblingB],
+      "2026-09-15T00:00:00.000Z",
+    ).manifest.id,
+    original.id,
+  );
+});
+
+test("correction cycles do not erase unrelated reporting history", () => {
+  const prior = manifest("prior", "2026-09-04", 1);
+  const cycleA = manifest("cycle-a", "2026-09-14", 1, {
+    correctionOfExtractId: "cycle-b",
+  });
+  const cycleB = manifest("cycle-b", "2026-09-14", 1, {
+    correctionOfExtractId: cycleA.id,
+  });
+
+  assert.deepEqual(
+    selectAuthoritativeManifests([prior, cycleA, cycleB]).map(
+      (current) => current.id,
+    ),
+    [prior.id],
+  );
+  assert.equal(
+    selectBoundaryExtract(
+      [prior, cycleA, cycleB],
+      "2026-09-15T00:00:00.000Z",
+    ).manifest.id,
+    prior.id,
+  );
+});
+
+test("self-referential correction does not become authority", () => {
+  const prior = manifest("prior", "2026-09-04", 1);
+  const self = manifest("self", "2026-09-14", 1, {
+    correctionOfExtractId: "self",
+  });
+
+  assert.deepEqual(
+    selectAuthoritativeManifests([prior, self]).map((current) => current.id),
+    [prior.id],
+  );
+});
+
+test("cross-period correction does not supersede its target", () => {
+  const target = manifest("target-14", "2026-09-14", 1);
+  const broken = manifest("broken-15", "2026-09-15", 1, {
+    correctionOfExtractId: target.id,
+    receivedAt: "2026-09-15T14:00:00.000Z",
+  });
+  const ordinary = manifest("ordinary-15", "2026-09-15", 1, {
+    receivedAt: "2026-09-15T12:00:00.000Z",
+  });
+
+  assert.deepEqual(
+    selectAuthoritativeManifests([target, broken, ordinary]).map(
+      (current) => current.id,
+    ),
+    [target.id, ordinary.id],
+  );
+  assert.equal(
+    selectBoundaryExtract(
+      [target, broken, ordinary],
+      "2026-09-16T00:00:00.000Z",
+    ).manifest.id,
+    ordinary.id,
+  );
+});
+
+test("cross-source correction does not supersede its target", () => {
+  const target = manifest("target", "2026-09-14", 1);
+  const broken = manifest("broken-source", "2026-09-14", 1, {
+    correctionOfExtractId: target.id,
+  });
+  broken.source_system = "other_source";
+
+  assert.deepEqual(
+    selectAuthoritativeManifests([target, broken]).map(
+      (current) => current.id,
+    ),
+    [target.id],
+  );
+});
+
+test("orphan correction does not become a later authority", () => {
+  const target = manifest("target", "2026-09-14", 1);
+  const orphan = manifest("orphan", "2026-09-14", 1, {
+    correctionOfExtractId: "missing-target",
+    receivedAt: "2026-09-14T23:00:00.000Z",
+  });
+
+  assert.deepEqual(
+    selectAuthoritativeManifests([target, orphan]).map(
+      (current) => current.id,
+    ),
+    [target.id],
+  );
+  assert.equal(
+    selectBoundaryExtract(
+      [target, orphan],
+      "2026-09-15T00:00:00.000Z",
+    ).manifest.id,
+    target.id,
+  );
+});
+
+test("coherent correction chain keeps only its head authoritative", () => {
+  const original = manifest("original-14", "2026-09-14", 1);
+  const flawed = manifest("flawed-14", "2026-09-14", 1, {
+    correctionOfExtractId: original.id,
+  });
+  const corrected = manifest("corrected-14", "2026-09-14", 1, {
+    correctionOfExtractId: flawed.id,
+  });
+
+  assert.deepEqual(
+    selectAuthoritativeManifests([original, flawed, corrected]).map(
+      (current) => current.id,
+    ),
+    [corrected.id],
+  );
+});
+
 test("week one state and activity metrics are historical and precision-aware", () => {
   const data = week1Evidence();
   const report = buildReportSnapshot({
