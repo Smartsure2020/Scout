@@ -16,6 +16,8 @@ import {
   DEFAULT_SOURCE_SYSTEM,
   HISTORY_SCHEMA_VERSION,
   HistoryCorrectionLineageError,
+  HistoryRetryLineageConflictError,
+  assertCorrectionRetryLineage,
   normalizeHistoricalRows,
   resolveCorrectionBaseline,
   safeHistorySnapshot,
@@ -454,7 +456,7 @@ function exactEffectiveAt(value) {
   return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
-function historicalManifestRecord({
+export function historicalManifestRecord({
   checksum,
   checksumBasis,
   fileName,
@@ -494,12 +496,13 @@ function historicalManifestRecord({
     quality_summary: quality,
     previous_extract_id: previousManifest?.id || null,
     correction_of_extract_id:
-      correctionOfExtractId ||
-      (previousManifest?.effective_date &&
-      extractDate &&
-      previousManifest.effective_date === extractDate
-        ? previousManifest.id
-        : null),
+      correctionOfExtractId !== null && correctionOfExtractId !== undefined
+        ? correctionOfExtractId
+        : previousManifest?.effective_date &&
+            extractDate &&
+            previousManifest.effective_date === extractDate
+          ? previousManifest.id
+          : null,
     source_metadata: sourceMetadata || {},
     status: quality.hard_rejection ? "rejected" : "processing",
     historical_persisted: false,
@@ -554,7 +557,9 @@ async function preserveHistoricalExtract(
     };
   }
 
-  const correctionBaseline = correctionOfExtractId
+  const correctionSupplied =
+    correctionOfExtractId !== null && correctionOfExtractId !== undefined;
+  const correctionBaseline = correctionSupplied
     ? resolveCorrectionBaseline({
         manifests: await getAcceptedReportManifests(env),
         correctionOfExtractId,
@@ -562,6 +567,14 @@ async function preserveHistoricalExtract(
         sourceSystem: DEFAULT_SOURCE_SYSTEM,
       })
     : null;
+  if (existing && correctionSupplied)
+    assertCorrectionRetryLineage({
+      existingManifest: existing,
+      correctionOfExtractId,
+      extractDate,
+      sourceSystem: DEFAULT_SOURCE_SYSTEM,
+      previousManifest: correctionBaseline?.previousManifest || null,
+    });
 
   const users = await getActiveHistoryUsers(env);
   const normalized = normalizeHistoricalRows(claims, {
@@ -1507,6 +1520,29 @@ function uuidValue(value) {
     : null;
 }
 
+export function parseCorrectionOfExtractId(body) {
+  const supplied = Object.prototype.hasOwnProperty.call(
+    body && typeof body === "object" ? body : {},
+    "correctionOfExtractId",
+  );
+  if (!supplied) return { supplied: false, value: null, error: null };
+  const candidate = body.correctionOfExtractId;
+  if (typeof candidate !== "string")
+    return {
+      supplied: true,
+      value: null,
+      error: "invalid_correction_of_extract_id",
+    };
+  const normalized = candidate.trim();
+  if (!uuidValue(normalized))
+    return {
+      supplied: true,
+      value: null,
+      error: "invalid_correction_of_extract_id",
+    };
+  return { supplied: true, value: normalized, error: null };
+}
+
 function persistedMetricSnapshot(report) {
   const { claim_rows: _claimRows, ...snapshot } = report;
   return snapshot;
@@ -2266,6 +2302,9 @@ export default {
 
       let history = null;
       try {
+        const body = await request.json();
+        const correctionInput = parseCorrectionOfExtractId(body);
+        if (correctionInput.error) return err(correctionInput.error, 400);
         const {
           claims,
           fileName,
@@ -2273,8 +2312,7 @@ export default {
           effectiveAt,
           sourceChecksum,
           sourceMetadata,
-          correctionOfExtractId,
-        } = await request.json();
+        } = body;
         if (!claims || !claims.length) return err("No claims data provided");
 
         let historical;
@@ -2286,10 +2324,12 @@ export default {
             effectiveAt: effectiveAt || null,
             sourceChecksum: sourceChecksum || null,
             sourceMetadata: sourceMetadata || {},
-            correctionOfExtractId: correctionOfExtractId || null,
+            correctionOfExtractId: correctionInput.value,
             currentUser,
           });
         } catch (error) {
+          if (error instanceof HistoryRetryLineageConflictError)
+            return err(error.code, 409);
           if (error instanceof HistoryCorrectionLineageError)
             return err(error.message, 422);
           const failure = historyFailureInfo(error, "history_persistence");

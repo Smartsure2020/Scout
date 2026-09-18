@@ -7,7 +7,9 @@ import {
   computeSourceChecksum,
   deduplicateChanges,
   HISTORY_SCHEMA_VERSION,
+  HistoryRetryLineageConflictError,
   normalizeHistoricalRows,
+  assertCorrectionRetryLineage,
   resolveCorrectionBaseline,
   sourceChecksumPayload,
 } from "./history.mjs";
@@ -226,6 +228,25 @@ test("recognized terminal statuses are not classified as unmapped", () => {
   assert.equal(result.quality.unmapped_status_count, 1);
 });
 
+test("the four corrected taxonomy labels stay mapped through history normalization", () => {
+  const statuses = [
+    "Awaiting Agreement of Loss \\ Invoice",
+    "Awaiting Final Documents",
+    "Recovery in Progress",
+    "TP insurer awaits Section 2 excess",
+  ];
+  const result = normalize(
+    statuses.map((status, index) => ({
+      claimNo: `TAXONOMY-${index}`,
+      status,
+    })),
+  );
+  assert.equal(result.quality.unmapped_status_count, 0);
+  for (const snapshot of result.snapshots) {
+    assert.equal(snapshot.data_quality_flags.includes("unmapped_status"), false);
+  }
+});
+
 function lineageManifest(id, effectiveDate, overrides = {}) {
   return {
     id,
@@ -359,6 +380,68 @@ test("correction baseline rejects invalid, superseded, ambiguous, and cyclic lin
       date: "2026-09-14",
       message: "cycle",
     },
+    {
+      manifests: [
+        prior,
+        target,
+        lineageManifest("cross-period-child", "2026-09-15", {
+          previous_extract_id: prior.id,
+          correction_of_extract_id: target.id,
+        }),
+      ],
+      target: target.id,
+      date: "2026-09-14",
+      message: "effective date does not match",
+    },
+    {
+      manifests: [
+        prior,
+        target,
+        {
+          ...lineageManifest("cross-source-child", "2026-09-14", {
+            previous_extract_id: prior.id,
+            correction_of_extract_id: target.id,
+          }),
+          source_system: "other_source",
+        },
+      ],
+      target: target.id,
+      date: "2026-09-14",
+      message: "source system does not match",
+    },
+    {
+      manifests: [
+        prior,
+        target,
+        lineageManifest(target.id, "2026-09-14", {
+          previous_extract_id: prior.id,
+          correction_of_extract_id: target.id,
+        }),
+      ],
+      target: target.id,
+      date: "2026-09-14",
+      message: "self-reference",
+    },
+    {
+      manifests: [
+        {
+          ...prior,
+          correction_of_extract_id: "cycle-b",
+        },
+        target,
+        lineageManifest("cycle-a", "2026-09-04", {
+          previous_extract_id: prior.id,
+          correction_of_extract_id: prior.id,
+        }),
+        lineageManifest("cycle-b", "2026-09-04", {
+          previous_extract_id: prior.id,
+          correction_of_extract_id: "cycle-a",
+        }),
+      ],
+      target: target.id,
+      date: "2026-09-14",
+      message: "cycle",
+    },
   ];
 
   for (const entry of cases) {
@@ -370,6 +453,45 @@ test("correction baseline rejects invalid, superseded, ambiguous, and cyclic lin
           extractDate: entry.date,
         }),
       new RegExp(entry.message),
+    );
+  }
+});
+
+test("correction retry lineage must match the resolved predecessor", () => {
+  const expectedPrevious = lineageManifest("prior", "2026-09-04");
+  const matching = {
+    id: "retry",
+    source_system: "cardinal_claims",
+    effective_date: "2026-09-14",
+    correction_of_extract_id: "target",
+    previous_extract_id: expectedPrevious.id,
+  };
+  assert.doesNotThrow(() =>
+    assertCorrectionRetryLineage({
+      existingManifest: matching,
+      correctionOfExtractId: "target",
+      extractDate: "2026-09-14",
+      previousManifest: expectedPrevious,
+    }),
+  );
+
+  for (const conflict of [
+    { previous_extract_id: "newer" },
+    { correction_of_extract_id: "other" },
+    { effective_date: "2026-09-15" },
+    { source_system: "other_source" },
+  ]) {
+    assert.throws(
+      () =>
+        assertCorrectionRetryLineage({
+          existingManifest: { ...matching, ...conflict },
+          correctionOfExtractId: "target",
+          extractDate: "2026-09-14",
+          previousManifest: expectedPrevious,
+        }),
+      (error) =>
+        error instanceof HistoryRetryLineageConflictError &&
+        error.code === "history_retry_lineage_conflict",
     );
   }
 });

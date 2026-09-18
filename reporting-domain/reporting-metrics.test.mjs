@@ -42,6 +42,7 @@ function manifest(id, effectiveDate, count, options = {}) {
     effective_date: effectiveDate,
     received_at: options.receivedAt || `${effectiveDate}T12:00:00.000Z`,
     status: options.status || "accepted",
+    historical_persisted: options.historicalPersisted ?? true,
     claim_count: count,
     accepted_claim_count: count,
     quality_summary: {
@@ -379,6 +380,89 @@ test("reporting filters superseded snapshots and change rows consistently", () =
       "assignment_history_unavailable",
     ),
     true,
+  );
+});
+
+test("unpersisted corrections do not become reporting authority", () => {
+  const original = manifest("original-14", "2026-08-24", 1);
+  const correction = manifest("unpersisted-14", "2026-08-24", 1, {
+    correctionOfExtractId: original.id,
+    historicalPersisted: false,
+    receivedAt: "2026-08-24T14:00:00.000Z",
+  });
+  const snapshotsByExtract = new Map([
+    [original.id, [snapshot("valid", original.id)]],
+    [correction.id, [snapshot("invalid", correction.id)]],
+  ]);
+  const changes = [
+    {
+      claim_id: "legacy-change",
+      change_type: "status_changed",
+      observed_at: "2026-08-24T13:00:00.000Z",
+    },
+    {
+      claim_id: "invalid-change",
+      change_type: "first_observed",
+      source_extract_id: correction.id,
+      observed_at: "2026-08-24T14:00:00.000Z",
+    },
+  ];
+
+  assert.deepEqual(
+    selectAuthoritativeManifests([original, correction]).map(
+      (current) => current.id,
+    ),
+    [original.id],
+  );
+  const selected = selectBoundaryExtract(
+    [original, correction],
+    "2026-08-25T00:00:00.000Z",
+  );
+  assert.equal(selected.manifest.id, original.id);
+
+  const report = buildReportSnapshot({
+    reportType: "weekly",
+    periodStart: "2026-08-24",
+    manifests: [original, correction],
+    snapshotsByExtract,
+    changes,
+    activeUsers: users,
+  });
+  assert.equal(report.closing_extract_id, original.id);
+  assert.equal(report.activity.changes_considered, 1);
+
+  correction.historical_persisted = true;
+  assert.deepEqual(
+    selectAuthoritativeManifests([original, correction]).map(
+      (current) => current.id,
+    ),
+    [correction.id],
+  );
+});
+
+test("a later ordinary period remains authoritative after an earlier correction", () => {
+  const original14 = manifest("original-14", "2026-09-14", 1);
+  const corrected14 = manifest("corrected-14", "2026-09-14", 1, {
+    correctionOfExtractId: original14.id,
+    previousExtractId: "prior-04",
+    receivedAt: "2026-09-14T14:00:00.000Z",
+  });
+  const ordinary15 = manifest("ordinary-15", "2026-09-15", 1, {
+    previousExtractId: original14.id,
+  });
+
+  assert.deepEqual(
+    selectAuthoritativeManifests([original14, corrected14, ordinary15]).map(
+      (current) => current.id,
+    ),
+    [corrected14.id, ordinary15.id],
+  );
+  assert.equal(
+    selectBoundaryExtract(
+      [original14, corrected14, ordinary15],
+      "2026-09-16T00:00:00.000Z",
+    ).manifest.id,
+    ordinary15.id,
   );
 });
 

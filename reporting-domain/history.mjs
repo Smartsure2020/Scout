@@ -25,27 +25,55 @@ export class HistoryCorrectionLineageError extends Error {
   }
 }
 
-function acceptedPersistedManifest(manifest, sourceSystem) {
+export class HistoryRetryLineageConflictError extends Error {
+  constructor() {
+    super("history_retry_lineage_conflict");
+    this.name = "HistoryRetryLineageConflictError";
+    this.code = "history_retry_lineage_conflict";
+  }
+}
+
+function acceptedPersistedHistoryManifest(manifest) {
   return Boolean(
     manifest &&
-    manifest.source_system === sourceSystem &&
     ACCEPTED_HISTORY_STATUSES.has(manifest.status) &&
     manifest.historical_persisted === true,
   );
 }
 
-function correctionChildren(manifests, parentId, sourceSystem) {
-  return (Array.isArray(manifests) ? manifests : []).filter(
-    (manifest) =>
-      acceptedPersistedManifest(manifest, sourceSystem) &&
-      manifest.correction_of_extract_id === parentId,
+function acceptedPersistedManifest(manifest, sourceSystem) {
+  return Boolean(
+    acceptedPersistedHistoryManifest(manifest) &&
+    manifest.source_system === sourceSystem,
   );
+}
+
+function correctionChildren(manifests, parent, sourceSystem) {
+  const children = [];
+  for (const manifest of Array.isArray(manifests) ? manifests : []) {
+    if (manifest?.correction_of_extract_id !== parent.id) continue;
+    if (!acceptedPersistedHistoryManifest(manifest)) continue;
+    if (manifest.id === parent.id)
+      throw new HistoryCorrectionLineageError(
+        "correction lineage self-reference detected",
+      );
+    if (manifest.source_system !== sourceSystem)
+      throw new HistoryCorrectionLineageError(
+        `correction child ${manifest.id} source system does not match`,
+      );
+    if (manifest.effective_date !== parent.effective_date)
+      throw new HistoryCorrectionLineageError(
+        `correction child ${manifest.id} effective date does not match parent`,
+      );
+    children.push(manifest);
+  }
+  return children;
 }
 
 function resolveCorrectionHead(manifests, predecessor, sourceSystem, visited) {
   let head = predecessor;
   while (true) {
-    const children = correctionChildren(manifests, head.id, sourceSystem);
+    const children = correctionChildren(manifests, head, sourceSystem);
     if (children.length > 1)
       throw new HistoryCorrectionLineageError(
         `ambiguous accepted correction lineage for ${head.id}`,
@@ -100,7 +128,7 @@ export function resolveCorrectionBaseline({
 
   const directChildren = correctionChildren(
     candidates,
-    target.id,
+    target,
     sourceSystem,
   );
   if (directChildren.length > 1)
@@ -148,6 +176,27 @@ export function resolveCorrectionBaseline({
     };
   }
   return { targetManifest: target, previousManifest: null };
+}
+
+export function assertCorrectionRetryLineage({
+  existingManifest,
+  correctionOfExtractId,
+  extractDate,
+  sourceSystem = DEFAULT_SOURCE_SYSTEM,
+  previousManifest = null,
+} = {}) {
+  if (!existingManifest) return;
+  const expectedCorrectionId = correctionOfExtractId ?? null;
+  const expectedPreviousId = previousManifest?.id ?? null;
+  const actualCorrectionId = existingManifest.correction_of_extract_id ?? null;
+  const actualPreviousId = existingManifest.previous_extract_id ?? null;
+  if (
+    existingManifest.source_system !== sourceSystem ||
+    existingManifest.effective_date !== extractDate ||
+    actualCorrectionId !== expectedCorrectionId ||
+    actualPreviousId !== expectedPreviousId
+  )
+    throw new HistoryRetryLineageConflictError();
 }
 
 function canonicalize(value) {

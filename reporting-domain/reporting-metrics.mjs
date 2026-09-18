@@ -112,6 +112,7 @@ function manifestIsAccepted(manifest) {
   const quality = asObject(manifest?.quality_summary);
   return (
     ACCEPTED_STATUSES.has(manifest?.status) &&
+    manifest?.historical_persisted === true &&
     quality.completeness_state !== "incomplete" &&
     quality.hard_rejection !== true
   );
@@ -138,15 +139,22 @@ function manifestSort(left, right, timeZone) {
 }
 
 function supersededIds(candidates) {
-  const ids = new Set();
-  const candidateIds = new Set(candidates.map((manifest) => manifest.id));
+  const childrenByParent = new Map();
+  const manifestsById = new Map(
+    candidates.map((manifest) => [manifest.id, manifest]),
+  );
   for (const manifest of candidates) {
-    if (
-      manifest?.correction_of_extract_id &&
-      candidateIds.has(manifest.correction_of_extract_id)
-    ) {
-      ids.add(manifest.correction_of_extract_id);
-    }
+    const parent = manifestsById.get(manifest?.correction_of_extract_id);
+    if (!parent || manifest.id === parent.id) continue;
+    if (manifest.source_system !== parent.source_system) continue;
+    if (manifest.effective_date !== parent.effective_date) continue;
+    const children = childrenByParent.get(parent.id) || [];
+    children.push(manifest);
+    childrenByParent.set(parent.id, children);
+  }
+  const ids = new Set();
+  for (const [parentId, children] of childrenByParent) {
+    if (children.length === 1) ids.add(parentId);
   }
   return ids;
 }
