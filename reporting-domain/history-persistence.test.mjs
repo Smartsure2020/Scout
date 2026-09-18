@@ -205,6 +205,34 @@ test("history persistence writes identities, immutable snapshots, changes, and a
   assert.equal(persisted.extract_id, "extract-1");
 });
 
+test("correction persistence uses the resolved prior-period baseline", async () => {
+  const store = memoryStore();
+  const prior = manifest("prior-period", { comparable_to_previous: false });
+  const corrected = manifest("corrected-period", {
+    comparable_to_previous: true,
+  });
+  const normalized = {
+    snapshots: [snapshot({ row: "row-0", claim: "C-1", status: "registered" })],
+  };
+  await persistHistoryEvidenceWithStore({
+    store,
+    manifest: prior,
+    normalized,
+    quality: prior.quality_summary,
+  });
+  const previousChangeCount = store.changes.size;
+  const result = await persistHistoryEvidenceWithStore({
+    store,
+    manifest: corrected,
+    previousManifest: prior,
+    normalized,
+    quality: corrected.quality_summary,
+  });
+
+  assert.equal(result.changeCount, 0);
+  assert.equal(store.changes.size, previousChangeCount);
+});
+
 test("deterministic fixture preserves duplicates, handlers, terminal/open, financial, and missing-date evidence", async () => {
   const normalized = normalizeHistoricalRows(
     [

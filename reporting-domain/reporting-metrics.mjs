@@ -151,6 +151,26 @@ function supersededIds(candidates) {
   return ids;
 }
 
+function authoritativeManifestModel(manifests, scope) {
+  const candidates = asArray(manifests).filter(
+    (manifest) => manifestIsAccepted(manifest) && scopeMatches(manifest, scope),
+  );
+  const superseded = supersededIds(candidates);
+  const authoritative = candidates.filter(
+    (manifest) => !superseded.has(manifest.id),
+  );
+  return {
+    candidates,
+    superseded,
+    authoritative,
+    authoritativeIds: new Set(authoritative.map((manifest) => manifest.id)),
+  };
+}
+
+export function selectAuthoritativeManifests(manifests, { scope = {} } = {}) {
+  return authoritativeManifestModel(manifests, scope).authoritative;
+}
+
 /**
  * Select the latest usable accepted extract at or before a reporting boundary.
  * Effective timestamp wins, then source date at local midnight, then receipt
@@ -170,17 +190,14 @@ export function selectBoundaryExtract(
       candidatesConsidered: 0,
     };
   }
-  const candidates = asArray(manifests).filter((manifest) => {
+  const model = authoritativeManifestModel(manifests, scope);
+  const candidates = model.candidates.filter((manifest) => {
     const instant = manifestInstant(manifest, timeZone);
-    return (
-      manifestIsAccepted(manifest) &&
-      scopeMatches(manifest, scope) &&
-      instant !== null &&
-      instant <= boundaryInstant
-    );
+    return instant !== null && instant <= boundaryInstant;
   });
-  const superseded = supersededIds(candidates);
-  const current = candidates.filter((manifest) => !superseded.has(manifest.id));
+  const current = candidates.filter((manifest) =>
+    model.authoritativeIds.has(manifest.id),
+  );
   current.sort((left, right) => manifestSort(right, left, timeZone));
   const manifest = current[0] || null;
   return {
@@ -260,12 +277,9 @@ function periodSnapshotRows(
   scope,
 ) {
   const rows = [];
-  const relevantManifests = asArray(manifests)
-    .filter(
-      (manifest) =>
-        manifestIsAccepted(manifest) &&
-        scopeMatches(manifest, scope) &&
-        periodMembership(manifestInstant(manifest, timeZone), period),
+  const relevantManifests = authoritativeManifestModel(manifests, scope)
+    .authoritative.filter((manifest) =>
+      periodMembership(manifestInstant(manifest, timeZone), period),
     )
     .sort((left, right) => manifestSort(left, right, timeZone));
   for (const manifest of relevantManifests) {
@@ -1070,6 +1084,7 @@ function buildReportClaimRows(
   manifests,
   timeZone,
   preferredExtractId = null,
+  authoritativeManifestIds = null,
 ) {
   const membership = new Map();
   for (const [metricId, value] of Object.entries(metrics)) {
@@ -1099,15 +1114,20 @@ function buildReportClaimRows(
       }
     }
   }
+  const isAuthoritativeSnapshot = (snapshot) =>
+    !authoritativeManifestIds ||
+    authoritativeManifestIds.has(snapshot?.extract_id);
   const byClaim = new Map();
   for (const snapshot of snapshotsForExtract(
     snapshotsByExtract,
     preferredExtractId,
   )) {
+    if (!isAuthoritativeSnapshot(snapshot)) continue;
     const claimId = snapshotReference(snapshot);
     if (claimId) byClaim.set(String(claimId), snapshot);
   }
   for (const snapshot of allSnapshots(snapshotsByExtract)) {
+    if (!isAuthoritativeSnapshot(snapshot)) continue;
     const claimId = snapshotReference(snapshot);
     if (claimId && !byClaim.has(String(claimId)))
       byClaim.set(String(claimId), snapshot);
@@ -1195,6 +1215,8 @@ export function buildReportSnapshot({
   configurationWarnings = [],
 } = {}) {
   const period = reportingPeriod(reportType, periodStart, timeZone);
+  const authoritativeModel = authoritativeManifestModel(manifests, scope);
+  const authoritativeManifests = authoritativeModel.authoritative;
   const openingSelection = selectBoundaryExtract(manifests, period.start, {
     timeZone,
     scope,
@@ -1211,7 +1233,7 @@ export function buildReportSnapshot({
   );
   const coverage = coverageAssessment({
     period,
-    manifests,
+    manifests: authoritativeManifests,
     openingSelection,
     closingSelection,
     timeZone,
@@ -1229,8 +1251,11 @@ export function buildReportSnapshot({
     precision: closingSelection.precision,
     boundary: period.end.toISOString(),
   };
-  const periodChanges = asArray(changes).filter((change) =>
-    periodMembership(changeInstant(change), period),
+  const periodChanges = asArray(changes).filter(
+    (change) =>
+      (!change?.source_extract_id ||
+        authoritativeModel.authoritativeIds.has(change.source_extract_id)) &&
+      periodMembership(changeInstant(change), period),
   );
   const metrics = {};
   metrics.opening_inventory = stateMetric(
@@ -1271,7 +1296,7 @@ export function buildReportSnapshot({
         );
 
   const periodRows = periodSnapshotRows(
-    manifests,
+    authoritativeManifests,
     snapshotsByExtract,
     period,
     timeZone,
@@ -1429,9 +1454,10 @@ export function buildReportSnapshot({
     claim_rows: buildReportClaimRows(
       metrics,
       snapshotsByExtract,
-      manifests,
+      authoritativeManifests,
       timeZone,
       closingSelection.manifest?.id ?? null,
+      authoritativeModel.authoritativeIds,
     ),
   };
 }

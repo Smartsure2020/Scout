@@ -12,6 +12,144 @@ export const HISTORY_DERIVATION_VERSION = "scout-history-derivation-v1";
 export const DEFAULT_SOURCE_SYSTEM = "cardinal_claims";
 export const DEFAULT_MAX_ROW_COUNT_DROP_RATIO = 0.5;
 
+const ACCEPTED_HISTORY_STATUSES = new Set([
+  "accepted",
+  "accepted_with_warnings",
+]);
+
+export class HistoryCorrectionLineageError extends Error {
+  constructor(reason) {
+    super(`Invalid history correction lineage: ${reason}`);
+    this.name = "HistoryCorrectionLineageError";
+    this.code = "history_correction_lineage_invalid";
+  }
+}
+
+function acceptedPersistedManifest(manifest, sourceSystem) {
+  return Boolean(
+    manifest &&
+    manifest.source_system === sourceSystem &&
+    ACCEPTED_HISTORY_STATUSES.has(manifest.status) &&
+    manifest.historical_persisted === true,
+  );
+}
+
+function correctionChildren(manifests, parentId, sourceSystem) {
+  return (Array.isArray(manifests) ? manifests : []).filter(
+    (manifest) =>
+      acceptedPersistedManifest(manifest, sourceSystem) &&
+      manifest.correction_of_extract_id === parentId,
+  );
+}
+
+function resolveCorrectionHead(manifests, predecessor, sourceSystem, visited) {
+  let head = predecessor;
+  while (true) {
+    const children = correctionChildren(manifests, head.id, sourceSystem);
+    if (children.length > 1)
+      throw new HistoryCorrectionLineageError(
+        `ambiguous accepted correction lineage for ${head.id}`,
+      );
+    if (children.length === 0) return head;
+    const [child] = children;
+    if (visited.has(child.id))
+      throw new HistoryCorrectionLineageError(
+        "correction lineage cycle detected",
+      );
+    visited.add(child.id);
+    head = child;
+  }
+}
+
+/**
+ * Resolve the genuine prior-period baseline for an explicit correction.
+ * The target itself must be an accepted, persisted extract for the requested
+ * date and must not already have an accepted persisted correction child.
+ */
+export function resolveCorrectionBaseline({
+  manifests = [],
+  correctionOfExtractId,
+  extractDate,
+  sourceSystem = DEFAULT_SOURCE_SYSTEM,
+} = {}) {
+  const candidates = Array.isArray(manifests) ? manifests : [];
+  const byId = new Map(
+    candidates
+      .filter((manifest) => manifest?.id)
+      .map((manifest) => [manifest.id, manifest]),
+  );
+  const target = byId.get(correctionOfExtractId);
+  if (!target)
+    throw new HistoryCorrectionLineageError("correction target was not found");
+  if (target.source_system !== sourceSystem)
+    throw new HistoryCorrectionLineageError(
+      "correction target source system does not match",
+    );
+  if (!ACCEPTED_HISTORY_STATUSES.has(target.status))
+    throw new HistoryCorrectionLineageError(
+      "correction target is not accepted",
+    );
+  if (target.historical_persisted !== true)
+    throw new HistoryCorrectionLineageError(
+      "correction target is not historically persisted",
+    );
+  if (!extractDate || target.effective_date !== extractDate)
+    throw new HistoryCorrectionLineageError(
+      "correction target effective date does not match the upload date",
+    );
+
+  const directChildren = correctionChildren(
+    candidates,
+    target.id,
+    sourceSystem,
+  );
+  if (directChildren.length > 1)
+    throw new HistoryCorrectionLineageError(
+      `ambiguous accepted correction lineage for ${target.id}`,
+    );
+  if (directChildren.length === 1)
+    throw new HistoryCorrectionLineageError(
+      `correction target ${target.id} is already superseded`,
+    );
+
+  const visited = new Set([target.id]);
+  let predecessorId = target.previous_extract_id || null;
+  while (predecessorId) {
+    if (visited.has(predecessorId))
+      throw new HistoryCorrectionLineageError(
+        "previous-extract lineage cycle detected",
+      );
+    visited.add(predecessorId);
+    const predecessor = byId.get(predecessorId);
+    if (!predecessor)
+      throw new HistoryCorrectionLineageError(
+        `previous extract ${predecessorId} was not found`,
+      );
+    if (predecessor.source_system !== sourceSystem)
+      throw new HistoryCorrectionLineageError(
+        `previous extract ${predecessor.id} source system does not match`,
+      );
+    if (predecessor.effective_date === target.effective_date) {
+      predecessorId = predecessor.previous_extract_id || null;
+      continue;
+    }
+    if (!acceptedPersistedManifest(predecessor, sourceSystem))
+      throw new HistoryCorrectionLineageError(
+        `prior-period extract ${predecessor.id} is not accepted and persisted`,
+      );
+    return {
+      targetManifest: target,
+      previousManifest: resolveCorrectionHead(
+        candidates,
+        predecessor,
+        sourceSystem,
+        visited,
+      ),
+    };
+  }
+  return { targetManifest: target, previousManifest: null };
+}
+
 function canonicalize(value) {
   if (value instanceof Date) return value.toISOString();
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -220,7 +358,7 @@ function buildSnapshot(source, index, context, duplicateClaimNumbers) {
 
   const rawStatus = firstValue(source, ["status", "claims_status"]);
   const status = getStatusEvaluation(rawStatus);
-  if (!status.mapped && hasValue(rawStatus))
+  if (!status.mapped && !status.terminal && hasValue(rawStatus))
     qualityFlags.push("unmapped_status");
   if (!hasValue(rawStatus)) qualityFlags.push("missing_status");
   if (duplicateClaimNumbers.has(claimNumber) && claimNumber) {

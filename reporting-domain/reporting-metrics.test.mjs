@@ -5,6 +5,7 @@ import {
   metricPopulationForSnapshot,
   previousReportingPeriod,
   reportingPeriod,
+  selectAuthoritativeManifests,
   selectBoundaryExtract,
 } from "./reporting-metrics.mjs";
 
@@ -274,6 +275,110 @@ test("boundary selection rejects incomplete extracts and chooses corrected linea
   assert.equal(
     selectBoundaryExtract([incomplete], "2026-08-28T00:00:00.000Z").manifest,
     null,
+  );
+});
+
+test("reporting filters superseded snapshots and change rows consistently", () => {
+  const prior = manifest("prior", "2026-08-21", 1);
+  const original14 = manifest("original-14", "2026-08-24", 1, {
+    receivedAt: "2026-08-24T08:00:00.000Z",
+  });
+  const flawed14 = manifest("flawed-14", "2026-08-24", 1, {
+    receivedAt: "2026-08-24T09:00:00.000Z",
+    correctionOfExtractId: original14.id,
+  });
+  const corrected14 = manifest("corrected-14", "2026-08-24", 1, {
+    receivedAt: "2026-08-24T10:00:00.000Z",
+    correctionOfExtractId: flawed14.id,
+  });
+  const original15 = manifest("original-15", "2026-08-25", 1, {
+    receivedAt: "2026-08-25T08:00:00.000Z",
+    previousExtractId: corrected14.id,
+  });
+  const corrected15 = manifest("corrected-15", "2026-08-25", 1, {
+    receivedAt: "2026-08-25T09:00:00.000Z",
+    previousExtractId: corrected14.id,
+    correctionOfExtractId: original15.id,
+  });
+  const manifests = [
+    prior,
+    original14,
+    flawed14,
+    corrected14,
+    original15,
+    corrected15,
+  ];
+  const snapshotsByExtract = new Map(
+    manifests.map((current) => [current.id, [snapshot("A", current.id)]]),
+  );
+  const changes = [
+    {
+      claim_id: "superseded-first",
+      change_type: "first_observed",
+      source_extract_id: original14.id,
+      observed_at: "2026-08-24T11:00:00.000Z",
+    },
+    {
+      claim_id: "superseded-handler",
+      change_type: "handler_changed",
+      source_extract_id: flawed14.id,
+      observed_at: "2026-08-24T11:30:00.000Z",
+      old_value: { email: "old@example.test" },
+      new_value: { email: "new@example.test" },
+    },
+    {
+      claim_id: "authoritative-first",
+      change_type: "first_observed",
+      source_extract_id: corrected14.id,
+      observed_at: "2026-08-24T12:00:00.000Z",
+    },
+    {
+      claim_id: "superseded-closure",
+      change_type: "closure_event",
+      source_extract_id: original15.id,
+      observed_at: "2026-08-25T11:00:00.000Z",
+      provenance: "source_explicit",
+      source_event_at: "2026-08-25T10:00:00.000Z",
+    },
+    {
+      claim_id: "authoritative-closure",
+      change_type: "closure_event",
+      source_extract_id: corrected15.id,
+      observed_at: "2026-08-25T12:00:00.000Z",
+      provenance: "source_explicit",
+      source_event_at: "2026-08-25T11:00:00.000Z",
+    },
+  ];
+
+  assert.deepEqual(
+    selectAuthoritativeManifests(manifests).map((current) => current.id),
+    [prior.id, corrected14.id, corrected15.id],
+  );
+  const report = buildReportSnapshot({
+    reportType: "weekly",
+    periodStart: "2026-08-24",
+    manifests,
+    snapshotsByExtract,
+    changes,
+    activeUsers: users,
+  });
+
+  assert.equal(report.opening_extract_id, corrected14.id);
+  assert.equal(report.closing_extract_id, corrected15.id);
+  assert.equal(report.activity.changes_considered, 2);
+  assert.deepEqual(
+    report.metrics.new_claims_first_observed.claim_population.claim_ids,
+    ["authoritative-first"],
+  );
+  assert.deepEqual(report.metrics.claims_closed.claim_population.claim_ids, [
+    "authoritative-closure",
+  ]);
+  assert.equal(report.metrics.assignment_activity.value, 0);
+  assert.equal(
+    report.metrics.assignment_activity.coverage_warnings.includes(
+      "assignment_history_unavailable",
+    ),
+    true,
   );
 });
 

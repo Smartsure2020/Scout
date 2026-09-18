@@ -15,7 +15,9 @@ import {
   computeSourceChecksum,
   DEFAULT_SOURCE_SYSTEM,
   HISTORY_SCHEMA_VERSION,
+  HistoryCorrectionLineageError,
   normalizeHistoricalRows,
+  resolveCorrectionBaseline,
   safeHistorySnapshot,
   sourceChecksumPayload,
 } from "./reporting-domain/history.mjs";
@@ -552,15 +554,26 @@ async function preserveHistoricalExtract(
     };
   }
 
+  const correctionBaseline = correctionOfExtractId
+    ? resolveCorrectionBaseline({
+        manifests: await getAcceptedReportManifests(env),
+        correctionOfExtractId,
+        extractDate,
+        sourceSystem: DEFAULT_SOURCE_SYSTEM,
+      })
+    : null;
+
   const users = await getActiveHistoryUsers(env);
   const normalized = normalizeHistoricalRows(claims, {
     sourceSystem: DEFAULT_SOURCE_SYSTEM,
     effectiveDate: extractDate || null,
     activeUsers: users.users,
   });
-  const previousManifest = existing?.previous_extract_id
-    ? await getHistoryManifestById(env, existing.previous_extract_id)
-    : await getLatestHistoryManifest(env, DEFAULT_SOURCE_SYSTEM);
+  const previousManifest = correctionBaseline?.previousManifest
+    ? correctionBaseline.previousManifest
+    : existing?.previous_extract_id
+      ? await getHistoryManifestById(env, existing.previous_extract_id)
+      : await getLatestHistoryManifest(env, DEFAULT_SOURCE_SYSTEM);
   const quality = assessExtractQuality(normalized, {
     previousManifest,
     sourceSystem: DEFAULT_SOURCE_SYSTEM,
@@ -2277,6 +2290,8 @@ export default {
             currentUser,
           });
         } catch (error) {
+          if (error instanceof HistoryCorrectionLineageError)
+            return err(error.message, 422);
           const failure = historyFailureInfo(error, "history_persistence");
           await audit(
             env,
