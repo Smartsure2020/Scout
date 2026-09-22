@@ -3843,7 +3843,13 @@ function normaliseStatus(s) {
     .replace(/\s*-\s*/g, " - ")
     .trim()
     .toLowerCase();
-  return window.ScoutClaimsQA?.normalizeSourceStatus?.(s) || STATUS_ALIASES[normalized] || normalized;
+  // Prefer the shared normalizer's result when it exists, including its
+  // deliberate empty-string result for missing-value sentinels like "[none]".
+  // Truthy-fallback here would incorrectly resurrect "[none]" as an unmapped
+  // status. Use defined/null checks rather than || .
+  const shared = window.ScoutClaimsQA?.normalizeSourceStatus?.(s);
+  if (shared !== undefined && shared !== null) return shared;
+  return STATUS_ALIASES[normalized] || normalized;
 }
 
 // MOTOR PERILS
@@ -4043,6 +4049,7 @@ const STATUS_RULES = {
   "Awaiting payment for excess buyback":      { stale:7,  critical:14,  cat:"payment",        action:"Follow up on excess buyback payment" },
   "Awaiting excess from client/insured":      { stale:7,  critical:14,  cat:"payment",        action:"Chase excess from client" },
   "TP insurer awaits Section 2 excess":       { stale:7,  critical:14,  cat:"payment",        action:"Follow up on Section 2 excess so TP insurer can proceed" },
+  "Awaiting client's Section 2 excess":       { stale:7,  critical:14,  cat:"payment",        action:"Chase Section 2 excess from client" },
   "Release received - await payment":         { stale:5,  critical:10,  cat:"payment",        action:"Process payment following release" },
   "Interim Payment":                          { stale:7,  critical:14,  cat:"payment",        action:"Follow up on interim payment" },
   "Settlement Pending":                       { stale:5,  critical:10,  cat:"payment",        action:"Finalise settlement" },

@@ -23,6 +23,22 @@ test("source status aliases preserve the intended operational meaning", () => {
   );
 });
 
+test("missing-value sentinels normalize to empty so they are not flagged unmapped", () => {
+  assert.equal(normalizeSourceStatus("[none]"), "");
+  assert.equal(normalizeSourceStatus(" [NONE] "), "");
+  assert.equal(normalizeSourceStatus("(none)"), "");
+  assert.equal(normalizeSourceStatus("none"), "");
+  assert.equal(normalizeSourceStatus("N/A"), "");
+  assert.equal(normalizeSourceStatus(" n / a "), "");
+  assert.equal(normalizeSourceStatus(""), "");
+  assert.equal(normalizeSourceStatus(null), "");
+  // Genuine statuses that merely contain the letters "none" must not be swallowed.
+  assert.equal(
+    normalizeSourceStatus("Recovery abandoned : third party untraceable"),
+    "recovery abandoned : third party untraceable",
+  );
+});
+
 test("handler identity comparison is dynamic and order-insensitive", () => {
   assert.equal(handlerIdentityKey("De Beer, Bev"), "debeerbev");
   assert.equal(sameHandlerIdentity("De Beer Bev", "Bev De Beer"), true);

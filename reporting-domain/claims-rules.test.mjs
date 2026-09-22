@@ -118,6 +118,44 @@ test("Cardinal source status variants use the authoritative SLA taxonomy", () =>
     }).classification,
     "critical",
   );
+
+  // Client-side variant of the Section 2 excess status is a distinct
+  // operational state (the client, not the TP insurer, is holding things up),
+  // but its SLA weight and category match the TP variant.
+  const clientSectionTwoExcess = getStatusEvaluation(
+    "Awaiting client's Section 2 excess",
+  );
+  assert.equal(clientSectionTwoExcess.mapped, true);
+  assert.equal(clientSectionTwoExcess.category, "payment");
+  assert.equal(clientSectionTwoExcess.staleThreshold, 7);
+  assert.equal(clientSectionTwoExcess.criticalThreshold, 14);
+  // Also verify the raw casing observed in Cardinal source data
+  // ("awaiting client's section 2 excess") maps identically.
+  const clientSectionTwoExcessLower = getStatusEvaluation(
+    "awaiting client's section 2 excess",
+  );
+  assert.equal(clientSectionTwoExcessLower.mapped, true);
+  assert.equal(clientSectionTwoExcessLower.category, "payment");
+  assert.equal(clientSectionTwoExcessLower.staleThreshold, 7);
+  assert.equal(clientSectionTwoExcessLower.criticalThreshold, 14);
+  assert.deepEqual(
+    [6, 7, 14].map(
+      (workingAge) =>
+        evaluateSla({
+          status: "Awaiting client's Section 2 excess",
+          workingAge,
+        }).classification,
+    ),
+    ["on_track", "stale", "critical"],
+  );
+});
+
+test("[none] and other missing-value sentinels are treated as missing, not unmapped or terminal", () => {
+  const evaluation = getStatusEvaluation("[none]");
+  assert.equal(evaluation.normalizedStatus, "");
+  assert.equal(evaluation.mapped, false);
+  assert.equal(evaluation.terminal, false);
+  assert.equal(evaluation.category, "unmapped");
 });
 
 test("calendar age and management bands use explicit as-of dates", () => {

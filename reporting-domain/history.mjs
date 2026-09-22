@@ -407,9 +407,13 @@ function buildSnapshot(source, index, context, duplicateClaimNumbers) {
 
   const rawStatus = firstValue(source, ["status", "claims_status"]);
   const status = getStatusEvaluation(rawStatus);
-  if (!status.mapped && !status.terminal && hasValue(rawStatus))
+  // A row is "missing status" when either the source cell was empty OR the
+  // shared normalization treats its value as a known missing-value sentinel
+  // (e.g. "[none]"). In both cases the semantically-normalized status is "".
+  const hasSemanticStatus = status.normalizedStatus !== "";
+  if (!status.mapped && !status.terminal && hasSemanticStatus)
     qualityFlags.push("unmapped_status");
-  if (!hasValue(rawStatus)) qualityFlags.push("missing_status");
+  if (!hasSemanticStatus) qualityFlags.push("missing_status");
   if (duplicateClaimNumbers.has(claimNumber) && claimNumber) {
     qualityFlags.push("duplicate_claim_number", "identity_ambiguity");
   }

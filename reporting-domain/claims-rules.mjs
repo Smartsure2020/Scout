@@ -149,6 +149,7 @@ const STATUS_RULE_ENTRIES = [
   ["Awaiting payment for excess buyback", 7, 14, "payment"],
   ["Awaiting excess from client/insured", 7, 14, "payment"],
   ["TP insurer awaits Section 2 excess", 7, 14, "payment"],
+  ["Awaiting client's Section 2 excess", 7, 14, "payment"],
   ["Release received - await payment", 5, 10, "payment"],
   ["Interim Payment", 7, 14, "payment"],
   ["Settlement Pending", 5, 10, "payment"],
