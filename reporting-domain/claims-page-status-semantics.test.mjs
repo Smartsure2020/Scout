@@ -2,7 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { readFile } from "node:fs/promises";
-import { normalizeSourceStatus } from "./claims-qa.mjs";
+// The claims page loads its own copy of this module directly in the browser
+// (<script type="module" src="./claims-qa.mjs"> in
+// scout-smartsure/claims/index.html) - it is NOT the same file as this
+// directory's own claims-qa.mjs, and the two have drifted before (the [none]
+// missing-status sentinel fix landed here without also landing there). Import
+// the actual frontend asset so window.ScoutClaimsQA in the sandbox below is
+// exactly what production serves, not a substituted "corrected" copy.
+import { normalizeSourceStatus } from "../scout-smartsure/claims/claims-qa.mjs";
+import { normalizeSourceStatus as reportingNormalizeSourceStatus } from "./claims-qa.mjs";
 
 // This suite executes the ACTUAL claims-page logic (not a reimplementation)
 // by pulling the relevant function/const declarations out of the claims
@@ -191,4 +199,78 @@ test("claims page: priority/action for a missing status avoids unmapped-taxonomy
   const unmappedPriority = page.getPriority(fixtureClaim({ status: "A status added later", workingAge: 100 }));
   assert.equal(unmappedPriority.action, "Review  -  status not yet mapped in Scout");
   assert.ok(unmappedPriority.flags.some((flag) => flag.label.includes("status not mapped")));
+});
+
+// The frontend (scout-smartsure/claims/claims-qa.mjs, loaded by the browser)
+// and this directory's own copy (reporting-domain/claims-qa.mjs, used by the
+// backend Worker) must stay in lockstep for shared status-normalization
+// logic. This is a direct parity check, not a duplicate reimplementation -
+// it exists specifically to catch future drift the way it caught this one:
+// the [none] sentinel fix landed in reporting-domain/claims-qa.mjs but not
+// in the frontend copy, so the actual browser kept classifying "[none]" as
+// unmapped even after the shared/backend fix shipped.
+test("frontend and reporting-domain claims-qa normalizers agree on missing-status sentinels and unmapped statuses", () => {
+  const cases = [
+    ["[none]", ""],
+    [" [NONE] ", ""],
+    ["Registered", "registered"],
+    ["A status added later", "a status added later"],
+    // Unevidenced spellings must stay nonempty in BOTH implementations -
+    // narrowing/broadening the sentinel set in only one copy is exactly the
+    // kind of drift this test exists to catch.
+    ["none", "none"],
+    ["(none)", "(none)"],
+    ["N/A", "n / a"],
+  ];
+  for (const [input, expected] of cases) {
+    const frontendResult = normalizeSourceStatus(input);
+    const reportingResult = reportingNormalizeSourceStatus(input);
+    assert.equal(
+      frontendResult,
+      expected,
+      `frontend normalizeSourceStatus(${JSON.stringify(input)})`,
+    );
+    assert.equal(
+      reportingResult,
+      expected,
+      `reporting-domain normalizeSourceStatus(${JSON.stringify(input)})`,
+    );
+    assert.equal(
+      frontendResult,
+      reportingResult,
+      `frontend/reporting-domain disagree on ${JSON.stringify(input)}`,
+    );
+  }
+  // Explicitly lock in that the unevidenced spellings remain classified as
+  // real (nonempty) statuses, not silently swallowed as missing.
+  for (const unevidenced of ["none", "(none)", "N/A"]) {
+    assert.notEqual(normalizeSourceStatus(unevidenced), "");
+    assert.notEqual(reportingNormalizeSourceStatus(unevidenced), "");
+  }
+});
+
+// Makes future module drift visible: if the claims page ever stops loading
+// ./claims-qa.mjs, or this suite ever stops importing that same frontend
+// asset, the whole point of the tests above - proving the ACTUAL browser
+// module behaves correctly, not a substituted copy - silently stops holding.
+test("production import contract: the claims page loads claims-qa.mjs, and this suite tests that same frontend module", async () => {
+  const pageSource = await readFile(
+    new URL("../scout-smartsure/claims/index.html", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    pageSource,
+    /<script type="module" src="\.\/claims-qa\.mjs">/,
+    "scout-smartsure/claims/index.html must load claims-qa.mjs as a module",
+  );
+  const frontendModuleUrl = new URL(
+    "../scout-smartsure/claims/claims-qa.mjs",
+    import.meta.url,
+  );
+  const frontendSource = await readFile(frontendModuleUrl, "utf8");
+  assert.match(
+    frontendSource,
+    /export function normalizeSourceStatus/,
+    "the frontend module this suite imports must be the real claims-qa.mjs export",
+  );
 });
