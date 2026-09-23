@@ -71,7 +71,7 @@ async function runUploadRoute(
         return jsonResponse(existingManifest ? [existingManifest] : []);
       if (
         latestManifestFailure &&
-        parsed.searchParams.get("order") === "received_at.desc"
+        parsed.searchParams.get("order") === "received_at.asc"
       )
         return jsonResponse({ error: "mock latest-history failure" }, 500);
       if (parsed.searchParams.has("status"))
@@ -209,6 +209,25 @@ test("new correction manifests store the resolved genuine predecessor", () => {
   });
   assert.equal(ordinary16.previous_extract_id, ordinary15.id);
   assert.equal(ordinary16.correction_of_extract_id, null);
+
+  // A same-date ordinary re-upload (C, for 2026-09-15) becomes an implicit
+  // correction of the existing same-date head (B) while its comparison
+  // predecessor stays the genuine prior period (A) - the two lineage
+  // concepts historicalManifestRecord() now just records independently,
+  // exactly as resolveOrdinaryUploadLineage() resolves them upstream. This
+  // is the regression PR #17's independent review caught: previousManifest
+  // is never same-date once it's resolved by effective_date, so
+  // historicalManifestRecord() can no longer infer correction identity from
+  // previousManifest.effective_date === extractDate.
+  const priorPeriodA = { id: "priorPeriodA", effective_date: "2026-09-14" };
+  const sameDateHeadB = { id: "sameDateHeadB", effective_date: "2026-09-15" };
+  const implicitCorrectionC = makeRecord({
+    extractDate: "2026-09-15",
+    correctionOfExtractId: sameDateHeadB.id,
+    previousManifest: priorPeriodA,
+  });
+  assert.equal(implicitCorrectionC.correction_of_extract_id, sameDateHeadB.id);
+  assert.equal(implicitCorrectionC.previous_extract_id, priorPeriodA.id);
 });
 
 test("actual upload rejects explicit null correction input before business writes", async () => {
@@ -288,13 +307,35 @@ test("actual upload treats an omitted correction field as an ordinary upload", a
 
   assert.equal(result.status, 503);
   assert.notEqual(result.body.error, "invalid_correction_of_extract_id");
+  // Ordinary uploads resolve their predecessor from the full accepted
+  // manifest list (effective-date-aware), not a single received_at-latest
+  // row - see resolveAuthoritativePriorPeriodManifest().
   assert.equal(
     result.calls.some(
       (call) =>
         call.method === "GET" &&
         call.url.includes("/scout_history_extracts") &&
-        call.url.includes("order=received_at.desc"),
+        call.url.includes("order=received_at.asc"),
     ),
     true,
   );
+});
+
+test("an ordinary upload with malformed same-date authority fails closed before any manifest/snapshot/change/current-state write", async () => {
+  // Two independent roots for the upload's own effective_date - ambiguous
+  // same-date authority. resolveOrdinaryUploadLineage() must fail closed
+  // before historicalManifestRecord() or any Supabase write happens.
+  const ambiguousRoots = [
+    manifest("root-a", uploadFixture.extractDate),
+    manifest("root-b", uploadFixture.extractDate),
+  ];
+
+  const result = await runUploadRoute(
+    { ...uploadFixture, sourceChecksum: "malformed-same-date-checksum" },
+    { acceptedManifests: ambiguousRoots },
+  );
+
+  assert.equal(result.status, 422);
+  assert.match(result.body.error, /ambiguous/);
+  assert.deepEqual(result.businessWrites, []);
 });

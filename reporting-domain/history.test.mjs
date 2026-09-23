@@ -10,7 +10,10 @@ import {
   HistoryRetryLineageConflictError,
   normalizeHistoricalRows,
   assertCorrectionRetryLineage,
+  resolveAuthoritativePriorPeriodManifest,
   resolveCorrectionBaseline,
+  resolveLatestAuthoritativeManifest,
+  resolveOrdinaryUploadLineage,
   sourceChecksumPayload,
 } from "./history.mjs";
 
@@ -404,18 +407,24 @@ test("correction baseline rejects invalid, superseded, ambiguous, and cyclic lin
       date: "2026-09-14",
       message: "ambiguous",
     },
+    // A previous_extract_id-only cycle between two same-date manifests is no
+    // longer an error case: the prior period is resolved by effective_date,
+    // never by walking previous_extract_id, so two same-date manifests with
+    // no correction_of_extract_id relationship simply mean "no prior period
+    // strictly before this date" (previousManifest: null), not a cycle.
+    // A stray correction that claims a parent absent from the accepted set
+    // is still fail-closed, as an orphan within its own effective date.
     {
       manifests: [
-        lineageManifest("cycle-target", "2026-09-14", {
-          previous_extract_id: "cycle-prior",
+        lineageManifest("real-root", "2026-09-04"),
+        lineageManifest("stray", "2026-09-04", {
+          correction_of_extract_id: "ghost-id-not-present",
         }),
-        lineageManifest("cycle-prior", "2026-09-14", {
-          previous_extract_id: "cycle-target",
-        }),
+        target,
       ],
-      target: "cycle-target",
+      target: target.id,
       date: "2026-09-14",
-      message: "cycle",
+      message: "orphan",
     },
     {
       manifests: [
@@ -459,6 +468,10 @@ test("correction baseline rejects invalid, superseded, ambiguous, and cyclic lin
       date: "2026-09-14",
       message: "self-reference",
     },
+    // prior -> cycle-b -> cycle-a -> prior forms a correction_of_extract_id
+    // cycle with no entry point, so every manifest for 2026-09-04 has a
+    // non-null correction_of_extract_id and none qualifies as the root -
+    // fail-closed via "no root", an equally precise diagnosis of the cycle.
     {
       manifests: [
         {
@@ -477,7 +490,7 @@ test("correction baseline rejects invalid, superseded, ambiguous, and cyclic lin
       ],
       target: target.id,
       date: "2026-09-14",
-      message: "cycle",
+      message: "no root",
     },
   ];
 
@@ -533,7 +546,460 @@ test("correction retry lineage must match the resolved predecessor", () => {
   }
 });
 
-test("same nominal date with a different payload is a corrected version, not an overwrite", async () => {
+// ── Effective-period-aware baseline resolution ───────────────────────────
+// Reproduces the real production chronology that exposed the bug: a
+// backdated correction of an earlier effective period, received AFTER a
+// later effective-date extract already exists, must never become that later
+// extract's comparison baseline just because it was received more recently.
+//
+//   A: 2026-09-04 ordinary
+//   B: 2026-09-14 original                          previous = A
+//   C: 2026-09-14 flawed correction (of B)           previous = A
+//   D: 2026-09-15 ordinary                           previous = C
+//   E: 2026-09-14 later correction (of C)            previous = A, received AFTER D
+//   F: 2026-09-22 ordinary
+//   G: 2026-09-15 correction (of D)                  previous = E   [added later]
+function realSequenceFixture() {
+  const A = lineageManifest("A-2026-09-04", "2026-09-04", {
+    received_at: "2026-09-04T08:00:00Z",
+  });
+  const B = lineageManifest("B-2026-09-14-original", "2026-09-14", {
+    previous_extract_id: A.id,
+    received_at: "2026-09-14T08:00:00Z",
+  });
+  const C = lineageManifest("C-2026-09-14-flawed", "2026-09-14", {
+    previous_extract_id: A.id,
+    correction_of_extract_id: B.id,
+    received_at: "2026-09-14T09:00:00Z",
+  });
+  const D = lineageManifest("D-2026-09-15", "2026-09-15", {
+    previous_extract_id: C.id,
+    received_at: "2026-09-15T08:00:00Z",
+  });
+  // E is received AFTER D even though its own effective period (09-14) is
+  // earlier than D's (09-15) - this is the exact shape of the production
+  // incident (NEW14's taxonomy-correction received on 09-22, after 10f/09-15
+  // already existed).
+  const E = lineageManifest("E-2026-09-14-later-correction", "2026-09-14", {
+    previous_extract_id: A.id,
+    correction_of_extract_id: C.id,
+    received_at: "2026-09-22T11:00:00Z",
+  });
+  const F = lineageManifest("F-2026-09-22", "2026-09-22", {
+    // Deliberately stored as E, reproducing the pre-fix
+    // getLatestHistoryManifest() (received_at-ordered) bug's output. The
+    // whole point of resolveCorrectionBaseline() no longer trusting this
+    // stored pointer is that a future correction of F must resolve
+    // correctly regardless of what's recorded here.
+    previous_extract_id: E.id,
+    received_at: "2026-09-22T15:00:00Z",
+  });
+  return { A, B, C, D, E, F };
+}
+
+test("ordinary upload baseline selection: a backdated correction received later does not steal the forward predecessor", () => {
+  const { A, B, C, D, E, F } = realSequenceFixture();
+  const manifests = [A, B, C, D, E, F];
+
+  // What an ordinary upload for F's date (2026-09-22) must resolve to,
+  // BEFORE any correction of D exists yet: the effective-period head as of
+  // "just before F", which is D (09-15) - not E (09-14, merely the most
+  // recently received row).
+  const result = resolveAuthoritativePriorPeriodManifest({
+    manifests,
+    beforeDate: F.effective_date,
+  });
+  assert.equal(result.id, D.id);
+  assert.notEqual(result.id, E.id);
+});
+
+test("NEW15-equivalent: correcting the 09-15 extract resolves to the authoritative corrected 09-14 head", () => {
+  const { A, B, C, D, E } = realSequenceFixture();
+  const manifests = [A, B, C, D, E];
+
+  const result = resolveCorrectionBaseline({
+    manifests,
+    correctionOfExtractId: D.id,
+    extractDate: D.effective_date,
+  });
+  assert.equal(result.targetManifest.id, D.id);
+  assert.equal(result.previousManifest.id, E.id);
+});
+
+test("NEW22-equivalent: correcting the 09-22 extract resolves to the corrected 09-15 head, ignoring F's own stale stored pointer", () => {
+  const { A, B, C, D, E, F } = realSequenceFixture();
+  const G = lineageManifest("G-2026-09-15-correction", "2026-09-15", {
+    previous_extract_id: E.id,
+    correction_of_extract_id: D.id,
+    received_at: "2026-09-23T08:00:00Z",
+  });
+  const manifests = [A, B, C, D, E, F, G];
+
+  const result = resolveCorrectionBaseline({
+    manifests,
+    correctionOfExtractId: F.id,
+    extractDate: F.effective_date,
+  });
+  assert.equal(result.targetManifest.id, F.id);
+  assert.equal(result.previousManifest.id, G.id);
+  assert.notEqual(result.previousManifest.id, E.id);
+  assert.notEqual(result.previousManifest.id, D.id);
+  assert.notEqual(result.previousManifest.id, C.id);
+});
+
+test("resolveAuthoritativePriorPeriodManifest returns null when no prior effective period exists", () => {
+  const A = lineageManifest("only", "2026-09-04");
+  assert.equal(
+    resolveAuthoritativePriorPeriodManifest({
+      manifests: [A],
+      beforeDate: "2026-09-04",
+    }),
+    null,
+  );
+  assert.equal(
+    resolveAuthoritativePriorPeriodManifest({
+      manifests: [],
+      beforeDate: "2026-09-04",
+    }),
+    null,
+  );
+});
+
+test("resolveAuthoritativePriorPeriodManifest fails closed on ambiguous, cyclic, and orphaned same-date lineage", () => {
+  const cases = [
+    {
+      name: "ambiguous independent extracts",
+      manifests: [
+        lineageManifest("root-a", "2026-09-14"),
+        lineageManifest("root-b", "2026-09-14"),
+      ],
+      beforeDate: "2026-09-15",
+      message: "ambiguous",
+    },
+    {
+      name: "correction siblings",
+      manifests: [
+        lineageManifest("root", "2026-09-14"),
+        lineageManifest("sibling-a", "2026-09-14", {
+          correction_of_extract_id: "root",
+        }),
+        lineageManifest("sibling-b", "2026-09-14", {
+          correction_of_extract_id: "root",
+        }),
+      ],
+      beforeDate: "2026-09-15",
+      message: "ambiguous",
+    },
+    {
+      name: "correction_of_extract_id cycle with no entry point",
+      manifests: [
+        lineageManifest("cycle-a", "2026-09-14", {
+          correction_of_extract_id: "cycle-c",
+        }),
+        lineageManifest("cycle-b", "2026-09-14", {
+          correction_of_extract_id: "cycle-a",
+        }),
+        lineageManifest("cycle-c", "2026-09-14", {
+          correction_of_extract_id: "cycle-b",
+        }),
+      ],
+      beforeDate: "2026-09-15",
+      message: "no root",
+    },
+    {
+      name: "orphan correction claiming an absent parent",
+      manifests: [
+        lineageManifest("root", "2026-09-14"),
+        lineageManifest("orphan", "2026-09-14", {
+          correction_of_extract_id: "ghost-id-not-present",
+        }),
+      ],
+      beforeDate: "2026-09-15",
+      message: "orphan",
+    },
+    {
+      // beforeDate is the child's OWN date (excluded by the strict "<"
+      // period filter), so the resolver picks the root's date (09-14) as
+      // the latest prior period and walks forward from it - discovering
+      // the cross-date child as a candidate correction child of root via
+      // correctionChildren(), which is what actually raises this error.
+      name: "cross-effective-date correction edge",
+      manifests: [
+        lineageManifest("root", "2026-09-14"),
+        lineageManifest("cross-date-child", "2026-09-15", {
+          correction_of_extract_id: "root",
+        }),
+      ],
+      beforeDate: "2026-09-15",
+      message: "effective date does not match",
+    },
+  ];
+  for (const entry of cases) {
+    assert.throws(
+      () =>
+        resolveAuthoritativePriorPeriodManifest({
+          manifests: entry.manifests,
+          beforeDate: entry.beforeDate,
+        }),
+      new RegExp(entry.message),
+      entry.name,
+    );
+  }
+});
+
+test("resolveAuthoritativePriorPeriodManifest ignores portfolio scope: preserves the existing quality-warning contract instead of filtering by it", () => {
+  // assessExtractQuality() already treats a scope mismatch between an
+  // extract and its resolved previousManifest as a "different_portfolio_scope"
+  // quality warning, not a reason to pick a different baseline. The
+  // effective-date resolver deliberately preserves that contract rather than
+  // becoming scope-aware itself.
+  const A = lineageManifest("A", "2026-09-04", {
+    source_metadata: { portfolio_scope: "claims" },
+  });
+  const result = resolveAuthoritativePriorPeriodManifest({
+    manifests: [A],
+    beforeDate: "2026-09-14",
+  });
+  assert.equal(result.id, A.id);
+  const quality = assessExtractQuality(
+    { quality: { hard_rejection: false, accepted_claim_count: 5 } },
+    {
+      previousManifest: result,
+      sourceMetadata: { portfolio_scope: "broker" },
+    },
+  );
+  assert.ok(quality.warnings.includes("different_portfolio_scope"));
+});
+
+test("resolveLatestAuthoritativeManifest reports the latest authoritative EFFECTIVE period, not the latest received row", () => {
+  const { A, B, C, D, E } = realSequenceFixture();
+  // Before D exists: E (received later) must not outrank C's effective date.
+  assert.equal(
+    resolveLatestAuthoritativeManifest({ manifests: [A, B, C] }).id,
+    C.id,
+  );
+  // Once D (2026-09-15) exists, it is the latest effective period even
+  // though E (2026-09-14, corrected) was received after it.
+  assert.equal(
+    resolveLatestAuthoritativeManifest({ manifests: [A, B, C, D, E] }).id,
+    D.id,
+  );
+});
+
+// ── Ordinary (implicit) same-date correction lineage ──────────────────────
+// An ordinary upload (no explicit correctionOfExtractId) for a date Scout
+// already has an authoritative extract for becomes an implicit correction of
+// that same-date head - PR #15's original contract. This must stay separate
+// from the genuine prior-period comparison baseline (previousManifest),
+// which resolveAuthoritativePriorPeriodManifest() always resolves strictly
+// before the upload's date and therefore never same-date.
+test("resolveOrdinaryUploadLineage: a same-date re-upload targets the existing head, with the prior period as a separate, earlier baseline", () => {
+  const A = lineageManifest("A-2026-09-14", "2026-09-14");
+  const B = lineageManifest("B-2026-09-15-original", "2026-09-15", {
+    previous_extract_id: A.id,
+  });
+  // This is the exact upload-time view: B exists, C does not yet.
+  const result = resolveOrdinaryUploadLineage({
+    manifests: [A, B],
+    extractDate: "2026-09-15",
+  });
+  assert.equal(result.correctionTargetManifest.id, B.id);
+  assert.equal(result.previousManifest.id, A.id);
+  assert.notEqual(result.previousManifest.id, B.id);
+});
+
+test("resolveOrdinaryUploadLineage: no same-date manifest means no implicit correction target", () => {
+  const A = lineageManifest("A-2026-09-14", "2026-09-14");
+  const result = resolveOrdinaryUploadLineage({
+    manifests: [A],
+    extractDate: "2026-09-22",
+  });
+  assert.equal(result.correctionTargetManifest, null);
+  assert.equal(result.previousManifest.id, A.id);
+});
+
+test("resolveOrdinaryUploadLineage: repeated same-date re-uploads form B -> C -> D with exactly one authoritative head", () => {
+  const A = lineageManifest("A-2026-09-14", "2026-09-14");
+  const B = lineageManifest("B-2026-09-15-original", "2026-09-15", {
+    previous_extract_id: A.id,
+  });
+  // Upload-time view when C is created: only A and B exist yet.
+  const forC = resolveOrdinaryUploadLineage({
+    manifests: [A, B],
+    extractDate: "2026-09-15",
+  });
+  assert.equal(forC.correctionTargetManifest.id, B.id);
+  assert.equal(forC.previousManifest.id, A.id);
+
+  const C = lineageManifest("C-2026-09-15-reupload", "2026-09-15", {
+    previous_extract_id: A.id,
+    correction_of_extract_id: forC.correctionTargetManifest.id,
+  });
+  // Upload-time view when D is created: A, B, C all exist.
+  const forD = resolveOrdinaryUploadLineage({
+    manifests: [A, B, C],
+    extractDate: "2026-09-15",
+  });
+  assert.equal(
+    forD.correctionTargetManifest.id,
+    C.id,
+    "the current authoritative head is C, not the original B",
+  );
+  assert.equal(forD.previousManifest.id, A.id);
+
+  const D = lineageManifest("D-2026-09-15-second-reupload", "2026-09-15", {
+    previous_extract_id: A.id,
+    correction_of_extract_id: forD.correctionTargetManifest.id,
+  });
+  const allFour = [A, B, C, D];
+  // Exactly one authoritative 09-15 head afterward: D.
+  assert.equal(
+    resolveOrdinaryUploadLineage({ manifests: allFour, extractDate: "2026-09-16" })
+      .correctionTargetManifest,
+    null,
+  );
+  assert.equal(
+    resolveLatestAuthoritativeManifest({ manifests: allFour }).id,
+    D.id,
+  );
+  // A future ordinary upload for a later date resolves its prior-period
+  // baseline to D, the current 09-15 head - not B, not C.
+  assert.equal(
+    resolveAuthoritativePriorPeriodManifest({
+      manifests: allFour,
+      beforeDate: "2026-09-22",
+    }).id,
+    D.id,
+  );
+});
+
+test("resolveOrdinaryUploadLineage fails closed before any write when the same-date authority is malformed", () => {
+  const cases = [
+    {
+      name: "ambiguous independent extracts",
+      manifests: [
+        lineageManifest("root-a", "2026-09-15"),
+        lineageManifest("root-b", "2026-09-15"),
+      ],
+      message: "ambiguous",
+    },
+    {
+      name: "orphan correction",
+      manifests: [
+        lineageManifest("root", "2026-09-15"),
+        lineageManifest("orphan", "2026-09-15", {
+          correction_of_extract_id: "ghost-id-not-present",
+        }),
+      ],
+      message: "orphan",
+    },
+    {
+      name: "cross-effective-date correction edge",
+      manifests: [
+        lineageManifest("root", "2026-09-14"),
+        lineageManifest("cross-date-child", "2026-09-15", {
+          correction_of_extract_id: "root",
+        }),
+      ],
+      message: "effective date does not match",
+    },
+  ];
+  for (const entry of cases) {
+    assert.throws(
+      () =>
+        resolveOrdinaryUploadLineage({
+          manifests: entry.manifests,
+          extractDate: "2026-09-15",
+        }),
+      new RegExp(entry.message),
+      entry.name,
+    );
+  }
+});
+
+test("change ledger for a same-date corrected re-upload compares against the genuine prior period, not the superseded same-date original", () => {
+  // A: 09-14 authoritative, claim X = Registered
+  // B: 09-15 original,      claim X = Payment Requested
+  // C: 09-15 corrected re-upload (same-date correction of B), claim X = Registered
+  //
+  // C must NOT be reported as "Payment Requested -> Registered" merely
+  // because B was the immediately-preceding same-date version - that status
+  // never genuinely changed relative to the true prior period, A.
+  const ids = new Map();
+  const aNormalized = normalize(
+    [{ claimNo: "X-1", status: "Registered", handler: "handler-a@example.test" }],
+    "2026-09-14",
+  );
+  const bNormalized = normalize(
+    [{ claimNo: "X-1", status: "Payment Requested", handler: "handler-a@example.test" }],
+    "2026-09-15",
+  );
+  const cNormalized = normalize(
+    [{ claimNo: "X-1", status: "Registered", handler: "handler-a@example.test" }],
+    "2026-09-15",
+  );
+  const aSnapshots = assignClaimIds(aNormalized.snapshots, ids);
+  const bSnapshots = assignClaimIds(bNormalized.snapshots, ids);
+  const cSnapshots = assignClaimIds(cNormalized.snapshots, ids);
+
+  const qualitySummary = { normalized_claim_count: 1, completeness_state: "complete", comparable_to_previous: true };
+  const aManifest = manifest("A-2026-09-14", "2026-09-14T08:00:00.000Z", qualitySummary);
+  const bManifest = manifest("B-2026-09-15-original", "2026-09-15T08:00:00.000Z", qualitySummary, {
+    previous_extract_id: aManifest.id,
+    correction_of_extract_id: null,
+    historical_persisted: true,
+  });
+  const cManifest = manifest("C-2026-09-15-reupload", "2026-09-15T09:00:00.000Z", qualitySummary, {
+    previous_extract_id: aManifest.id,
+    correction_of_extract_id: bManifest.id,
+    historical_persisted: true,
+  });
+
+  // This is what preserveHistoricalExtract() actually resolves for C at
+  // upload time (A and B already accepted+persisted, C not yet created).
+  const lineageForC = resolveOrdinaryUploadLineage({
+    manifests: [
+      { ...aManifest, source_system: "cardinal_claims", status: "accepted", historical_persisted: true },
+      { ...bManifest, source_system: "cardinal_claims", status: "accepted" },
+    ],
+    extractDate: "2026-09-15",
+  });
+  assert.equal(lineageForC.correctionTargetManifest.id, bManifest.id);
+  assert.equal(lineageForC.previousManifest.id, aManifest.id);
+
+  const changesAgainstResolvedBaseline = buildObservedChanges(
+    aManifest,
+    aSnapshots,
+    cManifest,
+    cSnapshots,
+  );
+  assert.equal(
+    changesAgainstResolvedBaseline.some(
+      (change) => change.change_type === "status_changed",
+    ),
+    false,
+    "no false status change against the genuine prior period",
+  );
+
+  // Contrast: comparing against B (the superseded same-date original,
+  // exactly what the bug this fix prevents would have done) DOES produce a
+  // false status_changed row - demonstrating why the two lineage concepts
+  // must not be conflated.
+  const changesAgainstSupersededOriginal = buildObservedChanges(
+    bManifest,
+    bSnapshots,
+    cManifest,
+    cSnapshots,
+  );
+  assert.equal(
+    changesAgainstSupersededOriginal.some(
+      (change) => change.change_type === "status_changed",
+    ),
+    true,
+  );
+});
+
+test("computeSourceChecksum: same nominal date with a different payload produces a different checksum", async () => {
   const first = await computeSourceChecksum({
     extractDate: "2026-08-24",
     claims: [{ claimNo: "C-1", status: "Registered" }],
