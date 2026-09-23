@@ -23,6 +23,33 @@ test("source status aliases preserve the intended operational meaning", () => {
   );
 });
 
+test("missing-value sentinels normalize to empty so they are not flagged unmapped", () => {
+  // Only "[none]" is evidenced by the authoritative 09-15 Cardinal source
+  // capture as a missing-status placeholder. Other candidate spellings are
+  // deliberately NOT sentinels until source evidence justifies adding them  -
+  // see the comment above MISSING_STATUS_SENTINELS.
+  assert.equal(normalizeSourceStatus("[none]"), "");
+  assert.equal(normalizeSourceStatus(" [NONE] "), "");
+  assert.equal(normalizeSourceStatus(""), "");
+  assert.equal(normalizeSourceStatus(null), "");
+  // Genuine statuses that merely contain the letters "none" must not be swallowed.
+  assert.equal(
+    normalizeSourceStatus("Recovery abandoned : third party untraceable"),
+    "recovery abandoned : third party untraceable",
+  );
+});
+
+test("unevidenced missing-value spellings are not treated as sentinels", () => {
+  // These are plausible missing-value spellings but are not (yet) evidenced
+  // as values Cardinal actually emits, so they must normalize to themselves
+  // and be reportable as genuine unmapped statuses rather than being
+  // silently swallowed as "missing".
+  assert.equal(normalizeSourceStatus("(none)"), "(none)");
+  assert.equal(normalizeSourceStatus("none"), "none");
+  assert.equal(normalizeSourceStatus("N/A"), "n / a");
+  assert.equal(normalizeSourceStatus(" n / a "), "n / a");
+});
+
 test("handler identity comparison is dynamic and order-insensitive", () => {
   assert.equal(handlerIdentityKey("De Beer, Bev"), "debeerbev");
   assert.equal(sameHandlerIdentity("De Beer Bev", "Bev De Beer"), true);

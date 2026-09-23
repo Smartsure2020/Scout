@@ -149,6 +149,7 @@ const STATUS_RULE_ENTRIES = [
   ["Awaiting payment for excess buyback", 7, 14, "payment"],
   ["Awaiting excess from client/insured", 7, 14, "payment"],
   ["TP insurer awaits Section 2 excess", 7, 14, "payment"],
+  ["Awaiting client's Section 2 excess", 7, 14, "payment"],
   ["Release received - await payment", 5, 10, "payment"],
   ["Interim Payment", 7, 14, "payment"],
   ["Settlement Pending", 5, 10, "payment"],
@@ -388,6 +389,17 @@ export function evaluateSla(claim, { asOfDate, onUnsupported = "throw" } = {}) {
     return result;
   }
   if (!status.mapped) {
+    // A missing source status ("" after normalization, e.g. "[none]") is a
+    // data-quality gap, not a genuine unmapped taxonomy entry. Keep it out of
+    // sla_summary.unmapped / unmapped_statuses_excluded_from_denominator so
+    // reporting doesn't conflate "Cardinal sent no status" with "Cardinal
+    // sent a status Scout doesn't recognise yet".
+    if (status.normalizedStatus === "") {
+      result.state = "unknown";
+      result.classification = "missing_status";
+      result.reasonCode = "missing-status";
+      return result;
+    }
     result.state = "unmapped";
     result.classification = "unmapped";
     result.reasonCode = "status-not-mapped";

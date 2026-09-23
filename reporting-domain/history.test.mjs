@@ -247,6 +247,43 @@ test("the four corrected taxonomy labels stay mapped through history normalizati
   }
 });
 
+test("client Section 2 excess is mapped and does not count as unmapped", () => {
+  const result = normalize([
+    { claimNo: "CLIENT-S2-1", status: "Awaiting client's Section 2 excess" },
+    { claimNo: "CLIENT-S2-2", status: "awaiting client's section 2 excess" },
+  ]);
+  assert.equal(result.quality.unmapped_status_count, 0);
+  for (const snapshot of result.snapshots) {
+    assert.equal(snapshot.operational_category, "payment");
+    assert.equal(
+      snapshot.data_quality_flags.includes("unmapped_status"),
+      false,
+    );
+  }
+});
+
+test("[none] sentinel is treated as missing status, not unmapped", () => {
+  const result = normalize([
+    { claimNo: "NONE-1", status: "[none]" },
+    { claimNo: "NONE-2", status: " [NONE] " },
+  ]);
+  assert.equal(result.snapshots.length, 2);
+  assert.equal(result.quality.unmapped_status_count, 0);
+  for (const snapshot of result.snapshots) {
+    assert.equal(
+      snapshot.data_quality_flags.includes("unmapped_status"),
+      false,
+    );
+    assert.equal(
+      snapshot.data_quality_flags.includes("missing_status"),
+      true,
+    );
+    // The claim itself remains accepted (buildSnapshot only rejects rows
+    // missing a claim number, not rows missing a status).
+    assert.equal(snapshot.terminal, false);
+  }
+});
+
 function lineageManifest(id, effectiveDate, overrides = {}) {
   return {
     id,

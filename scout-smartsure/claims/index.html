@@ -3843,7 +3843,13 @@ function normaliseStatus(s) {
     .replace(/\s*-\s*/g, " - ")
     .trim()
     .toLowerCase();
-  return window.ScoutClaimsQA?.normalizeSourceStatus?.(s) || STATUS_ALIASES[normalized] || normalized;
+  // Prefer the shared normalizer's result when it exists, including its
+  // deliberate empty-string result for missing-value sentinels like "[none]".
+  // Truthy-fallback here would incorrectly resurrect "[none]" as an unmapped
+  // status. Use defined/null checks rather than || .
+  const shared = window.ScoutClaimsQA?.normalizeSourceStatus?.(s);
+  if (shared !== undefined && shared !== null) return shared;
+  return STATUS_ALIASES[normalized] || normalized;
 }
 
 // MOTOR PERILS
@@ -4043,6 +4049,7 @@ const STATUS_RULES = {
   "Awaiting payment for excess buyback":      { stale:7,  critical:14,  cat:"payment",        action:"Follow up on excess buyback payment" },
   "Awaiting excess from client/insured":      { stale:7,  critical:14,  cat:"payment",        action:"Chase excess from client" },
   "TP insurer awaits Section 2 excess":       { stale:7,  critical:14,  cat:"payment",        action:"Follow up on Section 2 excess so TP insurer can proceed" },
+  "Awaiting client's Section 2 excess":       { stale:7,  critical:14,  cat:"payment",        action:"Chase Section 2 excess from client" },
   "Release received - await payment":         { stale:5,  critical:10,  cat:"payment",        action:"Process payment following release" },
   "Interim Payment":                          { stale:7,  critical:14,  cat:"payment",        action:"Follow up on interim payment" },
   "Settlement Pending":                       { stale:5,  critical:10,  cat:"payment",        action:"Finalise settlement" },
@@ -4130,6 +4137,14 @@ const STATUS_RULES_LC = Object.fromEntries(
 
 function getStatusRule(status) {
   return STATUS_RULES_LC[normaliseStatus(status)];
+}
+
+// A claim has a "missing" status when Cardinal sent no usable value (a blank
+// cell or a recognised missing-value sentinel like "[none]", which
+// normaliseStatus reduces to ""). That is a data-quality gap, distinct from
+// an "unmapped" status  -  a real status Scout's taxonomy doesn't cover yet.
+function hasSemanticStatus(status) {
+  return normaliseStatus(status) !== "";
 }
 
 // Terminal statuses  -  no SLA needed, excluded from priority scoring
@@ -4367,13 +4382,16 @@ function getPriority(claim) {
       flags.push({ label: staleLegal ? "Recovery overdue — monthly attorney update needed" : "Legal / recovery", level: "amber" });
       score += staleLegal ? 45 : 15;
     }
-  } else {
-    // Unmapped status  -  only flag if very old
+  } else if (hasSemanticStatus(claim.status)) {
+    // Genuinely unmapped status  -  only flag if very old
     if (claim.workingAge >= 45) {
       flags.push({ label: claim.workingAge + "wd  -  status not mapped", level: "amber" });
       score += 15;
     }
   }
+  // Missing status (no rule, no semantic status): no fabricated category, no
+  // unmapped-taxonomy warning, no invented SLA threshold. Score stays
+  // neutral; the gap is surfaced separately via dataQualityFlagsForClaim.
 
   if (!isLegalStatus && Number.isFinite(movementDays)) {
     if (movementDays > 30) {
@@ -4419,7 +4437,11 @@ function getPriority(claim) {
     score += closureCandidate.priority === "P1" ? 80 : 40;
   }
 
-  const recommendedAction = rule ? rule.action : "Review  -  status not yet mapped in Scout";
+  const recommendedAction = rule
+    ? rule.action
+    : hasSemanticStatus(claim.status)
+      ? "Review  -  status not yet mapped in Scout"
+      : "Capture claim status";
   return { score, flags, action: recommendedAction };
 }
 
@@ -5135,7 +5157,8 @@ function dataQualityFlagsForClaim(c) {
   if (getStatusRule(c.status)?.cat === "repudiated" && !c.repudiationDate) flags.push("Repudiated status has no repudiation date");
   if (c.ageDiscrepancy) flags.push(`Cardinal age differs by ${c.ageDiscrepancyDays}wd`);
   if (!c.handlerEmail && !isKnownHandlerName(c.handlerRaw, c.handler)) flags.push("Unrecognised handler name");
-  if (!getStatusRule(c.status) && !isTerminalStatus(c.status)) flags.push("Unmapped status");
+  if (!hasSemanticStatus(c.status)) flags.push("Missing status");
+  else if (!getStatusRule(c.status) && !isTerminalStatus(c.status)) flags.push("Unmapped status");
   return flags;
 }
 
@@ -5149,7 +5172,11 @@ function buildDataQualityReport(data = getProcessedClaims()) {
   const repudiatedWithoutDate = data.filter(c => getStatusRule(c.status)?.cat === "repudiated" && !c.repudiationDate);
   const ageDiscrepancies = data.filter(c => c.ageDiscrepancy);
   const unrecognisedHandlers = data.filter(c => !c.handlerEmail && !isKnownHandlerName(c.handlerRaw, c.handler));
-  const unmappedStatuses = data.filter(c => !getStatusRule(c.status) && !isTerminalStatus(c.status));
+  // Missing (no source status, e.g. Cardinal's "[none]" sentinel) is a distinct
+  // data-quality gap from unmapped (a real status Scout's taxonomy doesn't
+  // cover yet)  -  a missing-status claim must never also count as unmapped.
+  const missingStatuses = data.filter(c => !hasSemanticStatus(c.status));
+  const unmappedStatuses = data.filter(c => hasSemanticStatus(c.status) && !getStatusRule(c.status) && !isTerminalStatus(c.status));
   const issueCount =
     duplicateClaimNos.length +
     estimateNoOutstanding.length +
@@ -5159,6 +5186,7 @@ function buildDataQualityReport(data = getProcessedClaims()) {
     repudiatedWithoutDate.length +
     ageDiscrepancies.length +
     unrecognisedHandlers.length +
+    missingStatuses.length +
     unmappedStatuses.length;
 
   return {
@@ -5171,6 +5199,7 @@ function buildDataQualityReport(data = getProcessedClaims()) {
     repudiatedWithoutDate,
     ageDiscrepancies,
     unrecognisedHandlers,
+    missingStatuses,
     unmappedStatuses,
     changeDetails,
   };
@@ -5187,6 +5216,7 @@ function dataQualityUploadSummary(report) {
   if (report.repudiatedWithoutDate.length) parts.push(`${report.repudiatedWithoutDate.length} repudiated claim(s) missing repudiation date`);
   if (report.ageDiscrepancies.length) parts.push(`${report.ageDiscrepancies.length} age discrepancy/discrepancies`);
   if (report.unrecognisedHandlers.length) parts.push(`${report.unrecognisedHandlers.length} unrecognised handler name(s)`);
+  if (report.missingStatuses.length) parts.push(`${report.missingStatuses.length} missing status(es)`);
   if (report.unmappedStatuses.length) parts.push(`${report.unmappedStatuses.length} unmapped status(es)`);
   const changes = report.changeDetails;
   if (changes) {
@@ -6869,6 +6899,7 @@ function renderDataQualityReport(data = getProcessedClaims()) {
     ["Repudiation date missing", r.repudiatedWithoutDate.length, "Repudiated status has no trusted repudiation date", "amber"],
     ["Age discrepancy", r.ageDiscrepancies.length, "Cardinal age differs from calculated registered-date age by more than 2 days", "amber"],
     ["Unrecognised handlers", r.unrecognisedHandlers.length, "Handler name is not in the known Scout handler list", "amber"],
+    ["Missing statuses", r.missingStatuses.length, "Cardinal sent no status for this claim", "amber"],
     ["Unmapped statuses", r.unmappedStatuses.length, "Status has no Scout SLA rule yet", "amber"],
     ["New claims", changes.hasPrevious ? changes.newClaims.length : "—", changes.hasPrevious ? "Current extract, not present in previous upload" : "Comparison unavailable", "accent"],
     ["Closed / terminal", changes.hasPrevious ? changes.closedClaims.length : "—", changes.hasPrevious ? "Missing from current extract or now terminal" : "Comparison unavailable", "green"],
