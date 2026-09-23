@@ -4,6 +4,20 @@ const STATUS_ALIASES = Object.freeze({
   "settled - tp approach pending": "settled - tp approach pending",
 });
 
+// Sentinels the source system emits when the status cell is intentionally empty.
+// These normalize to "" so downstream evaluators classify the row as missing
+// status, not unmapped status. Values below are compared post-normalization
+// (already trimmed, lowercased, and with slash-spacing applied), so include
+// the post-normalization spelling (e.g. "n / a" rather than "n/a").
+// Scoped to only the spelling evidenced in the authoritative 09-15 Cardinal
+// source capture. Do not add further spellings ("none", "(none)", "n/a", ...)
+// without source evidence that Cardinal actually emits them as a missing-value
+// placeholder  -  an unevidenced sentinel would silently suppress a genuine
+// unmapped-status warning for whatever real status happens to collide with it.
+const MISSING_STATUS_SENTINELS = new Set([
+  "[none]",
+]);
+
 export function normalizeSourceStatus(value) {
   const normalized = String(value ?? "")
     .normalize("NFKC")
@@ -13,6 +27,7 @@ export function normalizeSourceStatus(value) {
     .replace(/\s*-\s*/g, " - ")
     .trim()
     .toLowerCase();
+  if (MISSING_STATUS_SENTINELS.has(normalized)) return "";
   return STATUS_ALIASES[normalized] || normalized;
 }
 
