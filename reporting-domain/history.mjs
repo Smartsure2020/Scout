@@ -90,9 +90,118 @@ function resolveCorrectionHead(manifests, predecessor, sourceSystem, visited) {
 }
 
 /**
+ * Resolve the single accepted+persisted root (correction_of_extract_id ===
+ * null) among `sameDate` manifests, then walk forward through its accepted
+ * correction chain to the authoritative head for that effective date.
+ * Fails closed - via correctionChildren's own checks plus the orphan check
+ * here - rather than silently guessing whenever the manifests for that date
+ * don't form exactly one clean chain (no root, multiple roots, correction
+ * siblings, cycles, cross-date edges, or a correction whose declared parent
+ * isn't reachable from the root).
+ */
+function resolveAuthoritativeHeadForDate(candidates, date, sourceSystem) {
+  const sameDate = candidates.filter(
+    (manifest) => manifest.effective_date === date,
+  );
+  const roots = sameDate.filter(
+    (manifest) => !manifest.correction_of_extract_id,
+  );
+  if (roots.length === 0)
+    throw new HistoryCorrectionLineageError(
+      `no root extract found for effective date ${date}`,
+    );
+  if (roots.length > 1)
+    throw new HistoryCorrectionLineageError(
+      `ambiguous independent extracts for effective date ${date}`,
+    );
+  const [root] = roots;
+  const visited = new Set([root.id]);
+  const head = resolveCorrectionHead(candidates, root, sourceSystem, visited);
+  const orphans = sameDate.filter((manifest) => !visited.has(manifest.id));
+  if (orphans.length > 0)
+    throw new HistoryCorrectionLineageError(
+      `orphan correction(s) for effective date ${date}: ${orphans
+        .map((manifest) => manifest.id)
+        .join(", ")}`,
+    );
+  return head;
+}
+
+/**
+ * Resolve the authoritative accepted+persisted manifest for the most recent
+ * effective period strictly before `beforeDate` - by effective_date, never
+ * by received_at/upload order. A correction received after a later
+ * effective-date extract must not be able to displace that later period as
+ * the comparison baseline just because it was received more recently.
+ *
+ * Portfolio/source scope is deliberately NOT part of this selection: the
+ * existing assessExtractQuality() contract already treats a scope mismatch
+ * between an extract and its resolved previousManifest as a downstream
+ * quality warning (different_portfolio_scope), not a reason to pick a
+ * different baseline. This preserves that contract as-is.
+ *
+ * Returns null if no prior effective period exists.
+ */
+export function resolveAuthoritativePriorPeriodManifest({
+  manifests = [],
+  beforeDate,
+  sourceSystem = DEFAULT_SOURCE_SYSTEM,
+} = {}) {
+  if (!beforeDate) return null;
+  const candidates = (Array.isArray(manifests) ? manifests : []).filter(
+    (manifest) => acceptedPersistedManifest(manifest, sourceSystem),
+  );
+  const priorDates = candidates
+    .map((manifest) => manifest.effective_date)
+    .filter((date) => typeof date === "string" && date < beforeDate);
+  if (priorDates.length === 0) return null;
+  const latestPriorDate = priorDates.reduce((max, date) =>
+    date > max ? date : max,
+  );
+  return resolveAuthoritativeHeadForDate(
+    candidates,
+    latestPriorDate,
+    sourceSystem,
+  );
+}
+
+/**
+ * Resolve the authoritative accepted+persisted manifest for the most recent
+ * effective period overall (no upper bound) - the effective-period-aware
+ * equivalent of "the latest history extract". Used by /history/latest so a
+ * backdated correction received today can't make it report an older
+ * effective period than one that's already live.
+ *
+ * Returns null if no accepted+persisted manifest exists at all.
+ */
+export function resolveLatestAuthoritativeManifest({
+  manifests = [],
+  sourceSystem = DEFAULT_SOURCE_SYSTEM,
+} = {}) {
+  const candidates = (Array.isArray(manifests) ? manifests : []).filter(
+    (manifest) => acceptedPersistedManifest(manifest, sourceSystem),
+  );
+  const dates = candidates
+    .map((manifest) => manifest.effective_date)
+    .filter((date) => typeof date === "string");
+  if (dates.length === 0) return null;
+  const latestDate = dates.reduce((max, date) => (date > max ? date : max));
+  return resolveAuthoritativeHeadForDate(candidates, latestDate, sourceSystem);
+}
+
+/**
  * Resolve the genuine prior-period baseline for an explicit correction.
  * The target itself must be an accepted, persisted extract for the requested
  * date and must not already have an accepted persisted correction child.
+ *
+ * The prior period is resolved by effective_date via
+ * resolveAuthoritativePriorPeriodManifest(), NOT by walking the target's own
+ * stored previous_extract_id. That stored pointer is immutable historical
+ * evidence of how the target was originally processed - it can be wrong (a
+ * backdated correction received after a later extract stores a previous
+ * pointer to whatever was most recently received, not the true prior
+ * period), and trusting it here would let a stale/incorrect pointer on an
+ * earlier extract silently propagate into a later correction's baseline.
  */
 export function resolveCorrectionBaseline({
   manifests = [],
@@ -140,42 +249,14 @@ export function resolveCorrectionBaseline({
       `correction target ${target.id} is already superseded`,
     );
 
-  const visited = new Set([target.id]);
-  let predecessorId = target.previous_extract_id || null;
-  while (predecessorId) {
-    if (visited.has(predecessorId))
-      throw new HistoryCorrectionLineageError(
-        "previous-extract lineage cycle detected",
-      );
-    visited.add(predecessorId);
-    const predecessor = byId.get(predecessorId);
-    if (!predecessor)
-      throw new HistoryCorrectionLineageError(
-        `previous extract ${predecessorId} was not found`,
-      );
-    if (predecessor.source_system !== sourceSystem)
-      throw new HistoryCorrectionLineageError(
-        `previous extract ${predecessor.id} source system does not match`,
-      );
-    if (predecessor.effective_date === target.effective_date) {
-      predecessorId = predecessor.previous_extract_id || null;
-      continue;
-    }
-    if (!acceptedPersistedManifest(predecessor, sourceSystem))
-      throw new HistoryCorrectionLineageError(
-        `prior-period extract ${predecessor.id} is not accepted and persisted`,
-      );
-    return {
-      targetManifest: target,
-      previousManifest: resolveCorrectionHead(
-        candidates,
-        predecessor,
-        sourceSystem,
-        visited,
-      ),
-    };
-  }
-  return { targetManifest: target, previousManifest: null };
+  return {
+    targetManifest: target,
+    previousManifest: resolveAuthoritativePriorPeriodManifest({
+      manifests: candidates,
+      beforeDate: target.effective_date,
+      sourceSystem,
+    }),
+  };
 }
 
 export function assertCorrectionRetryLineage({

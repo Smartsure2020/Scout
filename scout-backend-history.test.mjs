@@ -71,7 +71,7 @@ async function runUploadRoute(
         return jsonResponse(existingManifest ? [existingManifest] : []);
       if (
         latestManifestFailure &&
-        parsed.searchParams.get("order") === "received_at.desc"
+        parsed.searchParams.get("order") === "received_at.asc"
       )
         return jsonResponse({ error: "mock latest-history failure" }, 500);
       if (parsed.searchParams.has("status"))
@@ -288,12 +288,15 @@ test("actual upload treats an omitted correction field as an ordinary upload", a
 
   assert.equal(result.status, 503);
   assert.notEqual(result.body.error, "invalid_correction_of_extract_id");
+  // Ordinary uploads resolve their predecessor from the full accepted
+  // manifest list (effective-date-aware), not a single received_at-latest
+  // row - see resolveAuthoritativePriorPeriodManifest().
   assert.equal(
     result.calls.some(
       (call) =>
         call.method === "GET" &&
         call.url.includes("/scout_history_extracts") &&
-        call.url.includes("order=received_at.desc"),
+        call.url.includes("order=received_at.asc"),
     ),
     true,
   );

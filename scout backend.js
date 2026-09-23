@@ -19,7 +19,9 @@ import {
   HistoryRetryLineageConflictError,
   assertCorrectionRetryLineage,
   normalizeHistoricalRows,
+  resolveAuthoritativePriorPeriodManifest,
   resolveCorrectionBaseline,
+  resolveLatestAuthoritativeManifest,
   safeHistorySnapshot,
   sourceChecksumPayload,
 } from "./reporting-domain/history.mjs";
@@ -264,19 +266,6 @@ async function getHistoryManifestById(env, id) {
     "/scout_history_extracts?id=eq." +
       encodeURIComponent(id) +
       "&select=*&limit=1",
-    "GET",
-    null,
-    true,
-  );
-  return rows?.[0] || null;
-}
-
-async function getLatestHistoryManifest(env, sourceSystem) {
-  const rows = await supabase(
-    env,
-    "/scout_history_extracts?source_system=eq." +
-      encodeURIComponent(sourceSystem) +
-      "&status=in.(accepted,accepted_with_warnings)&order=received_at.desc&select=*&limit=1",
     "GET",
     null,
     true,
@@ -586,7 +575,11 @@ async function preserveHistoricalExtract(
     ? correctionBaseline.previousManifest
     : existing?.previous_extract_id
       ? await getHistoryManifestById(env, existing.previous_extract_id)
-      : await getLatestHistoryManifest(env, DEFAULT_SOURCE_SYSTEM);
+      : resolveAuthoritativePriorPeriodManifest({
+          manifests: await getAcceptedReportManifests(env),
+          beforeDate: extractDate,
+          sourceSystem: DEFAULT_SOURCE_SYSTEM,
+        });
   const quality = assessExtractQuality(normalized, {
     previousManifest,
     sourceSystem: DEFAULT_SOURCE_SYSTEM,
@@ -2557,10 +2550,10 @@ export default {
       if (!["manager", "admin"].includes(currentUser.role))
         return err("Not authorised", 403);
       try {
-        const manifest = await getLatestHistoryManifest(
-          env,
-          DEFAULT_SOURCE_SYSTEM,
-        );
+        const manifest = resolveLatestAuthoritativeManifest({
+          manifests: await getAcceptedReportManifests(env),
+          sourceSystem: DEFAULT_SOURCE_SYSTEM,
+        });
         await audit(
           env,
           currentUser.email,
