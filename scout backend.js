@@ -22,6 +22,7 @@ import {
   resolveAuthoritativePriorPeriodManifest,
   resolveCorrectionBaseline,
   resolveLatestAuthoritativeManifest,
+  resolveOrdinaryUploadLineage,
   safeHistorySnapshot,
   sourceChecksumPayload,
 } from "./reporting-domain/history.mjs";
@@ -484,14 +485,12 @@ export function historicalManifestRecord({
     rejected_claim_count: normalized.quality.rejected_claim_count,
     quality_summary: quality,
     previous_extract_id: previousManifest?.id || null,
-    correction_of_extract_id:
-      correctionOfExtractId !== null && correctionOfExtractId !== undefined
-        ? correctionOfExtractId
-        : previousManifest?.effective_date &&
-            extractDate &&
-            previousManifest.effective_date === extractDate
-          ? previousManifest.id
-          : null,
+    // The caller resolves correction identity independently of
+    // previousManifest (which is always the genuine prior PERIOD, never
+    // same-date) - see resolveOrdinaryUploadLineage() for an ordinary
+    // upload's implicit same-date correction, and resolveCorrectionBaseline()
+    // for an explicit one.
+    correction_of_extract_id: correctionOfExtractId || null,
     source_metadata: sourceMetadata || {},
     status: quality.hard_rejection ? "rejected" : "processing",
     historical_persisted: false,
@@ -548,9 +547,10 @@ async function preserveHistoricalExtract(
 
   const correctionSupplied =
     correctionOfExtractId !== null && correctionOfExtractId !== undefined;
+  const acceptedManifests = await getAcceptedReportManifests(env);
   const correctionBaseline = correctionSupplied
     ? resolveCorrectionBaseline({
-        manifests: await getAcceptedReportManifests(env),
+        manifests: acceptedManifests,
         correctionOfExtractId,
         extractDate,
         sourceSystem: DEFAULT_SOURCE_SYSTEM,
@@ -565,21 +565,42 @@ async function preserveHistoricalExtract(
       previousManifest: correctionBaseline?.previousManifest || null,
     });
 
+  // An ordinary (non-explicit-correction) upload for a date Scout already
+  // has an authoritative extract for becomes an implicit correction of that
+  // same-date head - PR #15's original contract. This is resolved
+  // independently of previousManifest (always the genuine prior PERIOD, see
+  // resolveOrdinaryUploadLineage()'s doc comment for why the two must not
+  // be conflated). Only needed the first time a manifest is created; a
+  // retry of an already-created manifest keeps its own recorded lineage.
+  const ordinaryLineage =
+    !correctionSupplied && !existing
+      ? resolveOrdinaryUploadLineage({
+          manifests: acceptedManifests,
+          extractDate,
+          sourceSystem: DEFAULT_SOURCE_SYSTEM,
+        })
+      : null;
+  const resolvedCorrectionOfExtractId = correctionSupplied
+    ? correctionOfExtractId
+    : (ordinaryLineage?.correctionTargetManifest?.id ?? null);
+
   const users = await getActiveHistoryUsers(env);
   const normalized = normalizeHistoricalRows(claims, {
     sourceSystem: DEFAULT_SOURCE_SYSTEM,
     effectiveDate: extractDate || null,
     activeUsers: users.users,
   });
-  const previousManifest = correctionBaseline?.previousManifest
+  const previousManifest = correctionBaseline
     ? correctionBaseline.previousManifest
     : existing?.previous_extract_id
       ? await getHistoryManifestById(env, existing.previous_extract_id)
-      : resolveAuthoritativePriorPeriodManifest({
-          manifests: await getAcceptedReportManifests(env),
-          beforeDate: extractDate,
-          sourceSystem: DEFAULT_SOURCE_SYSTEM,
-        });
+      : ordinaryLineage
+        ? ordinaryLineage.previousManifest
+        : resolveAuthoritativePriorPeriodManifest({
+            manifests: acceptedManifests,
+            beforeDate: extractDate,
+            sourceSystem: DEFAULT_SOURCE_SYSTEM,
+          });
   const quality = assessExtractQuality(normalized, {
     previousManifest,
     sourceSystem: DEFAULT_SOURCE_SYSTEM,
@@ -615,7 +636,7 @@ async function preserveHistoricalExtract(
         quality,
         previousManifest,
         sourceMetadata,
-        correctionOfExtractId,
+        correctionOfExtractId: resolvedCorrectionOfExtractId,
       }),
       true,
       "resolution=ignore-duplicates,return=representation",

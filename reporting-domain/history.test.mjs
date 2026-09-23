@@ -13,6 +13,7 @@ import {
   resolveAuthoritativePriorPeriodManifest,
   resolveCorrectionBaseline,
   resolveLatestAuthoritativeManifest,
+  resolveOrdinaryUploadLineage,
   sourceChecksumPayload,
 } from "./history.mjs";
 
@@ -785,7 +786,220 @@ test("resolveLatestAuthoritativeManifest reports the latest authoritative EFFECT
   );
 });
 
-test("same nominal date with a different payload is a corrected version, not an overwrite", async () => {
+// ── Ordinary (implicit) same-date correction lineage ──────────────────────
+// An ordinary upload (no explicit correctionOfExtractId) for a date Scout
+// already has an authoritative extract for becomes an implicit correction of
+// that same-date head - PR #15's original contract. This must stay separate
+// from the genuine prior-period comparison baseline (previousManifest),
+// which resolveAuthoritativePriorPeriodManifest() always resolves strictly
+// before the upload's date and therefore never same-date.
+test("resolveOrdinaryUploadLineage: a same-date re-upload targets the existing head, with the prior period as a separate, earlier baseline", () => {
+  const A = lineageManifest("A-2026-09-14", "2026-09-14");
+  const B = lineageManifest("B-2026-09-15-original", "2026-09-15", {
+    previous_extract_id: A.id,
+  });
+  // This is the exact upload-time view: B exists, C does not yet.
+  const result = resolveOrdinaryUploadLineage({
+    manifests: [A, B],
+    extractDate: "2026-09-15",
+  });
+  assert.equal(result.correctionTargetManifest.id, B.id);
+  assert.equal(result.previousManifest.id, A.id);
+  assert.notEqual(result.previousManifest.id, B.id);
+});
+
+test("resolveOrdinaryUploadLineage: no same-date manifest means no implicit correction target", () => {
+  const A = lineageManifest("A-2026-09-14", "2026-09-14");
+  const result = resolveOrdinaryUploadLineage({
+    manifests: [A],
+    extractDate: "2026-09-22",
+  });
+  assert.equal(result.correctionTargetManifest, null);
+  assert.equal(result.previousManifest.id, A.id);
+});
+
+test("resolveOrdinaryUploadLineage: repeated same-date re-uploads form B -> C -> D with exactly one authoritative head", () => {
+  const A = lineageManifest("A-2026-09-14", "2026-09-14");
+  const B = lineageManifest("B-2026-09-15-original", "2026-09-15", {
+    previous_extract_id: A.id,
+  });
+  // Upload-time view when C is created: only A and B exist yet.
+  const forC = resolveOrdinaryUploadLineage({
+    manifests: [A, B],
+    extractDate: "2026-09-15",
+  });
+  assert.equal(forC.correctionTargetManifest.id, B.id);
+  assert.equal(forC.previousManifest.id, A.id);
+
+  const C = lineageManifest("C-2026-09-15-reupload", "2026-09-15", {
+    previous_extract_id: A.id,
+    correction_of_extract_id: forC.correctionTargetManifest.id,
+  });
+  // Upload-time view when D is created: A, B, C all exist.
+  const forD = resolveOrdinaryUploadLineage({
+    manifests: [A, B, C],
+    extractDate: "2026-09-15",
+  });
+  assert.equal(
+    forD.correctionTargetManifest.id,
+    C.id,
+    "the current authoritative head is C, not the original B",
+  );
+  assert.equal(forD.previousManifest.id, A.id);
+
+  const D = lineageManifest("D-2026-09-15-second-reupload", "2026-09-15", {
+    previous_extract_id: A.id,
+    correction_of_extract_id: forD.correctionTargetManifest.id,
+  });
+  const allFour = [A, B, C, D];
+  // Exactly one authoritative 09-15 head afterward: D.
+  assert.equal(
+    resolveOrdinaryUploadLineage({ manifests: allFour, extractDate: "2026-09-16" })
+      .correctionTargetManifest,
+    null,
+  );
+  assert.equal(
+    resolveLatestAuthoritativeManifest({ manifests: allFour }).id,
+    D.id,
+  );
+  // A future ordinary upload for a later date resolves its prior-period
+  // baseline to D, the current 09-15 head - not B, not C.
+  assert.equal(
+    resolveAuthoritativePriorPeriodManifest({
+      manifests: allFour,
+      beforeDate: "2026-09-22",
+    }).id,
+    D.id,
+  );
+});
+
+test("resolveOrdinaryUploadLineage fails closed before any write when the same-date authority is malformed", () => {
+  const cases = [
+    {
+      name: "ambiguous independent extracts",
+      manifests: [
+        lineageManifest("root-a", "2026-09-15"),
+        lineageManifest("root-b", "2026-09-15"),
+      ],
+      message: "ambiguous",
+    },
+    {
+      name: "orphan correction",
+      manifests: [
+        lineageManifest("root", "2026-09-15"),
+        lineageManifest("orphan", "2026-09-15", {
+          correction_of_extract_id: "ghost-id-not-present",
+        }),
+      ],
+      message: "orphan",
+    },
+    {
+      name: "cross-effective-date correction edge",
+      manifests: [
+        lineageManifest("root", "2026-09-14"),
+        lineageManifest("cross-date-child", "2026-09-15", {
+          correction_of_extract_id: "root",
+        }),
+      ],
+      message: "effective date does not match",
+    },
+  ];
+  for (const entry of cases) {
+    assert.throws(
+      () =>
+        resolveOrdinaryUploadLineage({
+          manifests: entry.manifests,
+          extractDate: "2026-09-15",
+        }),
+      new RegExp(entry.message),
+      entry.name,
+    );
+  }
+});
+
+test("change ledger for a same-date corrected re-upload compares against the genuine prior period, not the superseded same-date original", () => {
+  // A: 09-14 authoritative, claim X = Registered
+  // B: 09-15 original,      claim X = Payment Requested
+  // C: 09-15 corrected re-upload (same-date correction of B), claim X = Registered
+  //
+  // C must NOT be reported as "Payment Requested -> Registered" merely
+  // because B was the immediately-preceding same-date version - that status
+  // never genuinely changed relative to the true prior period, A.
+  const ids = new Map();
+  const aNormalized = normalize(
+    [{ claimNo: "X-1", status: "Registered", handler: "handler-a@example.test" }],
+    "2026-09-14",
+  );
+  const bNormalized = normalize(
+    [{ claimNo: "X-1", status: "Payment Requested", handler: "handler-a@example.test" }],
+    "2026-09-15",
+  );
+  const cNormalized = normalize(
+    [{ claimNo: "X-1", status: "Registered", handler: "handler-a@example.test" }],
+    "2026-09-15",
+  );
+  const aSnapshots = assignClaimIds(aNormalized.snapshots, ids);
+  const bSnapshots = assignClaimIds(bNormalized.snapshots, ids);
+  const cSnapshots = assignClaimIds(cNormalized.snapshots, ids);
+
+  const qualitySummary = { normalized_claim_count: 1, completeness_state: "complete", comparable_to_previous: true };
+  const aManifest = manifest("A-2026-09-14", "2026-09-14T08:00:00.000Z", qualitySummary);
+  const bManifest = manifest("B-2026-09-15-original", "2026-09-15T08:00:00.000Z", qualitySummary, {
+    previous_extract_id: aManifest.id,
+    correction_of_extract_id: null,
+    historical_persisted: true,
+  });
+  const cManifest = manifest("C-2026-09-15-reupload", "2026-09-15T09:00:00.000Z", qualitySummary, {
+    previous_extract_id: aManifest.id,
+    correction_of_extract_id: bManifest.id,
+    historical_persisted: true,
+  });
+
+  // This is what preserveHistoricalExtract() actually resolves for C at
+  // upload time (A and B already accepted+persisted, C not yet created).
+  const lineageForC = resolveOrdinaryUploadLineage({
+    manifests: [
+      { ...aManifest, source_system: "cardinal_claims", status: "accepted", historical_persisted: true },
+      { ...bManifest, source_system: "cardinal_claims", status: "accepted" },
+    ],
+    extractDate: "2026-09-15",
+  });
+  assert.equal(lineageForC.correctionTargetManifest.id, bManifest.id);
+  assert.equal(lineageForC.previousManifest.id, aManifest.id);
+
+  const changesAgainstResolvedBaseline = buildObservedChanges(
+    aManifest,
+    aSnapshots,
+    cManifest,
+    cSnapshots,
+  );
+  assert.equal(
+    changesAgainstResolvedBaseline.some(
+      (change) => change.change_type === "status_changed",
+    ),
+    false,
+    "no false status change against the genuine prior period",
+  );
+
+  // Contrast: comparing against B (the superseded same-date original,
+  // exactly what the bug this fix prevents would have done) DOES produce a
+  // false status_changed row - demonstrating why the two lineage concepts
+  // must not be conflated.
+  const changesAgainstSupersededOriginal = buildObservedChanges(
+    bManifest,
+    bSnapshots,
+    cManifest,
+    cSnapshots,
+  );
+  assert.equal(
+    changesAgainstSupersededOriginal.some(
+      (change) => change.change_type === "status_changed",
+    ),
+    true,
+  );
+});
+
+test("computeSourceChecksum: same nominal date with a different payload produces a different checksum", async () => {
   const first = await computeSourceChecksum({
     extractDate: "2026-08-24",
     claims: [{ claimNo: "C-1", status: "Registered" }],

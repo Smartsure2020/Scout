@@ -190,6 +190,54 @@ export function resolveLatestAuthoritativeManifest({
 }
 
 /**
+ * Resolve the two independent lineage concepts an ordinary (no explicit
+ * correctionOfExtractId) upload needs for effective date `extractDate`:
+ *
+ *  - correctionTargetManifest: the authoritative existing head for THIS
+ *    SAME effective date, if one already exists. A same-date re-upload with
+ *    a different payload becomes an implicit correction of it - this is
+ *    PR #15's original same-date-correction contract.
+ *  - previousManifest: the authoritative head for the genuine prior PERIOD
+ *    strictly before extractDate - the change-detection comparison
+ *    baseline, which by construction is never the same-date correction
+ *    target.
+ *
+ * These must stay separate. Inferring "this is an implicit correction" from
+ * `previousManifest.effective_date === extractDate` broke once
+ * previousManifest started being resolved by effective_date instead of
+ * received_at: it is then never same-date, so that inference could never
+ * fire again, and a same-date re-upload would silently become a second,
+ * ambiguous root instead of a correction.
+ *
+ * Fails closed if the same-date manifests for extractDate exist but don't
+ * form exactly one clean authoritative chain (see
+ * resolveAuthoritativeHeadForDate) - before any manifest/snapshot/change/
+ * current-state write happens, since callers resolve this ahead of persisting
+ * anything.
+ */
+export function resolveOrdinaryUploadLineage({
+  manifests = [],
+  extractDate,
+  sourceSystem = DEFAULT_SOURCE_SYSTEM,
+} = {}) {
+  const candidates = (Array.isArray(manifests) ? manifests : []).filter(
+    (manifest) => acceptedPersistedManifest(manifest, sourceSystem),
+  );
+  const previousManifest = resolveAuthoritativePriorPeriodManifest({
+    manifests: candidates,
+    beforeDate: extractDate,
+    sourceSystem,
+  });
+  const hasSameDate =
+    typeof extractDate === "string" &&
+    candidates.some((manifest) => manifest.effective_date === extractDate);
+  const correctionTargetManifest = hasSameDate
+    ? resolveAuthoritativeHeadForDate(candidates, extractDate, sourceSystem)
+    : null;
+  return { correctionTargetManifest, previousManifest };
+}
+
+/**
  * Resolve the genuine prior-period baseline for an explicit correction.
  * The target itself must be an accepted, persisted extract for the requested
  * date and must not already have an accepted persisted correction child.
