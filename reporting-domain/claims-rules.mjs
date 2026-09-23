@@ -389,6 +389,17 @@ export function evaluateSla(claim, { asOfDate, onUnsupported = "throw" } = {}) {
     return result;
   }
   if (!status.mapped) {
+    // A missing source status ("" after normalization, e.g. "[none]") is a
+    // data-quality gap, not a genuine unmapped taxonomy entry. Keep it out of
+    // sla_summary.unmapped / unmapped_statuses_excluded_from_denominator so
+    // reporting doesn't conflate "Cardinal sent no status" with "Cardinal
+    // sent a status Scout doesn't recognise yet".
+    if (status.normalizedStatus === "") {
+      result.state = "unknown";
+      result.classification = "missing_status";
+      result.reasonCode = "missing-status";
+      return result;
+    }
     result.state = "unmapped";
     result.classification = "unmapped";
     result.reasonCode = "status-not-mapped";

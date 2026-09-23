@@ -706,6 +706,46 @@ test("SLA excludes unmapped statuses from the denominator and handles breaches",
   assert.ok(report.coverage.warnings.includes("unmapped_statuses"));
 });
 
+test("SLA summary keeps a missing source status out of the unmapped taxonomy bucket", () => {
+  const opening = manifest("missing-status-opening", "2026-08-21", 0);
+  const closing = manifest("missing-status-closing", "2026-08-26", 2, {
+    previousExtractId: opening.id,
+  });
+  const closingRows = [
+    // "[none]" is the evidenced Cardinal sentinel for an empty status cell:
+    // a data-quality gap, not a genuine unmapped taxonomy entry.
+    snapshot("MISSING", closing.id, {
+      status: "[none]",
+      registeredDate: "2026-08-20",
+      calendarAge: 6,
+      workingAge: 4,
+      quality: ["missing_status"],
+    }),
+    snapshot("UNMAPPED", closing.id, {
+      status: "Mystery Status",
+      registeredDate: "2026-08-20",
+      calendarAge: 6,
+      workingAge: 4,
+      quality: ["unmapped_status"],
+    }),
+  ];
+  const report = buildReportSnapshot({
+    reportType: "weekly",
+    periodStart: "2026-08-24",
+    manifests: [opening, closing],
+    snapshotsByExtract: new Map([
+      [opening.id, []],
+      [closing.id, closingRows],
+    ]),
+    changes: [],
+    activeUsers: users,
+  });
+  const summary = report.metrics.sla_summary.value;
+  assert.equal(summary.unmapped, 1);
+  assert.deepEqual(summary.claim_ids_by_class.unmapped, ["UNMAPPED"]);
+  assert.deepEqual(summary.claim_ids_by_class.unknown, ["MISSING"]);
+});
+
 test("movement, Ready to Close, operational, financial, and dynamic handler metrics reuse canonical rules", () => {
   const report = buildReportSnapshot({
     reportType: "weekly",

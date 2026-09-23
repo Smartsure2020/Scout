@@ -150,12 +150,27 @@ test("Cardinal source status variants use the authoritative SLA taxonomy", () =>
   );
 });
 
-test("[none] and other missing-value sentinels are treated as missing, not unmapped or terminal", () => {
+test("[none] is treated as missing, not unmapped or terminal", () => {
   const evaluation = getStatusEvaluation("[none]");
   assert.equal(evaluation.normalizedStatus, "");
   assert.equal(evaluation.mapped, false);
   assert.equal(evaluation.terminal, false);
   assert.equal(evaluation.category, "unmapped");
+});
+
+test("evaluateSla reports a missing status as unknown, distinct from a genuinely unmapped status", () => {
+  const missing = evaluateSla({ status: "[none]", workingAge: 4 });
+  assert.equal(missing.state, "unknown");
+  assert.equal(missing.classification, "missing_status");
+  assert.equal(missing.reasonCode, "missing-status");
+  assert.equal(missing.compliant, false);
+  assert.equal(missing.breached, false);
+  assert.equal(missing.denominatorEligible, false);
+
+  const unmapped = evaluateSla({ status: "A status added later", workingAge: 4 });
+  assert.equal(unmapped.state, "unmapped");
+  assert.equal(unmapped.classification, "unmapped");
+  assert.equal(unmapped.reasonCode, "status-not-mapped");
 });
 
 test("calendar age and management bands use explicit as-of dates", () => {
