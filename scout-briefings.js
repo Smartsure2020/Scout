@@ -1025,7 +1025,7 @@ function historyQualityFlags(snapshot) {
 
 export function historySnapshotForBriefing(snapshot, manifest) {
   const qualityFlags = historyQualityFlags(snapshot);
-  const status = snapshot?.status_normalized || snapshot?.status_raw || "";
+  const status = snapshot?.status_normalized ?? snapshot?.status_raw ?? "";
   const handler =
     snapshot?.handler_source || snapshot?.handler_email || "Unassigned";
   const movementDate = historyDateOnly(snapshot?.movement_date);

@@ -952,6 +952,87 @@ test("history snapshot adapter maps briefing fields and derives safe movement an
   );
 });
 
+test("history snapshot adapter preserves an intentionally empty normalized status", () => {
+  const manifest = { effective_date: "2026-09-10" };
+  // A. Missing-sentinel preservation: canonical [none] persists as "" and must
+  // not be resurrected from status_raw by a truthy fallback.
+  const adapted = historySnapshotForBriefing(
+    {
+      status_raw: "[None]",
+      status_normalized: "",
+      data_quality_flags: [],
+    },
+    manifest,
+  );
+  assert.equal(adapted.status, "");
+  assert.notEqual(adapted.status, "[None]");
+});
+
+test("history snapshot adapter keeps a normal persisted normalized status", () => {
+  const manifest = { effective_date: "2026-09-10" };
+  // B. Normal normalized status is authoritative.
+  const adapted = historySnapshotForBriefing(
+    {
+      status_raw: "Awaiting Assessor Report",
+      status_normalized: "awaiting assessor report",
+      data_quality_flags: [],
+    },
+    manifest,
+  );
+  assert.equal(adapted.status, "awaiting assessor report");
+});
+
+test("history snapshot adapter does not broaden the missing-status sentinels", () => {
+  const manifest = { effective_date: "2026-09-10" };
+  // C. A persisted non-sentinel such as (none) must remain itself, never "".
+  const parenNone = historySnapshotForBriefing(
+    {
+      status_raw: "(None)",
+      status_normalized: "(none)",
+      data_quality_flags: [],
+    },
+    manifest,
+  );
+  assert.equal(parenNone.status, "(none)");
+  assert.notEqual(parenNone.status, "");
+
+  // "none" and "N/A" are ordinary statuses here and stay non-missing.
+  assert.equal(
+    historySnapshotForBriefing(
+      { status_raw: "none", status_normalized: "none", data_quality_flags: [] },
+      manifest,
+    ).status,
+    "none",
+  );
+  assert.equal(
+    historySnapshotForBriefing(
+      { status_raw: "N/A", status_normalized: "n/a", data_quality_flags: [] },
+      manifest,
+    ).status,
+    "n/a",
+  );
+});
+
+test("history snapshot adapter falls back to status_raw for legacy null normalized values", () => {
+  const manifest = { effective_date: "2026-09-10" };
+  // D. Legacy fallback: a null/undefined normalized value defers to status_raw,
+  // which nullish coalescing preserves while still respecting an empty string.
+  assert.equal(
+    historySnapshotForBriefing(
+      { status_raw: "Active", status_normalized: null, data_quality_flags: [] },
+      manifest,
+    ).status,
+    "Active",
+  );
+  assert.equal(
+    historySnapshotForBriefing(
+      { status_raw: "Active", data_quality_flags: [] },
+      manifest,
+    ).status,
+    "Active",
+  );
+});
+
 test("plan surfaces missing handler mappings as a warning only", async () => {
   const { worker, env } = makeHarness();
   const result = await worker.fetch(
