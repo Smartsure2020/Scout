@@ -330,12 +330,12 @@ function claimFlags(claim) {
   if (status === "fraud") flags.push("Fraud matter — urgent insurer liaison");
   if (status.includes("ombudsman") || status.includes("nfo"))
     flags.push("NFO complaint active — urgent management attention");
-  if (status.includes("mandate") || outstanding >= 100000) {
-    flags.push(
-      outstanding >= 100000 && age > 30
-        ? "High value — mandate authority required"
-        : "Mandate check",
-    );
+  if (outstanding >= 100000) {
+    // High value drives authority review regardless of age; age affects urgency
+    // separately and must not downgrade a large exposure to "Mandate check".
+    flags.push("High value — mandate authority required");
+  } else if (status.includes("mandate")) {
+    flags.push("Mandate check");
   }
   if (!isTerminalClaim(claim) && !isLegalClaim(claim)) {
     const movementDays = Number(
@@ -380,6 +380,11 @@ function claimPriorityScore(claim) {
 function isCriticalClaim(claim) {
   const flags = claimFlags(claim);
   const statusSla = authoritativeStatusSla(claim);
+  // Manager-critical means a genuine critical condition: authoritative SLA
+  // breach or an explicit high-severity flag. Generic age (>=30) and an
+  // accumulated priority score (>=60) no longer manufacture "Critical SLA" —
+  // aged claims remain visible under stale / at-risk / no-movement, and
+  // claimPriorityScore() is retained purely for materiality ranking.
   return (
     flags.some(
       (flag) =>
@@ -390,10 +395,7 @@ function isCriticalClaim(claim) {
         flag.includes("mandate") ||
         flag.includes("9-month") ||
         flag.includes("New claim unactioned"),
-    ) ||
-    statusSla.critical ||
-    claimAge(claim) >= 30 ||
-    claimPriorityScore(claim) >= 60
+    ) || statusSla.critical
   );
 }
 
@@ -562,8 +564,9 @@ function primaryReason(claim) {
 }
 
 function nextAction(claim) {
-  if (isCriticalClaim(claim))
-    return "Review the critical queue and progress the next step";
+  // Specific operational actions take precedence over the generic critical
+  // fallback, so a mandate/estimate/assessor/broker/payment/closure claim keeps
+  // its actionable guidance instead of collapsing to "review the critical queue".
   if (isMandateClaim(claim)) return "Review authority and management decision";
   if (isZeroEstimateClaim(claim))
     return "Validate estimate and payment or closure state";
@@ -573,6 +576,10 @@ function nextAction(claim) {
     return "Confirm payment status and close if complete";
   const closure = getReadyToCloseCandidate(claim);
   if (closure) return closure.action;
+  if (isNoMovementClaim(claim))
+    return "Progress the claim — no recent movement";
+  if (isCriticalClaim(claim))
+    return "Review the critical queue and progress the next step";
   return "Review and progress claim";
 }
 
@@ -581,7 +588,10 @@ function number(value) {
 }
 
 function formatCurrency(value) {
-  return `R${Math.round(number(value)).toLocaleString("en-ZA")}`;
+  // Normalise negative zero (Math.round(-0.3) === -0, which toLocaleString
+  // renders as "-0") so currency never displays a spurious "R-0".
+  const rounded = Math.round(number(value));
+  return `R${(rounded === 0 ? 0 : rounded).toLocaleString("en-ZA")}`;
 }
 
 function formatDate(value) {
@@ -611,6 +621,8 @@ function modelFor(claims, previousClaims, extract, settings, env) {
       isPayment: isPaymentClaim,
       isNew: isNewClaim,
       getOutstanding: claimOutstanding,
+      getStatus: claimStatus,
+      getEstimate: claimEstimate,
       getPrimaryReason: primaryReason,
       getNextAction: nextAction,
       claimUrl: (claim) =>
@@ -655,40 +667,73 @@ export function buildManagerBriefing(model, extract, now = new Date()) {
   );
   const runDate = formatDate(now.toISOString());
   const subject = `Scout manager briefing — ${runDate}`;
-  const itemByClaimNo = new Map(
-    model.handler.items.map((item) => [item.claimNo, item]),
-  );
-  const attentionItems = model.attention
-    .flatMap((section) =>
-      section.claims.map((claim) => {
-        const item = itemByClaimNo.get(String(claimNo(claim)));
-        return {
-          claimNo: claimNo(claim),
-          outstanding: claimOutstanding(claim),
-          primaryReason: section.label,
-          nextAction: nextAction(claim),
-          url: item?.url || "",
-        };
-      }),
-    )
-    .slice(0, 12);
+  const metrics = model.metrics || {};
+  const dataQuality = model.dataQuality || {};
+  // Manager attention is the shared model's ranked, de-duplicated surface:
+  // materiality-ordered (score -> outstanding -> age -> claim number), unique
+  // per claim identity, capped at 12. Each item carries its own reason/action.
+  const attentionItems = (model.managerAttention?.items || []).slice(0, 12);
+  const collisions = Array.isArray(dataQuality.collisions)
+    ? dataQuality.collisions
+    : [];
   const riskItems = model.topRisks.items.slice(0, 5);
-  const closureItems = attentionItems.filter((item) =>
-    item.primaryReason.toLowerCase().includes("closure"),
-  );
+  const closureItems = attentionItems
+    .filter((item) => item.conditions?.closure)
+    .slice(0, 5);
   const lines = [
     `Scout Manager Briefing — ${runDate}`,
     `Data as at: ${extractDate}`,
     `Comparison: ${model.comparisonLabel}`,
     "",
     "Portfolio",
-    `- Active claims: ${model.metrics.active}`,
-    `- Critical SLA: ${model.metrics.critical}`,
-    `- Stale / at-risk: ${model.metrics.stale}`,
-    `- Outstanding exposure: ${formatCurrency(model.metrics.exposure)}`,
-    "",
-    "Management attention",
   ];
+  if (
+    model.comparisonAvailable &&
+    Number.isFinite(Number(metrics.previousActive))
+  ) {
+    const delta = Number(metrics.activeDelta) || 0;
+    lines.push(
+      `- Active claims: ${metrics.active} vs ${metrics.previousActive} (${delta >= 0 ? "+" : ""}${delta})`,
+    );
+  } else {
+    lines.push(`- Active claims: ${metrics.active}`);
+  }
+  const exposureNote = collisions.length
+    ? " (includes unresolved claim-number collisions)"
+    : "";
+  lines.push(
+    // "critical" here is the management-critical predicate (genuine SLA breach
+    // plus high-value/mandate, fraud, NFO, payment-blocking, 9-month and
+    // unactioned-new), not SLA alone — so it is labelled high-priority.
+    `- Critical / high-priority claims: ${metrics.critical}`,
+    `- Stale / at-risk: ${metrics.stale}`,
+    `- Outstanding exposure: ${formatCurrency(metrics.exposure)}${exposureNote}`,
+  );
+  if (model.comparisonAvailable) {
+    const ambiguous = Array.isArray(dataQuality.comparisonAmbiguousClaimNumbers)
+      ? dataQuality.comparisonAmbiguousClaimNumbers.length
+      : 0;
+    if (ambiguous > 0) {
+      // Collisions are not identity-comparable across periods, so the new counts
+      // are stated as confirmed and the unresolved collisions are noted.
+      lines.push(
+        `- New since previous: ${metrics.newSincePrevious} confirmed`,
+        `- Newly high-priority since previous: ${metrics.newCriticalSincePrevious} confirmed`,
+        `- Comparison note: ${ambiguous} claim-number collision${ambiguous === 1 ? " remains" : "s remain"} unresolved`,
+      );
+    } else {
+      lines.push(
+        `- New since previous: ${metrics.newSincePrevious}`,
+        `- Newly high-priority since previous: ${metrics.newCriticalSincePrevious}`,
+      );
+    }
+  }
+  if (Number(dataQuality.duplicateRows) > 0) {
+    lines.push(
+      `- Data quality: ${dataQuality.duplicateRows} duplicate source row${dataQuality.duplicateRows === 1 ? "" : "s"} suppressed from briefing totals`,
+    );
+  }
+  lines.push("", "Management attention");
   if (attentionItems.length) {
     lines.push(...attentionItems.map(managerItemLine));
   } else {
@@ -701,24 +746,47 @@ export function buildManagerBriefing(model, extract, now = new Date()) {
     lines.push("- No risk-watch claims in this extract.");
   }
   if (closureItems.length) {
+    lines.push("", "Closure candidates", ...closureItems.map(managerItemLine));
+  }
+  if (collisions.length) {
     lines.push(
       "",
-      "Closure candidates",
-      ...closureItems.slice(0, 5).map(managerItemLine),
+      "Data quality exceptions",
+      ...collisions.map((collision) => {
+        let line = `- ${collision.claimNumber} — ${collision.rowCount} conflicting rows share one claim number; reconciliation required; combined outstanding ${formatCurrency(collision.combinedOutstanding)}`;
+        // When the rows disagree on paid, show the conflicting values (not a sum:
+        // summing would imply both paid amounts are valid before reconciliation).
+        const distinctPaid = [
+          ...new Set(
+            (collision.rows || []).map((row) => Math.round(number(row.paid))),
+          ),
+        ].sort((a, b) => b - a);
+        if (distinctPaid.length > 1) {
+          line += `; paid values conflict: ${distinctPaid
+            .map((value) => formatCurrency(value))
+            .join(" vs ")}`;
+        }
+        return line;
+      }),
     );
   }
   return {
     subject,
     title: `Scout Manager Briefing — ${runDate}`,
     text: lines.join("\n"),
-    claimsCount: model.metrics.active,
-    criticalCount: model.metrics.critical,
+    claimsCount: metrics.active,
+    criticalCount: metrics.critical,
   };
 }
 
 function managerItemLine(item) {
   const link = item.url ? ` — ${item.url}` : "";
-  return `- ${item.claimNo} — ${item.primaryReason}; ${item.nextAction}; outstanding ${formatCurrency(item.outstanding)}${link}`;
+  const outstanding = number(item.outstanding);
+  // Only positive outstanding is meaningful on an action line; zero/negative
+  // (e.g. R0, R-0, R-1 from adjustments/data) is omitted rather than shown.
+  const outstandingText =
+    outstanding > 0 ? `; outstanding ${formatCurrency(outstanding)}` : "";
+  return `- ${item.claimNo} — ${item.primaryReason}; ${item.nextAction}${outstandingText}${link}`;
 }
 
 export function buildTeamsManagerWebhookPayload(message) {

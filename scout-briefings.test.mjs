@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  buildManagerBriefing,
   buildPilotBriefingModel,
   createBriefingsWorker,
   historySnapshotForBriefing,
@@ -1632,7 +1633,7 @@ test("briefing parity covers zero estimate, mandate, overdue, and new-claim fixt
   );
   assert.equal(
     model.handler.items.find((item) => item.claimNo === "BROKER-1")?.nextAction,
-    "Review the critical queue and progress the next step",
+    "Follow up with broker or client",
   );
   assert.equal(
     model.handler.items.some((item) => item.claimNo === "NEW-1"),
@@ -1756,13 +1757,504 @@ test("manager message is capped and retains accepted operational meaning", async
   const text = payload.attachments[0].content.body[1].text;
   assert.match(text, /Data as at/);
   assert.match(text, /Active claims/);
-  assert.match(text, /Critical SLA/);
+  assert.match(text, /Critical \/ high-priority claims/);
   assert.match(text, /Stale \/ at-risk/);
   assert.match(text, /Outstanding exposure/);
   assert.match(text, /Management attention/);
   assert.match(text, /Top risk watch/);
   assert.ok(text.length < 12000);
-  assert.equal(text.includes("CLM-328"), false);
+  // Capped by materiality rank, not source order: the message references at
+  // most the section caps (12 attention + 5 risk + 5 closure) and never dumps
+  // the full 328-claim population.
+  const claimRefs = text.match(/CLM-\d+/g) || [];
+  assert.ok(claimRefs.length <= 22);
+  assert.ok(new Set(claimRefs).size < 328);
+});
+
+const REMEDIATION_NOW = new Date("2026-09-25T10:00:00Z");
+function managerRender(claims, { previousClaims = [], settings = {} } = {}) {
+  const model = pilotModel(claims, { previousClaims, settings });
+  const message = buildManagerBriefing(
+    model,
+    { extract_date: "2026-09-10" },
+    REMEDIATION_NOW,
+  );
+  return { model, message, text: message.text };
+}
+function lineFor(text, claimNo) {
+  return text.split("\n").find((line) => line.includes(claimNo)) || "";
+}
+
+test("remediation: 30-day age alone is not Critical SLA and aged claims fall to stale", () => {
+  const { model } = managerRender([
+    {
+      claim_no: "AGE-45",
+      status: "Active",
+      working_age: 45,
+      outstanding: 1000,
+      estimate: 1000,
+    },
+  ]);
+  assert.equal(model.metrics.critical, 0);
+  assert.equal(model.metrics.stale, 1);
+});
+
+test("remediation: genuine SLA and high-severity flags remain Critical SLA", () => {
+  const sla = managerRender([
+    {
+      claim_no: "AOL-12",
+      status: "Awaiting Agreement of Loss \\ Invoice",
+      working_age: 12,
+      outstanding: 100,
+      estimate: 100,
+    },
+  ]);
+  assert.equal(sla.model.metrics.critical, 1);
+  const highValue = managerRender([
+    {
+      claim_no: "HV-1",
+      status: "Active",
+      working_age: 40,
+      outstanding: 150000,
+      estimate: 150000,
+    },
+  ]);
+  assert.equal(highValue.model.metrics.critical, 1);
+});
+
+test("remediation: duplicate claim rows are de-duped from totals, exposure and rendered once", () => {
+  const dupRow = {
+    claim_no: "DUP-1",
+    status: "Awaiting Agreement of Loss \\ Invoice",
+    working_age: 20,
+    outstanding: 5000,
+    estimate: 5000,
+  };
+  const { model, text } = managerRender([dupRow, { ...dupRow }]);
+  assert.equal(model.metrics.active, 1);
+  assert.equal(model.metrics.exposure, 5000);
+  assert.equal(model.dataQuality.sourceRows, 2);
+  assert.equal(model.dataQuality.countedClaims, 1);
+  assert.equal(model.dataQuality.duplicateRows, 1);
+  assert.deepEqual(model.dataQuality.duplicateClaimNumbers, ["DUP-1"]);
+  assert.deepEqual(model.dataQuality.collisions, []);
+  assert.equal((text.match(/DUP-1/g) || []).length, 1);
+  assert.match(
+    text,
+    /Data quality: 1 duplicate source row suppressed from briefing totals/,
+  );
+});
+
+test("remediation: conflicting same-number rows are kept as collisions, not suppressed", () => {
+  const { model, text } = managerRender([
+    {
+      claim_no: "CONF-1",
+      status: "Awaiting Agreement of Loss \\ Invoice",
+      working_age: 20,
+      outstanding: 5000,
+      estimate: 5000,
+    },
+    {
+      claim_no: "CONF-1",
+      status: "Repair - Authorised",
+      working_age: 20,
+      outstanding: 9000,
+      estimate: 5000,
+    },
+  ]);
+  // Both rows are retained in totals and exposure (collision, not duplicate).
+  assert.equal(model.metrics.active, 2);
+  assert.equal(model.metrics.exposure, 14000);
+  assert.equal(model.dataQuality.duplicateRows, 0);
+  assert.deepEqual(model.dataQuality.collisionClaimNumbers, ["CONF-1"]);
+  assert.equal(model.dataQuality.collisions[0].rowCount, 2);
+  assert.equal(model.dataQuality.collisions[0].combinedOutstanding, 14000);
+  // Excluded from ranked attention; surfaced as an explicit exception instead.
+  assert.equal(
+    model.managerAttention.items.some((i) => i.claimNo === "CONF-1"),
+    false,
+  );
+  assert.match(text, /Data quality exceptions/);
+  assert.match(
+    text,
+    /CONF-1 — 2 conflicting rows share one claim number; reconciliation required; combined outstanding R14\s000/,
+  );
+  assert.match(text, /includes unresolved claim-number collisions/);
+});
+
+test("remediation: management attention is ranked by materiality, not source order", () => {
+  const { model } = managerRender([
+    {
+      claim_no: "LOW-1",
+      status: "Active",
+      working_age: 20,
+      outstanding: 100,
+      estimate: 100,
+    },
+    {
+      claim_no: "HIGH-1",
+      status: "Active",
+      working_age: 40,
+      outstanding: 200000,
+      estimate: 200000,
+    },
+  ]);
+  assert.equal(model.managerAttention.items[0].claimNo, "HIGH-1");
+});
+
+test("remediation: zero and negative outstanding are omitted from action lines", () => {
+  const base = {
+    status: "Awaiting Agreement of Loss \\ Invoice",
+    working_age: 20,
+    estimate: 100,
+  };
+  const { text } = managerRender([
+    { ...base, claim_no: "ZERO-OUT", outstanding: 0 },
+    { ...base, claim_no: "NEG-OUT", outstanding: -1 },
+    { ...base, claim_no: "POS-OUT", outstanding: 5000 },
+  ]);
+  assert.equal(lineFor(text, "ZERO-OUT").includes("outstanding"), false);
+  assert.equal(lineFor(text, "NEG-OUT").includes("outstanding"), false);
+  // en-ZA groups thousands with a non-breaking space, so match \s not a literal space.
+  assert.match(lineFor(text, "POS-OUT"), /outstanding R5\s000/);
+  assert.equal(text.includes("R-0"), false);
+});
+
+test("remediation: comparison metrics use unique claim identities", () => {
+  const current = [
+    {
+      claim_no: "C-1",
+      status: "Active",
+      working_age: 20,
+      outstanding: 100,
+      estimate: 100,
+    },
+    {
+      claim_no: "C-2",
+      status: "Awaiting Agreement of Loss \\ Invoice",
+      working_age: 20,
+      outstanding: 100,
+      estimate: 100,
+    },
+  ];
+  const previous = [
+    {
+      claim_no: "C-1",
+      status: "Active",
+      working_age: 19,
+      outstanding: 100,
+      estimate: 100,
+    },
+    {
+      claim_no: "C-1",
+      status: "Active",
+      working_age: 19,
+      outstanding: 100,
+      estimate: 100,
+    },
+  ];
+  const { model, text } = managerRender(current, { previousClaims: previous });
+  assert.equal(model.metrics.previousActive, 1);
+  assert.equal(model.metrics.activeDelta, 1);
+  assert.equal(model.metrics.newSincePrevious, 1);
+  assert.equal(model.metrics.newCriticalSincePrevious, 1);
+  assert.match(text, /Active claims: 2 vs 1 \(\+1\)/);
+  assert.match(text, /New since previous: 1/);
+  assert.match(text, /Newly high-priority since previous: 1/);
+});
+
+test("remediation: specific actions beat the generic critical fallback", () => {
+  const { model } = managerRender([
+    {
+      claim_no: "M-1",
+      status: "Mandate",
+      working_age: 40,
+      outstanding: 150000,
+      estimate: 150000,
+    },
+  ]);
+  const item = model.managerAttention.items.find((i) => i.claimNo === "M-1");
+  assert.ok(item);
+  assert.equal(item.nextAction, "Review authority and management decision");
+});
+
+test("remediation: manager attention and top-risk caps are intact", () => {
+  const claims = [];
+  for (let i = 0; i < 30; i += 1) {
+    claims.push({
+      claim_no: `CRIT-${i}`,
+      status: "Awaiting Agreement of Loss \\ Invoice",
+      working_age: 20 + i,
+      outstanding: 1000 + i,
+      estimate: 1000,
+    });
+  }
+  for (let i = 0; i < 10; i += 1) {
+    claims.push({
+      claim_no: `RISK-${i}`,
+      status: "Repudiated",
+      working_age: 5 + i,
+      outstanding: 100,
+      estimate: 100,
+    });
+  }
+  const { model, text } = managerRender(claims);
+  assert.equal(model.managerAttention.items.length, 12);
+  assert.ok(model.topRisks.items.length <= 5);
+  const attentionBlock = text
+    .split("Management attention")[1]
+    .split("Top risk watch")[0];
+  const attentionLines = attentionBlock
+    .split("\n")
+    .filter((l) => l.startsWith("- "));
+  assert.ok(attentionLines.length <= 12);
+});
+
+test("remediation: row-position change alone does not create a new claim", () => {
+  const mk = (no, extra = {}) => ({
+    claim_no: no,
+    status: "Active",
+    working_age: 20,
+    outstanding: 100,
+    estimate: 100,
+    ...extra,
+  });
+  // KEEP-1 present in both periods but at different row positions.
+  const current = [mk("KEEP-1"), mk("NEWA-1")];
+  const previous = [mk("GONE-1"), mk("KEEP-1")];
+  const { model } = managerRender(current, { previousClaims: previous });
+  assert.equal(model.metrics.newSincePrevious, 1); // only NEWA-1
+});
+
+test("remediation: an unambiguous claim absent previously counts as new", () => {
+  const mk = (no) => ({
+    claim_no: no,
+    status: "Active",
+    working_age: 20,
+    outstanding: 100,
+    estimate: 100,
+  });
+  const { model } = managerRender([mk("NEW-9")], {
+    previousClaims: [mk("OTHER-1")],
+  });
+  assert.equal(model.metrics.newSincePrevious, 1);
+});
+
+test("remediation: a field-equivalent duplicate group counts as one comparable identity", () => {
+  const dup = {
+    claim_no: "DUP-2",
+    status: "Active",
+    working_age: 20,
+    outstanding: 100,
+    estimate: 100,
+  };
+  const { model } = managerRender([dup, { ...dup }], {
+    previousClaims: [
+      {
+        claim_no: "OTHER-1",
+        status: "Active",
+        working_age: 20,
+        outstanding: 100,
+        estimate: 100,
+      },
+    ],
+  });
+  assert.equal(model.metrics.newSincePrevious, 1); // DUP-2 once, not twice
+});
+
+test("remediation: a conflicting group counts in active/exposure but not confirmed-new", () => {
+  const current = [
+    {
+      claim_no: "COL-1",
+      status: "Active",
+      working_age: 20,
+      outstanding: 5000,
+      estimate: 5000,
+    },
+    {
+      claim_no: "COL-1",
+      status: "Repair - Authorised",
+      working_age: 20,
+      outstanding: 9000,
+      estimate: 5000,
+    },
+  ];
+  const { model } = managerRender(current, {
+    previousClaims: [
+      {
+        claim_no: "OTHER-1",
+        status: "Active",
+        working_age: 20,
+        outstanding: 100,
+        estimate: 100,
+      },
+    ],
+  });
+  assert.equal(model.metrics.active, 2); // both rows retained
+  assert.equal(model.metrics.exposure, 14000); // both counted
+  assert.equal(model.metrics.newSincePrevious, 0); // collision not confirmed-new
+  assert.deepEqual(model.dataQuality.comparisonAmbiguousClaimNumbers, [
+    "COL-1",
+  ]);
+});
+
+test("remediation: a conflicting critical group does not inflate newCriticalSincePrevious", () => {
+  const current = [
+    {
+      claim_no: "COLC-1",
+      status: "Awaiting Agreement of Loss \\ Invoice",
+      working_age: 20,
+      outstanding: 5000,
+      estimate: 5000,
+    },
+    {
+      claim_no: "COLC-1",
+      status: "Awaiting Agreement of Loss \\ Invoice",
+      working_age: 20,
+      outstanding: 60000,
+      estimate: 5000,
+    },
+  ];
+  const { model } = managerRender(current, {
+    previousClaims: [
+      {
+        claim_no: "OTHER-1",
+        status: "Active",
+        working_age: 20,
+        outstanding: 100,
+        estimate: 100,
+      },
+    ],
+  });
+  assert.ok(model.metrics.critical >= 2); // both conflicting rows are critical (counted)
+  assert.equal(model.metrics.newCriticalSincePrevious, 0); // but not confirmed-new
+  assert.deepEqual(model.dataQuality.comparisonAmbiguousClaimNumbers, [
+    "COLC-1",
+  ]);
+});
+
+test("remediation: comparison-ambiguity metadata carries the affected claim numbers and row count", () => {
+  const row = (no, outstanding, status = "Active") => ({
+    claim_no: no,
+    status,
+    working_age: 20,
+    outstanding,
+    estimate: 5000,
+  });
+  const { model } = managerRender(
+    [
+      row("AMB-1", 1000),
+      row("AMB-1", 2000, "Repair - Authorised"),
+      row("AMB-1", 3000, "Adjuster Appointed"),
+      row("CLEAN-1", 100),
+    ],
+    {
+      previousClaims: [row("PREV-1", 100)],
+    },
+  );
+  assert.deepEqual(model.dataQuality.comparisonAmbiguousClaimNumbers, [
+    "AMB-1",
+  ]);
+  assert.equal(model.dataQuality.comparisonAmbiguousRows, 3);
+  assert.equal(model.dataQuality.collisions[0].rowCount, 3);
+});
+
+test("remediation: same claim/status/outstanding/estimate but different handler is a collision, not a duplicate", () => {
+  const base = {
+    claim_no: "HDIFF-1",
+    status: "Active",
+    working_age: 20,
+    outstanding: 100,
+    estimate: 100,
+  };
+  const { model } = managerRender([
+    { ...base, handler_name: "Alice Adams" },
+    { ...base, handler_name: "Bob Brown" },
+  ]);
+  // Not collapsed: both rows retained, flagged as a collision (handler differs).
+  assert.equal(model.metrics.active, 2);
+  assert.equal(model.dataQuality.duplicateRows, 0);
+  assert.deepEqual(model.dataQuality.duplicateClaimNumbers, []);
+  assert.deepEqual(model.dataQuality.collisionClaimNumbers, ["HDIFF-1"]);
+});
+
+test("remediation: a claim whose number was collision-ambiguous last period is not newly high-priority", () => {
+  const current = [
+    {
+      claim_no: "PC-1",
+      status: "Awaiting Agreement of Loss \\ Invoice", // clean + critical now
+      working_age: 20,
+      outstanding: 100,
+      estimate: 100,
+    },
+  ];
+  const previous = [
+    // conflicting, non-critical rows last period -> PC-1 ambiguous previously
+    {
+      claim_no: "PC-1",
+      status: "Active",
+      working_age: 20,
+      outstanding: 5000,
+      estimate: 5000,
+    },
+    {
+      claim_no: "PC-1",
+      status: "In Progress",
+      working_age: 20,
+      outstanding: 9000,
+      estimate: 5000,
+    },
+  ];
+  const { model, text } = managerRender(current, { previousClaims: previous });
+  assert.ok(model.metrics.critical >= 1); // current PC-1 is high-priority
+  // But it must not be counted as newly high-priority: prior identity was ambiguous.
+  assert.equal(model.metrics.newCriticalSincePrevious, 0);
+  assert.equal(model.metrics.newSincePrevious, 0);
+  // The previous-period ambiguity must be surfaced even with no current collision,
+  // so the renderer keeps the "confirmed" wording and a comparison note.
+  assert.ok(model.dataQuality.comparisonAmbiguousClaimNumbers.includes("PC-1"));
+  assert.deepEqual(model.dataQuality.collisionClaimNumbers, []); // none in the current extract
+  assert.match(text, /Newly high-priority since previous: 0 confirmed/);
+  assert.match(
+    text,
+    /Comparison note: 1 claim-number collision remains unresolved/,
+  );
+});
+
+test("remediation: a numeric mandate-amount difference makes rows a collision, not a duplicate", () => {
+  const base = {
+    claim_no: "MND-1",
+    status: "Active",
+    working_age: 20,
+    outstanding: 100,
+    estimate: 100,
+  };
+  const { model } = managerRender([
+    { ...base, mandate: 0 },
+    { ...base, mandate: 50000 },
+  ]);
+  assert.equal(model.metrics.active, 2);
+  assert.equal(model.dataQuality.duplicateRows, 0);
+  assert.deepEqual(model.dataQuality.collisionClaimNumbers, ["MND-1"]);
+});
+
+test("remediation: a recovery-comment difference makes rows a collision, not a duplicate", () => {
+  const base = {
+    claim_no: "REC-1",
+    status: "Payment - Payments Made",
+    working_age: 25,
+    outstanding: 100,
+    estimate: 100,
+  };
+  // Identical except comments; production hasRecoveryPending() reads comments to
+  // choose the closure action, so these are not interchangeable duplicates.
+  const { model } = managerRender([
+    { ...base, comments: "recovery pending" },
+    { ...base, comments: "none" },
+  ]);
+  assert.equal(model.metrics.active, 2);
+  assert.equal(model.dataQuality.duplicateRows, 0);
+  assert.deepEqual(model.dataQuality.collisionClaimNumbers, ["REC-1"]);
 });
 
 test("history endpoints omit recipient fields", async () => {
