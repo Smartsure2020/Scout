@@ -995,14 +995,28 @@ export class ReportsController {
 
   closeConfirm(result) {
     const backdrop = this.document?.getElementById("report-confirm-backdrop");
+    const origin = this.confirmOriginFocus;
+    this.confirmOriginFocus = null;
     if (backdrop) {
+      // Move focus out of the dialog BEFORE aria-hidden is applied so no
+      // focused descendant is retained inside an aria-hidden subtree.
+      const active = this.document?.activeElement || null;
+      if (
+        active &&
+        typeof backdrop.contains === "function" &&
+        backdrop.contains(active)
+      ) {
+        if (origin && origin.isConnected && origin.getClientRects().length) {
+          origin.focus({ preventScroll: true });
+        } else if (typeof active.blur === "function") {
+          active.blur();
+        }
+      }
       backdrop.classList.remove("show");
       backdrop.setAttribute("aria-hidden", "true");
     }
     const resolve = this.confirmResolver;
     this.confirmResolver = null;
-    const origin = this.confirmOriginFocus;
-    this.confirmOriginFocus = null;
     if (resolve) resolve(Boolean(result));
     if (origin && origin.isConnected) {
       setTimeout(() => {

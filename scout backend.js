@@ -222,7 +222,11 @@ async function supabase(
     throw new Error("Supabase error " + res.status + ": " + e.slice(0, 200));
   }
   if (res.status === 204) return null;
-  return res.json();
+
+  const responseText = await res.text();
+  if (!responseText.trim()) return null;
+
+  return JSON.parse(responseText);
 }
 
 async function supabaseAll(env, path, useService = true, pageSize = 1000) {
@@ -3343,6 +3347,8 @@ export default {
         return err("Not authorised", 403);
       const reportId = decodeURIComponent(reportPdfMatch[1]);
       let run;
+      let rendererStatus = null;
+      let browserMsUsed = null;
       try {
         run = await getReportRunById(env, reportId);
         if (!run) return err("Report not found", 404);
@@ -3395,12 +3401,22 @@ export default {
         const html = renderClaimsReportHtml(run, workflow);
         const rendered = await env.BROWSER.quickAction("pdf", {
           html,
-          printBackground: true,
+          pdfOptions: {
+            printBackground: true,
+          },
         });
-        const pdf =
-          rendered instanceof Response ? rendered : new Response(rendered);
-        if (!pdf.ok)
-          throw new Error(`Browser Run PDF renderer returned ${pdf.status}`);
+        if (!(rendered instanceof Response))
+          throw new Error(
+            "Browser Run PDF renderer returned an invalid response",
+          );
+        if (!rendered.ok) {
+          rendererStatus = rendered.status;
+          browserMsUsed = rendered.headers.get("X-Browser-Ms-Used");
+          throw new Error(
+            `Browser Run PDF renderer returned ${rendered.status}`,
+          );
+        }
+        const pdf = rendered;
         const headers = new Headers(pdf.headers);
         const exportedAt = new Date().toISOString();
         headers.set("Content-Type", "application/pdf");
@@ -3436,6 +3452,8 @@ export default {
           {
             report_id: reportId,
             reason: "renderer_error",
+            renderer_status: rendererStatus,
+            browser_ms_used: browserMsUsed,
             template_version: PDF_TEMPLATE_VERSION,
             renderer_version: PDF_RENDERER_VERSION,
           },
