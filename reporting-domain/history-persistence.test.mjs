@@ -276,7 +276,11 @@ test("deterministic fixture preserves duplicates, handlers, terminal/open, finan
   );
   assert.equal(normalized.snapshots.length, 5);
   assert.equal(normalized.quality.duplicate_claim_number_count, 1);
-  assert.equal(normalized.quality.identity_ambiguity_count, 2);
+  // DUP-1 agrees on every claim-identifying invariant (only handler, a
+  // section-level field, differs) so it is one legitimate multi-section parent,
+  // not an identity ambiguity.
+  assert.equal(normalized.quality.identity_ambiguity_count, 0);
+  assert.equal(normalized.quality.multi_row_claim_count, 2);
   assert.equal(normalized.snapshots[1].terminal, true);
   assert.equal(normalized.snapshots[0].open, true);
   assert.equal(normalized.snapshots[1].paid, 80);

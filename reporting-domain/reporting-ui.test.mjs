@@ -365,3 +365,38 @@ test("API failures are surfaced to the reporting layer instead of becoming zero-
     (error) => error.code === "REPORTING_UNAVAILABLE",
   );
 });
+
+test("report claim rows carry the parent identifier into workflow, including NULL claim_id (v2)", async () => {
+  function make() {
+    const controller = new ReportsController({
+      document: reportDocument(),
+      getContext: () => ({ user: { role: "manager" }, freshness: null }),
+    });
+    controller.state.selected = { report_type: "weekly" };
+    controller.render = () => {};
+    controller.loadPeriodReport = async () => {};
+    controller.api = { listAttention: async () => ({ items: [] }) };
+    return controller;
+  }
+
+  // Canonical parent (single-row or future shared-parent): claim_id is a UUID.
+  const canonical = make();
+  await canonical.openAttentionFromClaim({
+    claim_id: "canonical-uuid",
+    source_claim_number: "SOLO-1",
+  });
+  assert.equal(canonical.state.workflowForm.claimId, "canonical-uuid");
+  assert.equal(canonical.state.workflowForm.claimNumber, "SOLO-1");
+
+  // Old ambiguous multi-section parent: claim_id NULL -> no UUID sent, the
+  // explicit source_claim_number carries the parent identity (never parsed from
+  // parent_identity_key, never a child UUID).
+  const ambiguous = make();
+  await ambiguous.openAttentionFromClaim({
+    claim_id: null,
+    parent_identity_key: "cardinal_claims:MULTI-1",
+    source_claim_number: "MULTI-1",
+  });
+  assert.equal(ambiguous.state.workflowForm.claimId, "");
+  assert.equal(ambiguous.state.workflowForm.claimNumber, "MULTI-1");
+});

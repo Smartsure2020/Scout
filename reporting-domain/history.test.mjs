@@ -162,31 +162,135 @@ test("malformed rows are rejected while partial valid extracts are preserved", (
   assert.equal(allInvalid.quality.hard_rejection, true);
 });
 
-test("duplicate claim numbers remain separate and non-matchable", () => {
+test("legitimate repeated claim numbers form one matchable multi-section parent", () => {
+  // Same claim, two policy sections: identical claim-identifying invariants,
+  // different section-level handler. This is NOT identity ambiguity.
   const result = normalize([
     {
       claimNo: "DUP-1",
       status: "Registered",
+      insured: "ABC Ltd",
+      registeredDate: "2026-08-20",
+      dol: "2026-08-19",
+      insurer: "Example Insurer",
       handler: "handler-a@example.test",
     },
     {
       claimNo: "DUP-1",
       status: "Registered",
+      insured: "ABC Ltd",
+      registeredDate: "2026-08-20",
+      dol: "2026-08-19",
+      insurer: "Example Insurer",
       handler: "handler-b@example.test",
     },
   ]);
   assert.equal(result.snapshots.length, 2);
   assert.equal(result.quality.duplicate_claim_number_count, 1);
+  assert.equal(result.quality.multi_row_claim_count, 2);
+  assert.equal(result.quality.identity_ambiguity_count, 0);
+  assert.equal(
+    result.snapshots.every((snapshot) => snapshot.identity_matchable === true),
+    true,
+  );
+  assert.equal(
+    result.snapshots.every(
+      (snapshot) => snapshot.identity_key === "cardinal_claims:DUP-1",
+    ),
+    true,
+  );
+  assert.equal(
+    result.snapshots.every((snapshot) =>
+      snapshot.data_quality_flags.includes("multi_row_claim"),
+    ),
+    true,
+  );
+  assert.equal(
+    result.snapshots.some((snapshot) =>
+      snapshot.data_quality_flags.includes("parent_identity_conflict"),
+    ),
+    false,
+  );
+});
+
+test("repeated claim numbers that disagree on a claim invariant are a non-matchable conflict", () => {
+  const result = normalize([
+    {
+      claimNo: "CON-1",
+      status: "Registered",
+      insured: "ABC Ltd",
+      handler: "handler-a@example.test",
+    },
+    {
+      claimNo: "CON-1",
+      status: "Registered",
+      insured: "XYZ Ltd",
+      handler: "handler-a@example.test",
+    },
+  ]);
+  assert.equal(result.snapshots.length, 2);
+  assert.equal(result.quality.identity_ambiguity_count, 2);
   assert.equal(
     result.snapshots.every((snapshot) => snapshot.identity_matchable === false),
     true,
   );
   assert.equal(
+    result.snapshots.every((snapshot) => snapshot.identity_key === null),
+    true,
+  );
+  assert.equal(
     result.snapshots.every((snapshot) =>
-      snapshot.data_quality_flags.includes("identity_ambiguity"),
+      snapshot.data_quality_flags.includes("parent_identity_conflict"),
     ),
     true,
   );
+});
+
+test("buildObservedChanges emits no ingest events for multi-row or conflict parents (read-model authoritative, never a child UUID)", () => {
+  const rows = [
+    // Valid multi-section parent (agrees on invariants; handler differs).
+    {
+      claimNo: "M-1",
+      status: "Registered",
+      insured: "ABC Ltd",
+      registeredDate: "2026-08-20",
+      handler: "handler-a@example.test",
+    },
+    {
+      claimNo: "M-1",
+      status: "Registered",
+      insured: "ABC Ltd",
+      registeredDate: "2026-08-20",
+      handler: "handler-b@example.test",
+    },
+    // Identity-conflict parent (disagrees on insured).
+    {
+      claimNo: "C-1",
+      status: "Registered",
+      insured: "ABC Ltd",
+      handler: "handler-a@example.test",
+    },
+    {
+      claimNo: "C-1",
+      status: "Registered",
+      insured: "XYZ Ltd",
+      handler: "handler-a@example.test",
+    },
+  ];
+  const previous = normalize(rows);
+  const current = normalize(rows);
+  const previousSnapshots = assignClaimIds(previous.snapshots);
+  const currentSnapshots = assignClaimIds(current.snapshots);
+  const changes = buildObservedChanges(
+    manifest("prev-extract", "2026-08-24T12:00:00.000Z", previous.quality),
+    previousSnapshots,
+    manifest("curr-extract", "2026-08-25T12:00:00.000Z", current.quality),
+    currentSnapshots,
+  );
+  // Neither the valid multi-row parent nor the conflict parent participates in
+  // ingest-time change detection, so no first_observed / handler / financial
+  // event is fabricated, and no event references an ambiguous child UUID.
+  assert.equal(changes.length, 0);
 });
 
 test("unknown handler and status are preserved as quality warnings", () => {
@@ -246,7 +350,10 @@ test("the four corrected taxonomy labels stay mapped through history normalizati
   );
   assert.equal(result.quality.unmapped_status_count, 0);
   for (const snapshot of result.snapshots) {
-    assert.equal(snapshot.data_quality_flags.includes("unmapped_status"), false);
+    assert.equal(
+      snapshot.data_quality_flags.includes("unmapped_status"),
+      false,
+    );
   }
 });
 
@@ -277,10 +384,7 @@ test("[none] sentinel is treated as missing status, not unmapped", () => {
       snapshot.data_quality_flags.includes("unmapped_status"),
       false,
     );
-    assert.equal(
-      snapshot.data_quality_flags.includes("missing_status"),
-      true,
-    );
+    assert.equal(snapshot.data_quality_flags.includes("missing_status"), true);
     // The claim itself remains accepted (buildSnapshot only rejects rows
     // missing a claim number, not rows missing a status).
     assert.equal(snapshot.terminal, false);
@@ -854,8 +958,10 @@ test("resolveOrdinaryUploadLineage: repeated same-date re-uploads form B -> C ->
   const allFour = [A, B, C, D];
   // Exactly one authoritative 09-15 head afterward: D.
   assert.equal(
-    resolveOrdinaryUploadLineage({ manifests: allFour, extractDate: "2026-09-16" })
-      .correctionTargetManifest,
+    resolveOrdinaryUploadLineage({
+      manifests: allFour,
+      extractDate: "2026-09-16",
+    }).correctionTargetManifest,
     null,
   );
   assert.equal(
@@ -927,39 +1033,80 @@ test("change ledger for a same-date corrected re-upload compares against the gen
   // never genuinely changed relative to the true prior period, A.
   const ids = new Map();
   const aNormalized = normalize(
-    [{ claimNo: "X-1", status: "Registered", handler: "handler-a@example.test" }],
+    [
+      {
+        claimNo: "X-1",
+        status: "Registered",
+        handler: "handler-a@example.test",
+      },
+    ],
     "2026-09-14",
   );
   const bNormalized = normalize(
-    [{ claimNo: "X-1", status: "Payment Requested", handler: "handler-a@example.test" }],
+    [
+      {
+        claimNo: "X-1",
+        status: "Payment Requested",
+        handler: "handler-a@example.test",
+      },
+    ],
     "2026-09-15",
   );
   const cNormalized = normalize(
-    [{ claimNo: "X-1", status: "Registered", handler: "handler-a@example.test" }],
+    [
+      {
+        claimNo: "X-1",
+        status: "Registered",
+        handler: "handler-a@example.test",
+      },
+    ],
     "2026-09-15",
   );
   const aSnapshots = assignClaimIds(aNormalized.snapshots, ids);
   const bSnapshots = assignClaimIds(bNormalized.snapshots, ids);
   const cSnapshots = assignClaimIds(cNormalized.snapshots, ids);
 
-  const qualitySummary = { normalized_claim_count: 1, completeness_state: "complete", comparable_to_previous: true };
-  const aManifest = manifest("A-2026-09-14", "2026-09-14T08:00:00.000Z", qualitySummary);
-  const bManifest = manifest("B-2026-09-15-original", "2026-09-15T08:00:00.000Z", qualitySummary, {
-    previous_extract_id: aManifest.id,
-    correction_of_extract_id: null,
-    historical_persisted: true,
-  });
-  const cManifest = manifest("C-2026-09-15-reupload", "2026-09-15T09:00:00.000Z", qualitySummary, {
-    previous_extract_id: aManifest.id,
-    correction_of_extract_id: bManifest.id,
-    historical_persisted: true,
-  });
+  const qualitySummary = {
+    normalized_claim_count: 1,
+    completeness_state: "complete",
+    comparable_to_previous: true,
+  };
+  const aManifest = manifest(
+    "A-2026-09-14",
+    "2026-09-14T08:00:00.000Z",
+    qualitySummary,
+  );
+  const bManifest = manifest(
+    "B-2026-09-15-original",
+    "2026-09-15T08:00:00.000Z",
+    qualitySummary,
+    {
+      previous_extract_id: aManifest.id,
+      correction_of_extract_id: null,
+      historical_persisted: true,
+    },
+  );
+  const cManifest = manifest(
+    "C-2026-09-15-reupload",
+    "2026-09-15T09:00:00.000Z",
+    qualitySummary,
+    {
+      previous_extract_id: aManifest.id,
+      correction_of_extract_id: bManifest.id,
+      historical_persisted: true,
+    },
+  );
 
   // This is what preserveHistoricalExtract() actually resolves for C at
   // upload time (A and B already accepted+persisted, C not yet created).
   const lineageForC = resolveOrdinaryUploadLineage({
     manifests: [
-      { ...aManifest, source_system: "cardinal_claims", status: "accepted", historical_persisted: true },
+      {
+        ...aManifest,
+        source_system: "cardinal_claims",
+        status: "accepted",
+        historical_persisted: true,
+      },
       { ...bManifest, source_system: "cardinal_claims", status: "accepted" },
     ],
     extractDate: "2026-09-15",

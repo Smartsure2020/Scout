@@ -312,6 +312,19 @@ test("reporting filters superseded snapshots and change rows consistently", () =
   const snapshotsByExtract = new Map(
     manifests.map((current) => [current.id, [snapshot("A", current.id)]]),
   );
+  // "NEW" first appears in the AUTHORITATIVE closing extract, so it is derived
+  // as first_observed (registered before the period, so it is observation-new,
+  // not registration-new). "SUP-NEW" appears only in a SUPERSEDED extract and
+  // must never be counted - proving authoritative filtering of the derived
+  // lifecycle stream.
+  snapshotsByExtract.set(corrected15.id, [
+    snapshot("A", corrected15.id),
+    snapshot("NEW", corrected15.id, { registeredDate: "2026-06-01" }),
+  ]);
+  snapshotsByExtract.set(original15.id, [
+    snapshot("A", original15.id),
+    snapshot("SUP-NEW", original15.id, { registeredDate: "2026-06-01" }),
+  ]);
   const changes = [
     {
       claim_id: "superseded-first",
@@ -369,7 +382,7 @@ test("reporting filters superseded snapshots and change rows consistently", () =
   assert.equal(report.activity.changes_considered, 2);
   assert.deepEqual(
     report.metrics.new_claims_first_observed.claim_population.claim_ids,
-    ["authoritative-first"],
+    ["NEW"],
   );
   assert.deepEqual(report.metrics.claims_closed.claim_population.claim_ids, [
     "authoritative-closure",
@@ -649,9 +662,17 @@ test("source-dated closure is exact while disappearance remains non-closure", ()
     periodStart: "2026-08-24",
     ...data,
   });
+  // B has a source-explicit closure event AND is a derived open->terminal
+  // transition in the snapshots, so it is exact + observed (precision "mixed").
+  // C merely disappeared (missing_from_extract) and is NEVER counted as closure.
   assert.equal(report.metrics.claims_closed.value, 1);
-  assert.equal(report.metrics.claims_closed.precision, "source_exact");
-  assert.equal(report.metrics.claims_closed_observed.value, 0);
+  assert.equal(report.metrics.claims_closed.precision, "mixed");
+  assert.equal(report.metrics.claims_closed_exact.value, 1);
+  assert.equal(report.metrics.claims_closed_observed.value, 1);
+  assert.ok(
+    !report.metrics.claims_closed.claim_population.claim_ids.includes("C"),
+  );
+  assert.equal(report.activity.disappearance_is_not_closure, true);
 });
 
 test("ageing distribution reconciles to closing open inventory", () => {
@@ -779,27 +800,34 @@ test("first observed remains distinct when registration date is unavailable", ()
   const closing = manifest("new", "2026-08-26", 1, {
     previousExtractId: opening.id,
   });
+  // A first appears in the closing extract (absent in the baseline) with no
+  // registration date - so it is observation-new (derived from parent presence)
+  // but not registration-new. Z is present throughout and generates no event.
   const rows = new Map([
-    [opening.id, [snapshot("A", opening.id, { registeredDate: null })]],
-    [closing.id, [snapshot("A", closing.id, { registeredDate: null })]],
+    [opening.id, [snapshot("Z", opening.id, { registeredDate: null })]],
+    [
+      closing.id,
+      [
+        snapshot("Z", closing.id, { registeredDate: null }),
+        snapshot("A", closing.id, { registeredDate: null }),
+      ],
+    ],
   ]);
   const report = buildReportSnapshot({
     reportType: "weekly",
     periodStart: "2026-08-24",
     manifests: [opening, closing],
     snapshotsByExtract: rows,
-    changes: [
-      {
-        claim_id: "A",
-        change_type: "first_observed",
-        observed_at: "2026-08-25T10:00:00.000Z",
-      },
-    ],
+    changes: [],
     activeUsers: users,
   });
   assert.equal(
     report.metrics.new_claims_registered.availability,
     "unavailable",
+  );
+  assert.deepEqual(
+    report.metrics.new_claims_first_observed.claim_population.claim_ids,
+    ["A"],
   );
   assert.equal(report.metrics.new_claims_first_observed.value, 1);
   assert.equal(
