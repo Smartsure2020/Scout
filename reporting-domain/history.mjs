@@ -6,9 +6,10 @@ import {
   getStatusEvaluation,
 } from "./claims-rules.mjs";
 import { resolveScoutHandler } from "./roles.mjs";
+import { detectParentIdentityConflict } from "./claim-parent.mjs";
 
 export const HISTORY_SCHEMA_VERSION = "scout-history-v1";
-export const HISTORY_DERIVATION_VERSION = "scout-history-derivation-v1";
+export const HISTORY_DERIVATION_VERSION = "scout-history-derivation-v2";
 export const DEFAULT_SOURCE_SYSTEM = "cardinal_claims";
 export const DEFAULT_MAX_ROW_COUNT_DROP_RATIO = 0.5;
 
@@ -524,7 +525,7 @@ function normalizedSourceHandler(source) {
   ]);
 }
 
-function buildSnapshot(source, index, context, duplicateClaimNumbers) {
+function buildSnapshot(source, index, context) {
   const qualityFlags = [];
   const sourceClaimNumber = firstValue(source, [
     "claimNo",
@@ -543,10 +544,6 @@ function buildSnapshot(source, index, context, duplicateClaimNumbers) {
   if (!status.mapped && !status.terminal && hasSemanticStatus)
     qualityFlags.push("unmapped_status");
   if (!hasSemanticStatus) qualityFlags.push("missing_status");
-  if (duplicateClaimNumbers.has(claimNumber) && claimNumber) {
-    qualityFlags.push("duplicate_claim_number", "identity_ambiguity");
-  }
-
   const handlerSource = normalizedSourceHandler(source);
   const handlerResolution = resolveScoutHandler(
     context.activeUsers,
@@ -579,8 +576,11 @@ function buildSnapshot(source, index, context, duplicateClaimNumbers) {
   const sourceEventAt = parseSourceEventAt(
     firstValue(source, ["sourceEventAt", "event_at"]),
   );
-  const identityIsMatchable =
-    Boolean(claimNumber) && !duplicateClaimNumbers.has(claimNumber);
+  // A valid claim number is matchable by default. A logical parent that turns
+  // out to disagree on a claim-identifying invariant is demoted to a
+  // non-matchable identity conflict in the second pass of
+  // normalizeHistoricalRows - repeated claim numbers alone are NOT ambiguity.
+  const identityIsMatchable = Boolean(claimNumber);
   const identityKey = identityIsMatchable
     ? `${context.sourceSystem}:${claimNumber}`
     : null;
@@ -717,12 +717,11 @@ export function normalizeHistoricalRows(
       rejectedRows.push({ rowIndex: index, flags: ["invalid_row"] });
       continue;
     }
-    const snapshot = buildSnapshot(
-      source,
-      index,
-      { sourceSystem, effectiveDate, activeUsers },
-      duplicateClaimNumbers,
-    );
+    const snapshot = buildSnapshot(source, index, {
+      sourceSystem,
+      effectiveDate,
+      activeUsers,
+    });
     if (snapshot.data_quality_flags.includes("missing_claim_number")) {
       rejectedRows.push({
         rowIndex: index,
@@ -732,6 +731,41 @@ export function normalizeHistoricalRows(
     }
     snapshots.push(snapshot);
   }
+  // Second pass: resolve logical parent identity across rows that share a claim
+  // number. Legitimate multi-section repeats stay matchable under one shared
+  // identity key (source_system:claimNo); only rows that disagree on a claim-
+  // identifying invariant (insured / registered_date / dol_date / insurer) are
+  // demoted to a non-matchable parent identity conflict. Repeated claim number
+  // alone is never treated as corruption.
+  const parentGroups = new Map();
+  for (const snapshot of snapshots) {
+    const number = snapshot.source_claim_number
+      ? String(snapshot.source_claim_number).trim()
+      : "";
+    if (!number) continue;
+    if (!parentGroups.has(number)) parentGroups.set(number, []);
+    parentGroups.get(number).push(snapshot);
+  }
+  let identityConflictRowCount = 0;
+  for (const group of parentGroups.values()) {
+    if (group.length === 1) continue;
+    const { identity_quality } = detectParentIdentityConflict(group);
+    if (identity_quality === "conflict") {
+      for (const snapshot of group) {
+        snapshot.identity_matchable = false;
+        snapshot.identity_key = null;
+        snapshot.identity_confidence = "ambiguous";
+        if (!snapshot.data_quality_flags.includes("parent_identity_conflict"))
+          snapshot.data_quality_flags.push("parent_identity_conflict");
+        identityConflictRowCount += 1;
+      }
+    } else {
+      for (const snapshot of group) {
+        if (!snapshot.data_quality_flags.includes("multi_row_claim"))
+          snapshot.data_quality_flags.push("multi_row_claim");
+      }
+    }
+  }
   const quality = {
     source_row_count: inputRows.length,
     normalized_claim_count: snapshots.length,
@@ -739,8 +773,9 @@ export function normalizeHistoricalRows(
     rejected_claim_count: rejectedRows.length,
     invalid_row_count: rejectedRows.length,
     duplicate_claim_number_count: duplicateClaimNumbers.size,
-    identity_ambiguity_count: snapshots.filter((row) =>
-      row.data_quality_flags.includes("identity_ambiguity"),
+    identity_ambiguity_count: identityConflictRowCount,
+    multi_row_claim_count: snapshots.filter((row) =>
+      row.data_quality_flags.includes("multi_row_claim"),
     ).length,
     unknown_handler_count: snapshots.filter((row) =>
       row.data_quality_flags.includes("unrecognised_handler"),

@@ -23,10 +23,16 @@ import {
   HISTORY_SCHEMA_VERSION,
 } from "./history.mjs";
 import { resolveActiveScoutUsers } from "./roles.mjs";
+import {
+  consensusValue,
+  diffParentPresence,
+  groupSnapshotsByParent,
+  parentIdentityKey,
+} from "./claim-parent.mjs";
 
-export const REPORTING_METRIC_VERSION = "claims-reporting-metrics-v1";
-export const REPORT_SCHEMA_VERSION = "scout-report-v1";
-export const REPORTING_QUALITY_VERSION = "scout-reporting-quality-v1";
+export const REPORTING_METRIC_VERSION = "claims-reporting-metrics-v2";
+export const REPORT_SCHEMA_VERSION = "scout-report-v2";
+export const REPORTING_QUALITY_VERSION = "scout-reporting-quality-v2";
 export const REPORTING_DOMAIN = "claims";
 export const REPORTING_TIME_ZONE = BUSINESS_TIME_ZONE;
 
@@ -350,22 +356,13 @@ function comparableSnapshotMap(snapshots) {
   return byKey;
 }
 
-function uniqueSnapshots(snapshots) {
-  const byIdentity = new Map();
-  for (const snapshot of asArray(snapshots)) {
-    const key = snapshot?.identity_key || snapshotReference(snapshot);
-    if (!key || !snapshot?.identity_matchable) continue;
-    byIdentity.set(key, snapshot);
-  }
-  return [...byIdentity.values()];
-}
-
 function periodSnapshotRows(
   manifests,
   snapshotsByExtract,
   period,
   timeZone,
   scope,
+  canonicalByKey,
 ) {
   const rows = [];
   const relevantManifests = authoritativeManifestModel(manifests, scope)
@@ -375,14 +372,126 @@ function periodSnapshotRows(
     .sort((left, right) => manifestSort(left, right, timeZone));
   for (const manifest of relevantManifests) {
     rows.push(
-      ...uniqueSnapshots(
+      ...parentClaimsForExtract(
         snapshotsForExtract(snapshotsByExtract, manifest.id),
-      ).map((snapshot) => mapSnapshotToClaim(snapshot, manifest, timeZone)),
+        manifest,
+        timeZone,
+        canonicalByKey,
+      ),
     );
   }
   const latestObservedByClaim = new Map();
   for (const row of rows) latestObservedByClaim.set(row.id, row);
   return [...latestObservedByClaim.values()];
+}
+
+/**
+ * Derive parent-level lifecycle events across the AUTHORITATIVE extract chain
+ * for a reporting period. Walks the last authoritative extract strictly before
+ * the period (the comparison baseline, so the first in-period extract does not
+ * mass-emit first_observed) plus every authoritative extract inside the period,
+ * in effective chronological order, comparing each adjacent pair via the pure
+ * parent presence diff. Superseded/non-authoritative extracts never
+ * participate. Events are attributed to the observation instant of the CURRENT
+ * extract in each transition, and only those whose instant is in the period are
+ * returned.
+ *
+ * missing_from_extract is emitted only when the current extract is comparable to
+ * its predecessor, and is NEVER a closure - closure is a deterministic
+ * open->terminal parent transition (terminal_transition_observed) only.
+ */
+// The authoritative extract chain a period's lifecycle is derived over: the
+// last authoritative extract strictly before the period (comparison baseline)
+// followed by every authoritative extract inside the period, in effective
+// chronological order. Fewer than two entries means no adjacent pair exists to
+// derive lifecycle transitions from.
+function authoritativeChainForPeriod(manifests, period, timeZone, scope) {
+  const authoritative = authoritativeManifestModel(manifests, scope)
+    .authoritative.filter((manifest) => manifestInstant(manifest, timeZone))
+    .sort((left, right) => manifestSort(left, right, timeZone));
+  let baseline = null;
+  const inPeriod = [];
+  for (const manifest of authoritative) {
+    const instant = manifestInstant(manifest, timeZone);
+    if (instant.getTime() < period.start.getTime()) {
+      baseline = manifest;
+    } else if (periodMembership(instant, period)) {
+      inPeriod.push(manifest);
+    }
+  }
+  return baseline ? [baseline, ...inPeriod] : inPeriod;
+}
+
+export function deriveParentLifecycleEvents(
+  manifests,
+  snapshotsByExtract,
+  period,
+  timeZone = BUSINESS_TIME_ZONE,
+  scope = {},
+) {
+  const chain = authoritativeChainForPeriod(manifests, period, timeZone, scope);
+  // Resolve canonical parenthood LONGITUDINALLY, but AS-OF the reporting
+  // boundary: over authoritative history <= period.end only (all pre-period
+  // baseline and in-period extracts, never a post-period extract). This is the
+  // SAME bounded canonical domain the inventory, exact-closure and report
+  // claim-row identity use, so lifecycle references stay in one domain and a
+  // future authoritative extract cannot rewrite this period's lifecycle refs. A
+  // legacy matchable singleton still never promotes a child UUID because the
+  // pre-period ambiguity is retained.
+  const authoritativeIds = authoritativeIdsAsOf(
+    manifests,
+    period.end,
+    timeZone,
+    scope,
+  );
+  const canonicalByKey = buildParentCanonicalIndex(
+    snapshotsByExtract,
+    authoritativeIds,
+  );
+  const events = [];
+  for (let index = 1; index < chain.length; index += 1) {
+    const previous = chain[index - 1];
+    const current = chain[index];
+    const currentInstant = manifestInstant(current, timeZone);
+    if (!periodMembership(currentInstant, period)) continue;
+    const comparable =
+      current.quality_summary?.comparable_to_previous !== false;
+    const previousParents = groupSnapshotsByParent(
+      snapshotsForExtract(snapshotsByExtract, previous.id),
+    );
+    const currentParents = groupSnapshotsByParent(
+      snapshotsForExtract(snapshotsByExtract, current.id),
+    );
+    // Map a logical parent key to the SAME reporting reference id the metric
+    // populations use (canonical claim UUID when one exists, else the parent
+    // identity key) so lifecycle and inventory populations stay consistent.
+    const refFrom = (parents) => {
+      const map = new Map();
+      for (const parent of parents)
+        map.set(
+          parent.parent_identity_key,
+          parentReferenceId(parent, canonicalByKey),
+        );
+      return map;
+    };
+    const currentRefs = refFrom(currentParents);
+    const previousRefs = refFrom(previousParents);
+    for (const event of diffParentPresence(previousParents, currentParents)) {
+      if (event.type === "missing_from_extract" && !comparable) continue;
+      const claimRef =
+        event.type === "missing_from_extract"
+          ? previousRefs.get(event.parent_identity_key)
+          : currentRefs.get(event.parent_identity_key);
+      events.push({
+        ...event,
+        claim_ref: claimRef ?? event.parent_identity_key,
+        observed_at: currentInstant.toISOString(),
+        source_extract_id: current.id,
+        previous_extract_id: previous.id,
+      });
+    }
+  }
+  return events;
 }
 
 function metricPopulation(ids = []) {
@@ -483,6 +592,230 @@ function mapSnapshotToClaim(snapshot, manifest, timeZone) {
   };
 }
 
+function extractIdsOf(snapshotsByExtract) {
+  return snapshotsByExtract instanceof Map
+    ? [...snapshotsByExtract.keys()]
+    : Object.keys(asObject(snapshotsByExtract));
+}
+
+/**
+ * LONGITUDINAL canonical-parent resolution. Canonical parenthood must never be
+ * decided from a single extract: the pre-MS2 normalizer marked a row matchable
+ * whenever its claim number was not duplicated IN THAT EXTRACT, so a legitimate
+ * ambiguous lineage with changing cardinality (2 -> 1 -> 2) can present a
+ * MATCHABLE singleton in the middle extract. That singleton's UUID must not be
+ * promoted to parent identity.
+ *
+ * Aggregating every authoritative row for a logical parent_identity_key, a
+ * canonical UUID is affirmed ONLY when, across the whole lineage: no row was
+ * ever non-matchable, and exactly one distinct claim_id was ever observed
+ * (the parent-aware persistence model's shared UUID). Any legacy ambiguity -
+ * a non-matchable row anywhere, or more than one historical UUID - forces the
+ * parent to the stable parent_identity_key with claim_id NULL.
+ *
+ * Returns Map<parent_identity_key, canonicalUuid | null>.
+ */
+function buildParentCanonicalIndex(snapshotsByExtract, authoritativeIds) {
+  const agg = new Map();
+  for (const extractId of extractIdsOf(snapshotsByExtract)) {
+    if (authoritativeIds && !authoritativeIds.has(extractId)) continue;
+    for (const row of snapshotsForExtract(snapshotsByExtract, extractId)) {
+      const key = parentIdentityKey(row);
+      if (!key) continue;
+      let entry = agg.get(key);
+      if (!entry) {
+        entry = { claimIds: new Set(), anyNonMatchable: false };
+        agg.set(key, entry);
+      }
+      if (row?.identity_matchable === true && row?.identity_key) {
+        if (row.claim_id) entry.claimIds.add(String(row.claim_id));
+      } else {
+        entry.anyNonMatchable = true;
+      }
+    }
+  }
+  const canonical = new Map();
+  for (const [key, entry] of agg) {
+    canonical.set(
+      key,
+      !entry.anyNonMatchable && entry.claimIds.size === 1
+        ? [...entry.claimIds][0]
+        : null,
+    );
+  }
+  return canonical;
+}
+
+// Longitudinal canonical UUID for a parent projection, resolved from the whole
+// lineage (canonicalByKey). Falls back to a conservative per-projection check
+// only when no lineage index is supplied.
+function parentCanonicalClaimId(parent, canonicalByKey) {
+  if (canonicalByKey) return canonicalByKey.get(parent.parent_identity_key) ?? null;
+  const rows = parent.rows || [];
+  if (rows.length === 0) return null;
+  const allMatchable = rows.every(
+    (row) => row?.identity_matchable === true && Boolean(row?.identity_key),
+  );
+  if (!allMatchable) return null;
+  const ids = new Set(rows.map((row) => row?.claim_id).filter(Boolean));
+  return ids.size === 1 ? [...ids][0] : null;
+}
+
+// Deterministic metric-population identity: the longitudinal canonical claim
+// UUID when one is affirmed, else the stable logical parent identity key (so a
+// parent with a NULL claim_id is never dropped and never borrows a child UUID).
+function parentReferenceId(parent, canonicalByKey) {
+  return (
+    parentCanonicalClaimId(parent, canonicalByKey) ?? parent.parent_identity_key
+  );
+}
+
+// Map every authoritative historical child claim_id to its stable logical-parent
+// reference id, using the SAME longitudinal resolution, so evidence keyed by a
+// raw child UUID normalizes into the parent identity domain for deduplication.
+// Deterministic regardless of snapshotsByExtract iteration order because the
+// canonical index is aggregated over all extracts first.
+function buildParentRefIndex(snapshotsByExtract, authoritativeIds, canonicalByKey) {
+  const index = new Map();
+  for (const extractId of extractIdsOf(snapshotsByExtract)) {
+    if (authoritativeIds && !authoritativeIds.has(extractId)) continue;
+    for (const row of snapshotsForExtract(snapshotsByExtract, extractId)) {
+      const key = parentIdentityKey(row);
+      if (!key || !row?.claim_id) continue;
+      index.set(String(row.claim_id), canonicalByKey.get(key) ?? key);
+    }
+  }
+  return index;
+}
+
+// AS-OF authoritative scope: the authoritative manifest ids whose observation
+// instant is at or before a reporting boundary. Canonical parent identity for a
+// report must be resolved from history <= the report's closing boundary only, so
+// a FUTURE authoritative extract (after the period) can never retroactively
+// change an earlier report's parent reference or claim_id. All earlier history -
+// pre-period baseline and older ambiguity evidence - is retained, which the
+// legacy 2 -> 1 singleton-trap detection depends on. Because the closing
+// boundary extract is the latest authoritative extract at/before period.end,
+// bounding by period.end selects exactly the same authoritative extracts as
+// bounding by the selected closing extract's instant.
+function authoritativeIdsAsOf(manifests, boundaryInstant, timeZone, scope) {
+  return new Set(
+    authoritativeManifestModel(manifests, scope)
+      .authoritative.filter((manifest) => {
+        const instant = manifestInstant(manifest, timeZone);
+        return instant && instant.getTime() <= boundaryInstant.getTime();
+      })
+      .map((manifest) => manifest.id),
+  );
+}
+
+// True when an authoritative extract exists strictly before the period start -
+// the comparison baseline first-observed derivation needs for the first
+// in-period extract.
+function hasPrePeriodBaseline(manifests, period, timeZone, scope) {
+  return authoritativeManifestModel(manifests, scope)
+    .authoritative.filter((manifest) => manifestInstant(manifest, timeZone))
+    .some(
+      (manifest) =>
+        manifestInstant(manifest, timeZone).getTime() < period.start.getTime(),
+    );
+}
+
+function consensusScalar(parent, field) {
+  const { status, value } = consensusValue(parent.rows, field);
+  return status === "disagree" || status === "all_missing" ? null : value;
+}
+
+/**
+ * Project one logical parent claim into the claim shape the metric functions
+ * consume. A single-row parent maps exactly as the pre-MS2 row did (same id,
+ * same scalars) so existing single-row reporting is unchanged. A multi-row
+ * parent counts once, rolls its state up conservatively, exposes only
+ * consensus scalars, and leaves financial fields null (aggregation unresolved).
+ */
+function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
+  if (parent.row_count === 1) {
+    const claim = mapSnapshotToClaim(parent.rows[0], manifest, timeZone);
+    claim.id = parentReferenceId(parent, canonicalByKey);
+    claim.parent_identity_key = parent.parent_identity_key;
+    claim.canonical_claim_id = parentCanonicalClaimId(parent, canonicalByKey);
+    claim.rowCount = 1;
+    claim.multiRow = false;
+    claim.identityQuality = parent.identity_quality;
+    claim.parentQualityFlags = parent.quality_flags;
+    return claim;
+  }
+  const asOfDate = manifestReferenceDate(manifest, timeZone);
+  const registeredDate = consensusScalar(parent, "registered_date");
+  const movementDate = consensusScalar(parent, "movement_date");
+  const calendarAge =
+    registeredDate && asOfDate
+      ? calendarDaysBetween(registeredDate, asOfDate)
+      : null;
+  return {
+    id: parentReferenceId(parent, canonicalByKey),
+    claim_id: parentCanonicalClaimId(parent, canonicalByKey),
+    parent_identity_key: parent.parent_identity_key,
+    canonical_claim_id: parentCanonicalClaimId(parent, canonicalByKey),
+    identity_key: parent.parent_identity_key,
+    sourceClaimNumber: parent.source_claim_number,
+    open: parent.lifecycle_state === "open",
+    terminal: parent.lifecycle_state === "terminal",
+    stateResolution: parent.state_resolution,
+    statusNormalized: consensusScalar(parent, "status_normalized"),
+    registeredDate,
+    dolDate: consensusScalar(parent, "dol_date"),
+    movementDate,
+    calendarAge,
+    workingAge: null,
+    daysSinceMovement:
+      movementDate && asOfDate
+        ? calendarDaysBetween(movementDate, asOfDate)
+        : null,
+    // Financial aggregation semantics are unproven for multi-row parents:
+    // never sum/max/first - leave null and let the metric fail closed.
+    outstanding: null,
+    estimate: null,
+    paid: null,
+    mandate: null,
+    handlerSource: consensusScalar(parent, "handler_source"),
+    handlerEmail: consensusScalar(parent, "handler_email"),
+    resolvedScoutUserId: consensusScalar(parent, "resolved_scout_user_id"),
+    handlerResolution: "unassigned",
+    insurer: consensusScalar(parent, "insurer"),
+    insured: consensusScalar(parent, "insured"),
+    dataQualityFlags: parent.quality_flags,
+    snapshotExtractId: manifest?.id ?? null,
+    snapshotEffectiveDate: asOfDate,
+    rowCount: parent.row_count,
+    multiRow: true,
+    identityQuality: parent.identity_quality,
+    parentQualityFlags: parent.quality_flags,
+  };
+}
+
+function parentClaimsForExtract(snapshots, manifest, timeZone, canonicalByKey) {
+  return groupSnapshotsByParent(snapshots).map((parent) =>
+    mapParentToClaim(parent, manifest, timeZone, canonicalByKey),
+  );
+}
+
+// Open multi-row parents whose aggregation semantics remain unresolved - the
+// population that forces financial and C-metrics to fail closed.
+function unresolvedMultiRowParents(rows) {
+  return asArray(rows).filter((claim) => claim.multiRow && claim.open);
+}
+
+function excludedParentNumbers(parents) {
+  return [
+    ...new Set(
+      parents
+        .map((claim) => claim.sourceClaimNumber ?? claim.parent_identity_key)
+        .filter(Boolean),
+    ),
+  ].sort();
+}
+
 function evaluateSnapshotClaim(claim) {
   try {
     return evaluateClaim(claim, { asOfDate: claim.snapshotEffectiveDate });
@@ -499,19 +832,22 @@ function closingState(
   closingSelection,
   snapshotsByExtract,
   timeZone,
+  canonicalByKey,
 ) {
   const openingRows = openingSelection.manifest
-    ? uniqueSnapshots(
+    ? parentClaimsForExtract(
         snapshotsForExtract(snapshotsByExtract, openingSelection.manifest.id),
-      ).map((snapshot) =>
-        mapSnapshotToClaim(snapshot, openingSelection.manifest, timeZone),
+        openingSelection.manifest,
+        timeZone,
+        canonicalByKey,
       )
     : [];
   const closingRows = closingSelection.manifest
-    ? uniqueSnapshots(
+    ? parentClaimsForExtract(
         snapshotsForExtract(snapshotsByExtract, closingSelection.manifest.id),
-      ).map((snapshot) =>
-        mapSnapshotToClaim(snapshot, closingSelection.manifest, timeZone),
+        closingSelection.manifest,
+        timeZone,
+        canonicalByKey,
       )
     : [];
   return {
@@ -555,32 +891,54 @@ function sourceDateRegistrationMetric(rows, period, evidence) {
   });
 }
 
-function firstObservedMetric(changes, period, registeredIds, evidence) {
-  const ids = new Set();
-  for (const change of changes) {
-    if (
-      change?.change_type === "first_observed" &&
-      periodMembership(changeInstant(change), period) &&
-      change?.claim_id &&
-      !registeredIds.has(String(change.claim_id))
-    ) {
-      ids.add(String(change.claim_id));
-    }
-  }
-  if (!changes.some((change) => change?.change_type === "first_observed")) {
+// First-observed is derived from parent PRESENCE across the authoritative
+// extract chain (parent absent -> present), never from legacy row-era stored
+// first_observed change rows. Unavailable when no authoritative adjacent pair
+// exists to compare (single extract, no prior-period baseline).
+function firstObservedMetric(
+  lifecycleEvents,
+  registeredIds,
+  evidence,
+  comparable,
+) {
+  if (!comparable) {
     return unavailableMetric(
       "new_claims_first_observed",
       "first_observed_history_unavailable",
     );
   }
+  const ids = new Set();
+  for (const event of lifecycleEvents) {
+    if (
+      event.type === "first_observed" &&
+      event.claim_ref &&
+      !registeredIds.has(String(event.claim_ref))
+    ) {
+      ids.add(String(event.claim_ref));
+    }
+  }
   return metric("new_claims_first_observed", ids.size, {
     precision: "observed_period",
     claimIds: [...ids],
-    evidence: { ...evidence, change_type: "first_observed" },
+    evidence: {
+      ...evidence,
+      change_type: "first_observed",
+      derivation: "parent_presence",
+    },
   });
 }
 
-function closureMetrics(changes, period, evidence) {
+// Closure counts (a) exact source-explicit closure events from stored changes
+// and (b) deterministic parent open->terminal transitions DERIVED from the
+// authoritative chain. A parent merely disappearing (missing_from_extract) is
+// never a closure.
+function closureMetrics(
+  changes,
+  lifecycleEvents,
+  period,
+  evidence,
+  parentRefFor,
+) {
   const exact = new Set();
   const observed = new Set();
   const exactTypes = new Set([
@@ -588,6 +946,14 @@ function closureMetrics(changes, period, evidence) {
     "claim_closed",
     "terminal_transition",
   ]);
+  // Both closure streams must dedupe in the SAME logical-parent identity domain.
+  // Stored exact evidence is keyed by a scout_history_claims UUID (a per-row
+  // CHILD UUID for old ambiguous lineage); derived evidence is keyed by the
+  // logical parent reference. Normalize the exact side to the logical parent so
+  // a single claim closed with both source-exact and observed evidence is
+  // counted once, never promoting an arbitrary child UUID.
+  const toParentRef =
+    typeof parentRefFor === "function" ? parentRefFor : (id) => id;
   for (const change of changes) {
     if (!periodMembership(changeInstant(change), period) || !change?.claim_id)
       continue;
@@ -596,9 +962,12 @@ function closureMetrics(changes, period, evidence) {
       change.source_event_at &&
       change.provenance === "source_explicit"
     ) {
-      exact.add(String(change.claim_id));
-    } else if (change.change_type === "terminal_transition_observed") {
-      observed.add(String(change.claim_id));
+      exact.add(String(toParentRef(String(change.claim_id))));
+    }
+  }
+  for (const event of lifecycleEvents) {
+    if (event.type === "terminal_transition_observed" && event.claim_ref) {
+      observed.add(String(event.claim_ref));
     }
   }
   const combined = new Set([...exact, ...observed]);
@@ -852,7 +1221,38 @@ function financialMetrics(closingOpen, evidence) {
     ["financial_paid_total", "paid", "paid_total"],
   ];
   const metrics = {};
+  // Each financial field fails closed independently when any open multi-row
+  // parent has unresolved aggregation semantics. The single-row subtotal is a
+  // diagnostic only - it is NEVER published as the metric value, because
+  // identical child values do not prove additive-vs-repeated semantics.
+  const unresolved = unresolvedMultiRowParents(closingOpen);
+  const singleRow = closingOpen.filter((claim) => !claim.multiRow);
+  const excludedNumbers = excludedParentNumbers(unresolved);
   for (const [id, field, definition] of fields) {
+    if (unresolved.length > 0) {
+      const knownSingleRow = singleRow.filter(
+        (claim) =>
+          claim[field] !== null &&
+          claim[field] !== undefined &&
+          Number.isFinite(Number(claim[field])),
+      );
+      metrics[id] = unavailableMetric(
+        id,
+        "financial_aggregation_unresolved",
+        [],
+        {
+          reason: "financial_aggregation_unresolved",
+          definition,
+          unresolved_parent_count: unresolved.length,
+          unresolved_claim_numbers: excludedNumbers,
+          known_single_row_subtotal: knownSingleRow.reduce(
+            (sum, claim) => sum + Number(claim[field]),
+            0,
+          ),
+        },
+      );
+      continue;
+    }
     const known = closingOpen.filter(
       (claim) =>
         claim[field] !== null &&
@@ -1176,6 +1576,7 @@ function buildReportClaimRows(
   timeZone,
   preferredExtractId = null,
   authoritativeManifestIds = null,
+  canonicalByKey = null,
 ) {
   const membership = new Map();
   for (const [metricId, value] of Object.entries(metrics)) {
@@ -1208,61 +1609,83 @@ function buildReportClaimRows(
   const isAuthoritativeSnapshot = (snapshot) =>
     !authoritativeManifestIds ||
     authoritativeManifestIds.has(snapshot?.extract_id);
-  const byClaim = new Map();
-  for (const snapshot of snapshotsForExtract(
-    snapshotsByExtract,
-    preferredExtractId,
-  )) {
-    if (!isAuthoritativeSnapshot(snapshot)) continue;
-    const claimId = snapshotReference(snapshot);
-    if (claimId) byClaim.set(String(claimId), snapshot);
-  }
-  for (const snapshot of allSnapshots(snapshotsByExtract)) {
-    if (!isAuthoritativeSnapshot(snapshot)) continue;
-    const claimId = snapshotReference(snapshot);
-    if (claimId && !byClaim.has(String(claimId)))
-      byClaim.set(String(claimId), snapshot);
-  }
   const manifestsById = new Map(
     asArray(manifests).map((manifest) => [manifest.id, manifest]),
   );
+  // Index logical parent projections by their metric-population reference id.
+  // Parents are extract-scoped, so group per extract (preferred extract first
+  // so the closing snapshot wins), never across extracts.
+  const parentByRef = new Map();
+  const indexExtract = (extractId) => {
+    if (!extractId) return;
+    const manifest = manifestsById.get(extractId) || null;
+    const snaps = snapshotsForExtract(snapshotsByExtract, extractId).filter(
+      isAuthoritativeSnapshot,
+    );
+    for (const parent of groupSnapshotsByParent(snaps)) {
+      const ref = String(parentReferenceId(parent, canonicalByKey));
+      if (!parentByRef.has(ref)) parentByRef.set(ref, { parent, manifest });
+    }
+  };
+  indexExtract(preferredExtractId);
+  for (const manifest of asArray(manifests)) indexExtract(manifest.id);
+
   return [...membership.entries()].map(([claimId, entry]) => {
-    const snapshot = byClaim.get(claimId);
-    const manifest = manifestsById.get(snapshot?.extract_id);
+    const found = parentByRef.get(claimId) || {};
+    const parent = found.parent || null;
+    const manifest = found.manifest || null;
+    const isMultiRow = Boolean(parent && parent.row_count > 1);
+    const singleRow = parent && parent.row_count === 1 ? parent.rows[0] : null;
     const claim =
-      snapshot && manifest
-        ? mapSnapshotToClaim(snapshot, manifest, timeZone)
+      singleRow && manifest
+        ? mapSnapshotToClaim(singleRow, manifest, timeZone)
         : null;
+    const scalar = (field, singleValue) =>
+      isMultiRow ? consensusScalar(parent, field) : singleValue;
     return {
-      claim_id: snapshot?.claim_id ?? claimId,
-      source_system: snapshot?.source_system ?? "cardinal_claims",
-      source_claim_number:
-        snapshot?.source_claim_number ?? claim?.sourceClaimNumber ?? null,
-      identity_key: snapshot?.identity_key ?? claim?.identity_key ?? null,
+      // Canonical parent UUID when one legitimately exists, else NULL (old
+      // ambiguous multi-row parents). Never a child row UUID as the parent.
+      claim_id: parent ? parentCanonicalClaimId(parent, canonicalByKey) : null,
+      parent_identity_key: parent?.parent_identity_key ?? null,
+      source_system: parent?.source_system ?? "cardinal_claims",
+      source_claim_number: parent?.source_claim_number ?? null,
+      identity_key: parent?.parent_identity_key ?? null,
       metric_ids: entry.metric_ids.sort(),
       membership_reasons: entry.membership_reasons,
-      handler_snapshot:
-        snapshot?.handler_source ?? claim?.handlerSource ?? null,
-      handler_email_snapshot:
-        snapshot?.handler_email ?? claim?.handlerEmail ?? null,
-      resolved_scout_user_id_snapshot:
-        snapshot?.resolved_scout_user_id ?? claim?.resolvedScoutUserId ?? null,
-      status_snapshot:
-        snapshot?.status_normalized ?? claim?.statusNormalized ?? null,
-      insurer_snapshot: snapshot?.insurer ?? claim?.insurer ?? null,
-      peril_snapshot: snapshot?.peril ?? claim?.peril ?? null,
-      registered_date_snapshot:
-        snapshot?.registered_date ?? claim?.registeredDate ?? null,
-      calendar_age_snapshot:
-        snapshot?.calendar_age ?? claim?.calendarAge ?? null,
-      working_age_snapshot: snapshot?.working_age ?? claim?.workingAge ?? null,
-      outstanding_snapshot: snapshot?.outstanding ?? claim?.outstanding ?? null,
-      estimate_snapshot: snapshot?.estimate ?? claim?.estimate ?? null,
-      paid_snapshot: snapshot?.paid ?? claim?.paid ?? null,
+      handler_snapshot: scalar("handler_source", claim?.handlerSource ?? null),
+      handler_email_snapshot: scalar(
+        "handler_email",
+        claim?.handlerEmail ?? null,
+      ),
+      resolved_scout_user_id_snapshot: scalar(
+        "resolved_scout_user_id",
+        claim?.resolvedScoutUserId ?? null,
+      ),
+      status_snapshot: scalar(
+        "status_normalized",
+        claim?.statusNormalized ?? null,
+      ),
+      insurer_snapshot: scalar("insurer", claim?.insurer ?? null),
+      peril_snapshot: isMultiRow ? null : (singleRow?.peril ?? null),
+      registered_date_snapshot: scalar(
+        "registered_date",
+        claim?.registeredDate ?? null,
+      ),
+      calendar_age_snapshot: isMultiRow ? null : (claim?.calendarAge ?? null),
+      working_age_snapshot: isMultiRow ? null : (claim?.workingAge ?? null),
+      // Multi-row financial aggregation is unresolved: never copy or sum a
+      // child row's money onto the parent - persist NULL.
+      outstanding_snapshot: isMultiRow
+        ? null
+        : (singleRow?.outstanding ?? null),
+      estimate_snapshot: isMultiRow ? null : (singleRow?.estimate ?? null),
+      paid_snapshot: isMultiRow ? null : (singleRow?.paid ?? null),
       relevant_flags: {
-        priority: snapshot?.priority_flags ?? [],
-        operational: snapshot?.operational_flags ?? [],
-        quality: snapshot?.data_quality_flags ?? [],
+        priority: singleRow?.priority_flags ?? [],
+        operational: singleRow?.operational_flags ?? [],
+        quality: singleRow?.data_quality_flags ?? [],
+        row_count: parent?.row_count ?? 0,
+        parent_quality_flags: parent?.quality_flags ?? [],
       },
     };
   });
@@ -1316,11 +1739,37 @@ export function buildReportSnapshot({
     timeZone,
     scope,
   });
+  // Resolve canonical parenthood ONCE, LONGITUDINALLY, but AS-OF the report
+  // closing boundary. The canonical index is built from authoritative history at
+  // or before period.end only (which, because the closing extract is the latest
+  // authoritative extract <= period.end, is exactly the lineage through the
+  // selected closing extract) - never from authoritative extracts that arrived
+  // AFTER this report's boundary. A future extract can therefore never rewrite
+  // this report's parent reference or claim_id, while all earlier history
+  // (pre-period baseline and older ambiguity) is retained for the 2 -> 1
+  // singleton trap. Every downstream projection (closing state, period rows,
+  // lifecycle refs, exact-closure ref normalization, report claim rows) shares
+  // this single as-of index, so a logical parent resolves to the same stable
+  // reference id everywhere, independent of map iteration order.
+  const asOfAuthoritativeIds = authoritativeIdsAsOf(
+    manifests,
+    period.end,
+    timeZone,
+    scope,
+  );
+  const asOfAuthoritativeManifests = authoritativeManifests.filter((manifest) =>
+    asOfAuthoritativeIds.has(manifest.id),
+  );
+  const canonicalByKey = buildParentCanonicalIndex(
+    snapshotsByExtract,
+    asOfAuthoritativeIds,
+  );
   const state = closingState(
     openingSelection,
     closingSelection,
     snapshotsByExtract,
     timeZone,
+    canonicalByKey,
   );
   const coverage = coverageAssessment({
     period,
@@ -1392,6 +1841,7 @@ export function buildReportSnapshot({
     period,
     timeZone,
     scope,
+    canonicalByKey,
   );
   const registered = sourceDateRegistrationMetric(
     periodRows.length ? periodRows : state.closingRows,
@@ -1400,16 +1850,45 @@ export function buildReportSnapshot({
   );
   metrics.new_claims_registered = registered;
   const registeredIds = new Set(registered.claim_population.claim_ids);
-  metrics.new_claims_first_observed = firstObservedMetric(
-    periodChanges,
+  const parentLifecycle = deriveParentLifecycleEvents(
+    manifests,
+    snapshotsByExtract,
     period,
+    timeZone,
+    scope,
+  );
+  // First-observed is only a COMPLETE period metric when a pre-period
+  // authoritative baseline exists to establish parent absence/presence for the
+  // FIRST in-period extract. Without it, the first in-period population has no
+  // predecessor and would be silently omitted, so fail closed rather than
+  // publish a hidden partial count. (>= 2 in-period extracts with no baseline is
+  // still incomplete for exactly that first extract.)
+  const lifecycleComparable = hasPrePeriodBaseline(
+    manifests,
+    period,
+    timeZone,
+    scope,
+  );
+  metrics.new_claims_first_observed = firstObservedMetric(
+    parentLifecycle,
     registeredIds,
     { evidence_type: "observed_change", period: period.start.toISOString() },
+    lifecycleComparable,
   );
-  const closures = closureMetrics(periodChanges, period, {
-    evidence_type: "observed_change",
-    period: period.start.toISOString(),
-  });
+  // Normalize stored exact-closure child UUIDs to the same logical-parent domain
+  // as the derived lifecycle stream so a parent is never double-counted.
+  const parentRefIndex = buildParentRefIndex(
+    snapshotsByExtract,
+    asOfAuthoritativeIds,
+    canonicalByKey,
+  );
+  const closures = closureMetrics(
+    periodChanges,
+    parentLifecycle,
+    period,
+    { evidence_type: "observed_change", period: period.start.toISOString() },
+    (claimId) => parentRefIndex.get(String(claimId)) ?? claimId,
+  );
   metrics.claims_closed = closures.closed;
   metrics.claims_closed_exact = closures.exact;
   metrics.claims_closed_observed = closures.observed;
@@ -1462,6 +1941,38 @@ export function buildReportSnapshot({
       evidence: closingEvidence,
     },
   );
+
+  // C-metric capability boundary: any open multi-row parent whose semantics are
+  // unresolved makes the WHOLE affected metric unavailable - never a hidden
+  // partial that silently omits those parents from a portfolio figure.
+  const unresolvedParents = unresolvedMultiRowParents(closingOpen);
+  if (unresolvedParents.length > 0) {
+    const details = {
+      reason: "multi_row_parent_aggregation_unresolved",
+      excluded_parent_count: unresolvedParents.length,
+      excluded_claim_numbers: excludedParentNumbers(unresolvedParents),
+    };
+    const gatedMetricIds = [
+      "sla_compliance",
+      "sla_breaches",
+      "sla_summary",
+      "no_movement_over_14",
+      "no_movement_over_30",
+      "ready_to_close",
+      "zero_estimate_payment_request",
+      "operational_health",
+      "handler_performance",
+      "assignment_activity",
+    ];
+    for (const id of gatedMetricIds) {
+      metrics[id] = unavailableMetric(
+        id,
+        "multi_row_parent_aggregation_unresolved",
+        [],
+        details,
+      );
+    }
+  }
 
   if (
     !closingSelection.manifest ||
@@ -1545,10 +2056,11 @@ export function buildReportSnapshot({
     claim_rows: buildReportClaimRows(
       metrics,
       snapshotsByExtract,
-      authoritativeManifests,
+      asOfAuthoritativeManifests,
       timeZone,
       closingSelection.manifest?.id ?? null,
-      authoritativeModel.authoritativeIds,
+      asOfAuthoritativeIds,
+      canonicalByKey,
     ),
   };
 }

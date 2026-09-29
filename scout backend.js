@@ -925,28 +925,63 @@ async function getReportWorkflowMembership(env, reportId, type) {
   );
 }
 
-async function getWorkflowClaimContext(env, run, claimId) {
-  if (!claimId) return {};
+async function getWorkflowClaimContext(
+  env,
+  run,
+  claimId,
+  sourceClaimNumber = null,
+) {
+  if (!claimId && !sourceClaimNumber) return {};
   try {
     const boundary = run?.closing_extract_id
       ? `&extract_id=eq.${encodeURIComponent(run.closing_extract_id)}`
       : "";
+    // Prefer the canonical claim UUID (globally unique, inherently identity-
+    // scoped). Otherwise fall back to the logical parent's source claim number
+    // for a v2 NULL-claim_id parent. Parent identity is source_system +
+    // source_claim_number; scout_history_snapshots carries no source_system
+    // column, so the source-claim-number fallback is scoped to the report's own
+    // authoritative extract (a single source_system - currently cardinal_claims)
+    // via the boundary. Without that boundary we do NOT run a global claim-
+    // number lookup, so a repeated number in another source can never leak in.
+    let selector;
+    if (claimId) {
+      selector = "claim_id=eq." + encodeURIComponent(claimId);
+    } else {
+      if (!boundary) return {};
+      selector = "source_claim_number=eq." + encodeURIComponent(sourceClaimNumber);
+    }
     const rows = await supabase(
       env,
-      "/scout_history_snapshots?claim_id=eq." +
-        encodeURIComponent(claimId) +
+      "/scout_history_snapshots?" +
+        selector +
         boundary +
-        "&select=handler_source,handler_email,status_normalized,insurer&order=source_row_index.desc&limit=1",
+        "&select=handler_source,handler_email,status_normalized,insurer,source_row_index&order=source_row_index.asc",
       "GET",
       null,
       true,
     );
-    const row = rows?.[0];
-    if (!row) return {};
+    if (!rows?.length) return {};
+    // One section -> its context; multiple sections -> only expose a value when
+    // the sections agree (consensus), never an arbitrary row.
+    const consensus = (field) => {
+      const values = [
+        ...new Set(
+          rows
+            .map((row) => row[field])
+            .filter(
+              (value) => value !== null && value !== undefined && value !== "",
+            ),
+        ),
+      ];
+      return values.length === 1 ? values[0] : null;
+    };
     return {
-      handler_snapshot: row.handler_source || row.handler_email || null,
-      claim_status_snapshot: row.status_normalized || null,
-      insurer_snapshot: row.insurer || null,
+      handler_snapshot:
+        consensus("handler_source") || consensus("handler_email") || null,
+      claim_status_snapshot: consensus("status_normalized"),
+      insurer_snapshot: consensus("insurer"),
+      evidence_row_count: rows.length,
     };
   } catch {
     return {};
@@ -954,7 +989,12 @@ async function getWorkflowClaimContext(env, run, claimId) {
 }
 
 async function workflowSnapshotForReport(env, item, type, run, options = {}) {
-  const claimContext = await getWorkflowClaimContext(env, run, item.claim_id);
+  const claimContext = await getWorkflowClaimContext(
+    env,
+    run,
+    item.claim_id,
+    item.source_claim_number_snapshot || item.source_claim_number || null,
+  );
   return {
     ...workflowSnapshot(item, type, run.id, options),
     ...claimContext,
@@ -1682,6 +1722,37 @@ async function loadReportEvidence(env, { reportType, periodStart, scope }) {
 
 async function persistReportDraft(env, report, currentUser, scope, existing) {
   const record = reportRunRecord(report, currentUser, scope, existing);
+  // Report schema v2: validate & normalize the claim population BEFORE any DB
+  // mutation, so an invalid generated population can never partially mutate an
+  // existing draft (PATCH run -> DELETE claims -> POST). Every v2 row MUST have
+  // a non-blank parent_identity_key; claim_id may be a canonical UUID or NULL,
+  // but a supplied non-null claim_id that is not a legitimate UUID is a hard
+  // error - it is never silently downgraded to NULL.
+  const normalizedClaimRows = (
+    Array.isArray(report.claim_rows) ? report.claim_rows : []
+  ).map((claim, index) => {
+    const rawKey = claim.parent_identity_key;
+    const parentKey = typeof rawKey === "string" ? rawKey.trim() : rawKey;
+    if (!parentKey) {
+      throw new Error(
+        `Report v2 claim population row ${index} is missing parent_identity_key`,
+      );
+    }
+    let claimId = null;
+    if (
+      claim.claim_id !== null &&
+      claim.claim_id !== undefined &&
+      claim.claim_id !== ""
+    ) {
+      claimId = uuidValue(claim.claim_id);
+      if (!claimId) {
+        throw new Error(
+          `Report v2 claim population row ${index} has a malformed claim_id`,
+        );
+      }
+    }
+    return { ...claim, claim_id: claimId, parent_identity_key: parentKey };
+  });
   let run;
   if (existing) {
     await supabase(
@@ -1714,13 +1785,10 @@ async function persistReportDraft(env, report, currentUser, scope, existing) {
   }
   if (!run) throw new Error("Report run could not be persisted");
 
-  const claimRows = report.claim_rows
-    .map((claim) => ({
-      ...claim,
-      claim_id: uuidValue(claim.claim_id),
-      report_run_id: run.id,
-    }))
-    .filter((claim) => claim.claim_id);
+  const claimRows = normalizedClaimRows.map((claim) => ({
+    ...claim,
+    report_run_id: run.id,
+  }));
   for (let index = 0; index < claimRows.length; index += 200) {
     await supabase(
       env,

@@ -156,6 +156,9 @@ function persistFetch(calls) {
 function reportWithClaims(count) {
   return {
     claim_rows: Array.from({ length: count }, (_, index) => ({
+      // Report schema v2 requires a parent_identity_key on every row; claim_id
+      // is carried through the sandbox's identity uuidValue stub.
+      parent_identity_key: `cardinal_claims:claim-${index}`,
       claim_id: `claim-${index}`,
       metric_ids: [],
     })),
