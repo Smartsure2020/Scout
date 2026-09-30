@@ -142,7 +142,7 @@ class StorageError extends Error {
 
 function json(data, status, origin) {
   const headers = {
-    "Content-Type": "application/json",
+    "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
     Vary: "Origin",
   };
@@ -923,6 +923,15 @@ function managerItemLine(item) {
 }
 
 export function buildTeamsManagerWebhookPayload(message) {
+  const title = message.title || "";
+  // message.text intentionally keeps the leading title line because it is also
+  // persisted verbatim in digest history. Only the rendered card drops the
+  // duplicate first line so the Teams title is not shown twice. Deterministic:
+  // strip the exact title prefix and any newlines that immediately follow it.
+  let bodyText = message.text || "";
+  if (title && bodyText.startsWith(title)) {
+    bodyText = bodyText.slice(title.length).replace(/^(?:\r?\n)+/, "");
+  }
   return {
     type: "message",
     attachments: [
@@ -935,12 +944,12 @@ export function buildTeamsManagerWebhookPayload(message) {
           body: [
             {
               type: "TextBlock",
-              text: message.title,
+              text: title,
               weight: "Bolder",
               size: "Medium",
               wrap: true,
             },
-            { type: "TextBlock", text: message.text, wrap: true },
+            { type: "TextBlock", text: bodyText, wrap: true },
           ],
         },
       },
@@ -1758,7 +1767,7 @@ function hasDestinationField(body) {
   );
 }
 
-async function sendPilot(request, env, caller, httpFetch, now) {
+async function sendPilot(request, env, caller, httpFetch, clock) {
   let body;
   try {
     body = await request.json();
@@ -1781,7 +1790,11 @@ async function sendPilot(request, env, caller, httpFetch, now) {
   const readiness = managerPilotReadiness(data, env);
   if (!readiness.managerPilotReady)
     throw new RequestError(503, "manager_pilot_not_ready", readiness);
-  const message = buildManagerBriefing(data.model, data.extract, now);
+  // Single injected clock source. Capture the run start once and persist it
+  // explicitly so the recorded started_at can never trail a later completed_at
+  // produced by a separate clock reading (or a database default).
+  const runStartedAt = clock();
+  const message = buildManagerBriefing(data.model, data.extract, runStartedAt);
   const deliveryId = await deterministicUuid(idempotencyKey);
   const reservation = await reserveDelivery(
     env,
@@ -1818,6 +1831,7 @@ async function sendPilot(request, env, caller, httpFetch, now) {
         extract_date:
           data.extract.extract_date || data.extract.effective_date || null,
         status: "started",
+        started_at: runStartedAt.toISOString(),
         claim_count: data.model.metrics.active,
         delivery_count: 1,
       },
@@ -1843,7 +1857,7 @@ async function sendPilot(request, env, caller, httpFetch, now) {
     await patchRun(
       env,
       run.id,
-      { status: "completed", completed_at: now.toISOString() },
+      { status: "completed", completed_at: clock().toISOString() },
       httpFetch,
     );
     return {
@@ -1887,7 +1901,7 @@ async function sendPilot(request, env, caller, httpFetch, now) {
             run.id,
             {
               status: "accepted_audit_incomplete",
-              completed_at: now.toISOString(),
+              completed_at: clock().toISOString(),
             },
             httpFetch,
           );
@@ -1923,7 +1937,7 @@ async function sendPilot(request, env, caller, httpFetch, now) {
           await patchRun(
             env,
             run.id,
-            { status: "delivery_unknown", completed_at: now.toISOString() },
+            { status: "delivery_unknown", completed_at: clock().toISOString() },
             httpFetch,
           );
         } catch {
@@ -1954,7 +1968,7 @@ async function sendPilot(request, env, caller, httpFetch, now) {
         await patchRun(
           env,
           run.id,
-          { status: "failed", completed_at: now.toISOString() },
+          { status: "failed", completed_at: clock().toISOString() },
           httpFetch,
         );
       } catch {
@@ -2013,7 +2027,7 @@ export function createBriefingsWorker({
           request.method === "POST"
         ) {
           return json(
-            await sendPilot(request, env, caller, fetchImpl, now()),
+            await sendPilot(request, env, caller, fetchImpl, now),
             200,
             origin,
           );

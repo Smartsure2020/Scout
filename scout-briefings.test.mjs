@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
+  buildManagerBriefing,
   buildPilotBriefingModel,
+  buildTeamsManagerWebhookPayload,
   createBriefingsWorker,
   historySnapshotForBriefing,
   PRODUCTION_ORIGIN,
@@ -144,6 +146,7 @@ function makeHarness({
   teamsSendFailure = false,
   teamsResponseStatus = 202,
   failPostSendAudit = false,
+  clock = null,
 } = {}) {
   const deliveries = new Map();
   const runs = new Map();
@@ -279,7 +282,7 @@ function makeHarness({
 
   const worker = createBriefingsWorker({
     fetchImpl,
-    now: () => new Date("2026-09-11T06:30:00Z"),
+    now: clock || (() => new Date("2026-09-11T06:30:00Z")),
   });
   return {
     worker,
@@ -1763,6 +1766,83 @@ test("manager message is capped and retains accepted operational meaning", async
   assert.match(text, /Top risk watch/);
   assert.ok(text.length < 12000);
   assert.equal(text.includes("CLM-328"), false);
+});
+
+test("Teams Adaptive Card shows the title once and keeps it in the persisted text", () => {
+  const model = pilotModel(sampleClaims(), {
+    previousClaims: sampleClaims().slice(1),
+  });
+  const message = buildManagerBriefing(
+    model,
+    { effective_date: "2026-09-10" },
+    new Date("2026-09-11T06:30:00Z"),
+  );
+  const body =
+    buildTeamsManagerWebhookPayload(message).attachments[0].content.body;
+
+  // The title lives exactly in the dedicated (bold) title TextBlock.
+  assert.equal(body[0].text, message.title);
+  assert.equal(body[0].weight, "Bolder");
+
+  // message.text is unchanged — it still opens with the title because it is
+  // persisted verbatim in digest history.
+  assert.ok(message.text.startsWith(message.title));
+
+  // The second TextBlock must not repeat the title line.
+  assert.equal(body[1].text.startsWith(message.title), false);
+  assert.equal(body[1].text.includes(message.title), false);
+
+  // The second TextBlock retains the operational briefing content.
+  assert.match(body[1].text, /Data as at/);
+  assert.match(body[1].text, /Active claims/);
+  assert.match(body[1].text, /Critical SLA/);
+  assert.match(body[1].text, /Management attention/);
+  assert.match(body[1].text, /Top risk watch/);
+});
+
+test("send-pilot persists started_at from the injected clock and never completes before it", async () => {
+  let tick = 0;
+  const base = Date.parse("2026-09-11T06:30:00.000Z");
+  // Sequential clock: each reading advances one second so an out-of-order
+  // completed_at would be strictly less than started_at if the code reused an
+  // earlier reading.
+  const clock = () => new Date(base + 1000 * tick++);
+  const { worker, env, runs } = makeHarness({ clock });
+  const result = await worker.fetch(
+    request("/briefings/send-pilot", {
+      method: "POST",
+      body: sendPayload("clock-ordering-key"),
+    }),
+    env,
+  );
+  assert.equal(result.status, 200);
+
+  const run = [...runs.values()][0];
+  assert.equal(run.status, "completed");
+  // started_at is explicitly persisted, not left to a database default.
+  assert.ok(run.started_at, "started_at must be persisted explicitly");
+  assert.ok(run.completed_at, "completed_at must be persisted");
+  assert.ok(
+    Date.parse(run.completed_at) >= Date.parse(run.started_at),
+    `completed_at (${run.completed_at}) must be >= started_at (${run.started_at})`,
+  );
+});
+
+test("Briefings API JSON responses advertise UTF-8 explicitly", async () => {
+  const { worker, env } = makeHarness();
+  const health = await worker.fetch(request("/health", { token: null }), env);
+  assert.equal(
+    health.headers.get("Content-Type"),
+    "application/json; charset=utf-8",
+  );
+  const plan = await worker.fetch(
+    request("/briefings/plan", { method: "POST" }),
+    env,
+  );
+  assert.equal(
+    plan.headers.get("Content-Type"),
+    "application/json; charset=utf-8",
+  );
 });
 
 test("history endpoints omit recipient fields", async () => {
