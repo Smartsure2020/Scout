@@ -6,6 +6,7 @@
  */
 
 import { buildBriefingModel } from "./scout-smartsure/claims/briefing-model.mjs";
+import { projectBriefingParents } from "./scout-smartsure/claims/briefing-parents.mjs";
 import { getStatusEvaluation } from "./reporting-domain/claims-rules.mjs";
 
 export const PRODUCTION_ORIGIN =
@@ -241,7 +242,17 @@ function claimPaid(claim) {
   return parseNumber(claim?.paid ?? claim?.paid_amount ?? 0);
 }
 
+// Financial figures are trustworthy for a single-row parent (or a pre-projection
+// raw claim). For a multi-row parent the projection nulls the financial fields
+// and marks them unavailable, so every financial predicate fails closed rather
+// than reading a fabricated zero.
+function financialsAvailable(claim) {
+  return claim?.__parent ? claim.__parent.financialsAvailable !== false : true;
+}
+
 function isTerminalClaim(claim) {
+  const parent = claim?.__parent;
+  if (parent && parent.multiRow) return parent.lifecycleState === "terminal";
   return TERMINAL_STATUSES.has(normaliseStatus(claimStatus(claim)));
 }
 
@@ -278,6 +289,9 @@ function isAssessorClaim(claim) {
 }
 
 function isZeroEstimateClaim(claim) {
+  // A multi-row parent has no safe estimate/outstanding; never infer a zero
+  // estimate anomaly from nulled aggregate financials.
+  if (!financialsAvailable(claim)) return false;
   if (isTerminalClaim(claim) || claimEstimate(claim) !== 0) return false;
   const status = normaliseStatus(claimStatus(claim));
   const outstanding = claimOutstanding(claim);
@@ -296,6 +310,10 @@ function isZeroEstimateClaim(claim) {
 function claimFlags(claim) {
   const age = claimAge(claim);
   const status = normaliseStatus(claimStatus(claim));
+  // Financial-derived flags fail closed for multi-row parents: with aggregate
+  // financials unavailable, a nulled estimate/outstanding must not be read as a
+  // real zero value or a real high-value exposure.
+  const financials = financialsAvailable(claim);
   const estimate = claimEstimate(claim);
   const outstanding = claimOutstanding(claim);
   const isPaymentStatus =
@@ -308,18 +326,19 @@ function claimFlags(claim) {
     isAssessorClaim(claim);
   const flags = [];
 
-  if (isPaymentStatus && estimate === 0) {
+  if (financials && isPaymentStatus && estimate === 0) {
     flags.push(
       status === "payment requested"
         ? "Zero estimate — cannot pay without estimate"
         : "Payment requested — zero estimate: review for closure or data error",
     );
-  } else if (isActiveOrAssessor && estimate === 0 && age > 14) {
+  } else if (financials && isActiveOrAssessor && estimate === 0 && age > 14) {
     flags.push("No estimate captured — assessor update needed");
   }
-  if (outstanding > 0 && estimate === 0)
+  if (financials && outstanding > 0 && estimate === 0)
     flags.push("Estimate missing — outstanding value set, estimate not");
   else if (
+    financials &&
     estimate === 0 &&
     outstanding === 0 &&
     !isPaymentStatus &&
@@ -330,9 +349,9 @@ function claimFlags(claim) {
   if (status === "fraud") flags.push("Fraud matter — urgent insurer liaison");
   if (status.includes("ombudsman") || status.includes("nfo"))
     flags.push("NFO complaint active — urgent management attention");
-  if (status.includes("mandate") || outstanding >= 100000) {
+  if (status.includes("mandate") || (financials && outstanding >= 100000)) {
     flags.push(
-      outstanding >= 100000 && age > 30
+      financials && outstanding >= 100000 && age > 30
         ? "High value — mandate authority required"
         : "Mandate check",
     );
@@ -360,7 +379,12 @@ function claimFlags(claim) {
     flags.push("Possible duplicate — verify before processing");
   if (isLegalClaim(claim) && age > 60)
     flags.push("Recovery overdue — monthly attorney update needed");
-  if (outstanding > 0 && estimate > 0 && outstanding > estimate * 1.5)
+  if (
+    financials &&
+    outstanding > 0 &&
+    estimate > 0 &&
+    outstanding > estimate * 1.5
+  )
     flags.push("Outstanding exceeds estimate by 50%+ — review");
   const closureCandidate = getReadyToCloseCandidate(claim);
   if (closureCandidate) flags.push(closureCandidate.flag);
@@ -370,14 +394,26 @@ function claimFlags(claim) {
 }
 
 function claimPriorityScore(claim) {
+  const financials = financialsAvailable(claim);
   let score = claimFlags(claim).length * 20;
   if (claimAge(claim) >= 30) score += 20;
-  if (claimOutstanding(claim) >= 100000) score += 25;
+  if (financials && claimOutstanding(claim) >= 100000) score += 25;
   if (isZeroEstimateClaim(claim)) score += 35;
   return score;
 }
 
+// Critical status is authoritative only. It comes from an SLA breach mapped by
+// the accepted status taxonomy, or from an explicit severe operational flag
+// (fraud, NFO/ombudsman, cannot-pay, authoritative high-value mandate,
+// 9-month legal window, unactioned new claim). Bare age >= 30 and a bare
+// priority score >= 60 are NOT independently critical — they are stale/at-risk
+// signals and are handled by isStaleClaim and ranking respectively.
 function isCriticalClaim(claim) {
+  // A multi-row parent's criticality is conservatively aggregated from child
+  // evidence at projection time (order-independent), never re-derived from the
+  // single representative status.
+  if (claim?.__parent?.multiRow)
+    return claim.__parent.criticalEvidence === true;
   const flags = claimFlags(claim);
   const statusSla = authoritativeStatusSla(claim);
   return (
@@ -390,14 +426,14 @@ function isCriticalClaim(claim) {
         flag.includes("mandate") ||
         flag.includes("9-month") ||
         flag.includes("New claim unactioned"),
-    ) ||
-    statusSla.critical ||
-    claimAge(claim) >= 30 ||
-    claimPriorityScore(claim) >= 60
+    ) || statusSla.critical
   );
 }
 
 function isStaleClaim(claim) {
+  // Multi-row parent staleness is aggregated from child evidence (and excludes
+  // critical) at projection time, order-independent.
+  if (claim?.__parent?.multiRow) return claim.__parent.staleEvidence === true;
   const statusSla = authoritativeStatusSla(claim);
   return (
     !isCriticalClaim(claim) &&
@@ -410,7 +446,7 @@ function isStaleClaim(claim) {
 function isMandateClaim(claim) {
   return (
     normaliseStatus(claimStatus(claim)).includes("mandate") ||
-    claimOutstanding(claim) >= 100000
+    (financialsAvailable(claim) && claimOutstanding(claim) >= 100000)
   );
 }
 
@@ -518,7 +554,12 @@ function getReadyToCloseCandidate(claim) {
       action: "Close claim",
     };
   }
-  if (status === "payment requested" && estimate === 0 && age > 30) {
+  if (
+    status === "payment requested" &&
+    financialsAvailable(claim) &&
+    estimate === 0 &&
+    age > 30
+  ) {
     return {
       ruleNo: 5,
       priority: "P2",
@@ -543,7 +584,7 @@ function isRiskWatchClaim(claim) {
     isLegalClaim(claim) ||
     status.includes("repudiat") ||
     status.includes("mandate") ||
-    claimOutstanding(claim) >= 100000
+    (financialsAvailable(claim) && claimOutstanding(claim) >= 100000)
   );
 }
 
@@ -589,9 +630,86 @@ function formatDate(value) {
   return text ? text.slice(0, 10) : "Unavailable";
 }
 
+// A snapshot row is terminal from its authoritative persisted boolean when it
+// carries one; only pre-projection raw claims fall back to status matching.
+function briefingRowIsTerminal(row) {
+  if (typeof row?.terminal === "boolean") return row.terminal === true;
+  return TERMINAL_STATUSES.has(normaliseStatus(claimStatus(row)));
+}
+
+// Presentation severity of a single child row: an open parent speaks through its
+// most severe open child, so the reason/next-action shown for the parent is
+// drawn from real, parent-safe evidence.
+function briefingRowSeverity(row) {
+  if (isCriticalClaim(row)) return 3;
+  if (isStaleClaim(row)) return 2;
+  return claimFlags(row).length ? 1 : 0;
+}
+
+function briefingRowHasDuplicateFlag(row) {
+  const flags = Array.isArray(row?.data_quality_flags)
+    ? row.data_quality_flags
+    : [];
+  return (
+    flags.includes("duplicate_claim_number") ||
+    flags.includes("identity_ambiguity") ||
+    row?.possibleDuplicate === true ||
+    row?.possible_duplicate === true
+  );
+}
+
+const BRIEFING_PARENT_HELPERS = {
+  getAge: claimAge,
+  getStatus: claimStatus,
+  getHandler: claimHandler,
+  getInsured: claimInsured,
+  getDaysSinceMovement: (row) => {
+    const value = Number(row?.daysSinceMovement ?? row?.days_since_movement);
+    return Number.isFinite(value) ? value : null;
+  },
+  isTerminalRow: briefingRowIsTerminal,
+  rankRow: briefingRowSeverity,
+  hasDuplicateFlag: briefingRowHasDuplicateFlag,
+  isCriticalRow: isCriticalClaim,
+  isStaleRow: isStaleClaim,
+};
+
+// Collapse raw snapshot rows into logical parent claims so every downstream
+// metric, ranking and comparison operates on parents counted once.
+function projectParents(claims) {
+  return projectBriefingParents(
+    Array.isArray(claims) ? claims : [],
+    BRIEFING_PARENT_HELPERS,
+  );
+}
+
+// New-claim comparison is gated for ambiguous/unresolved parents: their evidence
+// must not manufacture new (or new-critical) movement. Trustworthy parents keep
+// the accepted new-claim heuristic.
+function isNewParentClaim(claim) {
+  if (claim?.__parent && claim.__parent.gateComparison) return false;
+  return isNewClaim(claim);
+}
+
+// A real claim-invariant conflict means the parent's identity is not trustworthy
+// enough to rank or compare. Such parents stay in inventory (lifecycle roll-up)
+// but are gated out of every ranked/comparable bucket and surfaced separately as
+// a bounded data-quality exception.
+function isIdentityConflictParent(claim) {
+  return claim?.__parent?.identityQuality === "conflict";
+}
+
+// Wrap a briefing predicate so a conflicted parent never qualifies for a ranked
+// or comparable management bucket.
+function rankableOnly(predicate) {
+  return (claim) => !isIdentityConflictParent(claim) && predicate(claim);
+}
+
 function modelFor(claims, previousClaims, extract, settings, env) {
-  return buildBriefingModel(
-    claims,
+  const parents = projectParents(claims);
+  const previousParents = projectParents(previousClaims);
+  const model = buildBriefingModel(
+    parents,
     {
       getClaimNo: claimNo,
       getHandler: claimHandler,
@@ -599,17 +717,17 @@ function modelFor(claims, previousClaims, extract, settings, env) {
       getAge: claimAge,
       getScore: claimPriorityScore,
       isTerminal: isTerminalClaim,
-      isCritical: isCriticalClaim,
-      isStale: isStaleClaim,
-      isZeroEstimate: isZeroEstimateClaim,
-      isRisk: isRiskWatchClaim,
-      isMandate: isMandateClaim,
-      isClosure: isClosureClaim,
-      isNoMovement: isNoMovementClaim,
+      isCritical: rankableOnly(isCriticalClaim),
+      isStale: rankableOnly(isStaleClaim),
+      isZeroEstimate: rankableOnly(isZeroEstimateClaim),
+      isRisk: rankableOnly(isRiskWatchClaim),
+      isMandate: rankableOnly(isMandateClaim),
+      isClosure: rankableOnly(isClosureClaim),
+      isNoMovement: rankableOnly(isNoMovementClaim),
       isAwaitingExternal: isAwaitingExternalClaim,
       isAssessorOverdue: isAssessorReportOverdueClaim,
       isPayment: isPaymentClaim,
-      isNew: isNewClaim,
+      isNew: isNewParentClaim,
       getOutstanding: claimOutstanding,
       getPrimaryReason: primaryReason,
       getNextAction: nextAction,
@@ -620,12 +738,24 @@ function modelFor(claims, previousClaims, extract, settings, env) {
     },
     {
       extractDate: extract?.extract_date || extract?.effective_date || null,
-      previousClaims,
-      comparisonAvailable: previousClaims.length > 0,
+      previousClaims: previousParents,
+      comparisonAvailable: previousParents.length > 0,
       includeTerminalClaims: settings.includeTerminalClaims,
       includeSettled: true,
     },
   );
+  // MS2 financial fail-closed: portfolio exposure is unavailable (null) whenever
+  // any in-scope parent's multi-section financial aggregation is unresolved. The
+  // summed figure is never presented as the portfolio total in that case.
+  if (
+    (model.active || []).some(
+      (claim) =>
+        claim?.__parent && claim.__parent.financialsAvailable === false,
+    )
+  ) {
+    model.metrics.exposure = null;
+  }
+  return model;
 }
 
 export function buildPilotBriefingModel({
@@ -658,24 +788,74 @@ export function buildManagerBriefing(model, extract, now = new Date()) {
   const itemByClaimNo = new Map(
     model.handler.items.map((item) => [item.claimNo, item]),
   );
+  // Within each attention section (sections are already ordered by severity) and
+  // across the risk watch, order deterministically: outstanding desc, then age
+  // desc, then claim number asc. A tie never depends on input/row order.
   const attentionItems = model.attention
     .flatMap((section) =>
-      section.claims.map((claim) => {
-        const item = itemByClaimNo.get(String(claimNo(claim)));
-        return {
-          claimNo: claimNo(claim),
-          outstanding: claimOutstanding(claim),
-          primaryReason: section.label,
-          nextAction: nextAction(claim),
-          url: item?.url || "",
-        };
-      }),
+      [...section.claims]
+        .sort(
+          (left, right) =>
+            claimOutstanding(right) - claimOutstanding(left) ||
+            claimAge(right) - claimAge(left) ||
+            String(claimNo(left)).localeCompare(String(claimNo(right))),
+        )
+        .map((claim) => {
+          const item = itemByClaimNo.get(String(claimNo(claim)));
+          const available = financialsAvailable(claim);
+          return {
+            claimNo: claimNo(claim),
+            outstanding: available ? claimOutstanding(claim) : null,
+            outstandingAvailable: available,
+            primaryReason: section.label,
+            nextAction: nextAction(claim),
+            url: item?.url || "",
+          };
+        }),
     )
     .slice(0, 12);
-  const riskItems = model.topRisks.items.slice(0, 5);
+  const riskItems = [...model.topRisks.items]
+    .sort(
+      (left, right) =>
+        number(right.score) - number(left.score) ||
+        number(right.outstanding) - number(left.outstanding) ||
+        number(right.age) - number(left.age) ||
+        String(left.claimNo).localeCompare(String(right.claimNo)),
+    )
+    .slice(0, 5)
+    .map((item) => {
+      const available = financialsAvailable(item.claim);
+      return {
+        ...item,
+        outstanding: available ? item.outstanding : null,
+        outstandingAvailable: available,
+      };
+    });
   const closureItems = attentionItems.filter((item) =>
     item.primaryReason.toLowerCase().includes("closure"),
   );
+  // Fail-closed exposure (MS2 financial semantics): if ANY in-scope parent has
+  // unresolved multi-section financial aggregation, the portfolio exposure is
+  // itself unavailable. A partial numeric total is never presented as the
+  // portfolio figure, and unavailable financial data is never substituted with
+  // R0.
+  const exposureUnavailable = (model.active || []).some(
+    (claim) => claim?.__parent && claim.__parent.financialsAvailable === false,
+  );
+  const exposureLine = exposureUnavailable
+    ? "- Outstanding exposure: unavailable — multi-section financial aggregation unresolved"
+    : `- Outstanding exposure: ${formatCurrency(model.metrics.exposure)}`;
+  // A parent with a real claim-invariant conflict is retained in inventory (via
+  // the accepted lifecycle roll-up) but is NOT a normal rankable/comparable
+  // management item. It is surfaced here as a bounded data-quality exception,
+  // and gated out of attention, risk and new/critical comparison upstream.
+  const conflictExceptions = [
+    ...new Set(
+      (model.active || [])
+        .filter((claim) => claim?.__parent?.identityQuality === "conflict")
+        .map((claim) => String(claimNo(claim))),
+    ),
+  ].sort();
   const lines = [
     `Scout Manager Briefing — ${runDate}`,
     `Data as at: ${extractDate}`,
@@ -685,7 +865,7 @@ export function buildManagerBriefing(model, extract, now = new Date()) {
     `- Active claims: ${model.metrics.active}`,
     `- Critical SLA: ${model.metrics.critical}`,
     `- Stale / at-risk: ${model.metrics.stale}`,
-    `- Outstanding exposure: ${formatCurrency(model.metrics.exposure)}`,
+    exposureLine,
     "",
     "Management attention",
   ];
@@ -707,6 +887,20 @@ export function buildManagerBriefing(model, extract, now = new Date()) {
       ...closureItems.slice(0, 5).map(managerItemLine),
     );
   }
+  if (conflictExceptions.length) {
+    lines.push(
+      "",
+      "Data-quality exceptions",
+      ...conflictExceptions
+        .slice(0, 5)
+        .map(
+          (claimNumber) =>
+            `- ${claimNumber} — claim-identity conflict; resolve source rows before ranking`,
+        ),
+    );
+    if (conflictExceptions.length > 5)
+      lines.push(`- +${conflictExceptions.length - 5} more with conflicts`);
+  }
   return {
     subject,
     title: `Scout Manager Briefing — ${runDate}`,
@@ -718,7 +912,14 @@ export function buildManagerBriefing(model, extract, now = new Date()) {
 
 function managerItemLine(item) {
   const link = item.url ? ` — ${item.url}` : "";
-  return `- ${item.claimNo} — ${item.primaryReason}; ${item.nextAction}; outstanding ${formatCurrency(item.outstanding)}${link}`;
+  // Never render unavailable parent financials as R0: an unsafe multi-row parent
+  // that surfaces here (e.g. an authoritative critical) shows the reason and
+  // action, but its outstanding is explicitly unavailable.
+  const outstanding =
+    item.outstandingAvailable === false
+      ? "outstanding unavailable"
+      : `outstanding ${formatCurrency(item.outstanding)}`;
+  return `- ${item.claimNo} — ${item.primaryReason}; ${item.nextAction}; ${outstanding}${link}`;
 }
 
 export function buildTeamsManagerWebhookPayload(message) {
@@ -1031,6 +1232,10 @@ export function historySnapshotForBriefing(snapshot, manifest) {
   const movementDate = historyDateOnly(snapshot?.movement_date);
   return {
     ...snapshot,
+    // Parent identity is source_system + normalized claim number. Carry the
+    // manifest's source system explicitly so identity never silently relies on
+    // the DEFAULT_SOURCE_SYSTEM fallback in parentIdentityKey().
+    source_system: snapshot?.source_system || manifest?.source_system || null,
     claimNo: snapshot?.source_claim_number || "",
     claim_no: snapshot?.source_claim_number || "",
     status,
