@@ -3485,17 +3485,25 @@ export default {
           );
         }
         const pdf = rendered;
-        const headers = new Headers(pdf.headers);
+        const pdfHeaders = new Headers(pdf.headers);
+        for (const key of [...pdfHeaders.keys()]) {
+          if (key.toLowerCase().startsWith("access-control-")) {
+            pdfHeaders.delete(key);
+          }
+        }
+        for (const [key, value] of Object.entries(headers)) {
+          pdfHeaders.set(key, value);
+        }
         const exportedAt = new Date().toISOString();
-        headers.set("Content-Type", "application/pdf");
-        headers.set(
+        pdfHeaders.set("Content-Type", "application/pdf");
+        pdfHeaders.set(
           "Content-Disposition",
           `attachment; filename="${reportPdfFilename(run)}"`,
         );
-        headers.set("Cache-Control", "no-store");
-        headers.set("X-Scout-Report-Exported-At", exportedAt);
-        headers.set("X-Scout-PDF-Template-Version", PDF_TEMPLATE_VERSION);
-        headers.set("X-Scout-PDF-Renderer-Version", PDF_RENDERER_VERSION);
+        pdfHeaders.set("Cache-Control", "no-store");
+        pdfHeaders.set("X-Scout-Report-Exported-At", exportedAt);
+        pdfHeaders.set("X-Scout-PDF-Template-Version", PDF_TEMPLATE_VERSION);
+        pdfHeaders.set("X-Scout-PDF-Renderer-Version", PDF_RENDERER_VERSION);
         await audit(
           env,
           currentUser.email,
@@ -3510,7 +3518,10 @@ export default {
             renderer_version: PDF_RENDERER_VERSION,
           },
         );
-        return new Response(pdf.body, { status: pdf.status, headers });
+        return new Response(pdf.body, {
+          status: pdf.status,
+          headers: pdfHeaders,
+        });
       } catch (e) {
         await audit(
           env,

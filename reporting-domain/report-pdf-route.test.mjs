@@ -47,7 +47,23 @@ test("4. quickAction payload has no top-level printBackground", () => {
 test("5. a successful render returns application/pdf", () => {
   assert.match(
     pdfRoute,
-    /headers\.set\("Content-Type",\s*"application\/pdf"\)/,
+    /pdfHeaders\.set\("Content-Type",\s*"application\/pdf"\)/,
+  );
+});
+
+test("5b. a successful PDF response preserves Scout CORS headers", () => {
+  assert.match(pdfRoute, /const pdfHeaders = new Headers\(pdf\.headers\)/);
+  assert.match(
+    pdfRoute,
+    /for \(const key of \[\.\.\.pdfHeaders\.keys\(\)\]\) \{\s*if \(key\.toLowerCase\(\)\.startsWith\("access-control-"\)\) \{\s*pdfHeaders\.delete\(key\);\s*\}\s*\}/,
+  );
+  assert.match(
+    pdfRoute,
+    /for \(const \[key, value\] of Object\.entries\(headers\)\) \{\s*pdfHeaders\.set\(key, value\);\s*\}/,
+  );
+  assert.match(
+    pdfRoute,
+    /return new Response\(pdf\.body, \{\s*status: pdf\.status,\s*headers: pdfHeaders,\s*\}\)/,
   );
 });
 
