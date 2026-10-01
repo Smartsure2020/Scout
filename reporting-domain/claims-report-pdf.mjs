@@ -1,6 +1,6 @@
 const TIME_ZONE = "Africa/Johannesburg";
 
-export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v1";
+export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v2";
 export const PDF_RENDERER_VERSION = "cloudflare-browser-run-quick-action";
 
 const MONTHS = [
@@ -422,7 +422,8 @@ function renderSla(view) {
     formatPercent,
   );
   const summary = view.slaSummary;
-  return `<section class="report-section"><div class="section-kicker">Service performance</div><h2>SLA Performance</h2><div class="two-column"><div class="sla-panel"><div class="sla-score">${escapeHtml(compliance.text)}</div><div class="sla-caption">SLA compliance</div><div class="bar-track large"><span class="bar-fill positive-fill" style="width:${compliance.available ? Math.min(100, Math.max(0, Number(compliance.item.value) * 100)) : 0}%"></span></div></div><table class="simple-table">${tableHeader(["SLA population", "Claims"])}<tbody><tr><th scope="row">Compliant</th><td class="numeric">${escapeHtml(formatInteger(summary.compliant))}</td></tr><tr><th scope="row">Breached</th><td class="numeric">${escapeHtml(formatInteger(summary.breached))}</td></tr><tr><th scope="row">Unmapped / excluded</th><td class="numeric">${escapeHtml(formatInteger(summary.unmapped))}</td></tr><tr><th scope="row">Denominator</th><td class="numeric">${escapeHtml(formatInteger(summary.denominator))}</td></tr></tbody></table></div><p class="method-note">Compliance uses the deterministic SLA denominator from the closing snapshot. Unmapped statuses are not silently treated as compliant.</p></section>`;
+  const totalOpen = metricValue(view.snapshot, "closing_inventory");
+  return `<section class="report-section"><div class="section-kicker">Service performance</div><h2>SLA Performance</h2><div class="two-column"><div class="sla-panel"><div class="sla-score">${escapeHtml(compliance.text)}</div><div class="sla-caption">SLA compliance</div><div class="bar-track large"><span class="bar-fill positive-fill" style="width:${compliance.available ? Math.min(100, Math.max(0, Number(compliance.item.value) * 100)) : 0}%"></span></div></div><table class="simple-table">${tableHeader(["SLA population", "Claims"])}<tbody><tr><th scope="row">Compliant</th><td class="numeric">${escapeHtml(formatInteger(summary.compliant))}</td></tr><tr><th scope="row">Breached</th><td class="numeric">${escapeHtml(formatInteger(summary.breached))}</td></tr><tr><th scope="row">Unmapped status</th><td class="numeric">${escapeHtml(formatInteger(summary.unmapped))}</td></tr><tr><th scope="row">Age/SLA unavailable</th><td class="numeric">${escapeHtml(formatInteger(summary.unknown))}</td></tr><tr><th scope="row">Total open claims</th><td class="numeric">${escapeHtml(totalOpen.text)}</td></tr><tr><th scope="row">SLA denominator</th><td class="numeric">${escapeHtml(formatInteger(summary.denominator))}</td></tr></tbody></table></div><p class="method-note">Compliance uses the deterministic SLA denominator from the closing snapshot. Unmapped statuses and unavailable ages are shown separately and are not silently treated as compliant.</p></section>`;
 }
 
 function renderOperational(view) {
@@ -475,14 +476,14 @@ export function renderClaimsReportHtml(run = {}, workflow = {}) {
 }
 
 const PDF_CSS = `
-@page { size: A4 landscape; margin: 15mm 12mm 16mm; }
+@page { size: A4 landscape; margin: 14mm 12mm 15mm; }
 :root { color-scheme: light; --ink: #17324d; --muted: #617286; --line: #dce5ec; --wash: #f4f7fa; --blue: #23658b; --teal: #168b85; --amber: #b8781c; --red: #a63d3d; }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: #fff; color: var(--ink); font-family: Arial, Helvetica, sans-serif; font-size: 10px; line-height: 1.4; }
-body { padding: 16mm 0 13mm; }
+body { padding: 0; }
 .page-header, .page-footer { position: fixed; left: 0; right: 0; color: var(--muted); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; display: flex; justify-content: space-between; }
-.page-header { top: 5mm; }
-.page-footer { bottom: 5mm; border-top: 1px solid var(--line); padding-top: 2mm; }
+.page-header { top: -9mm; }
+.page-footer { bottom: -10mm; border-top: 1px solid var(--line); padding-top: 2mm; }
 .report-header { display: grid; grid-template-columns: 28mm 1fr 58mm; gap: 7mm; align-items: center; border-bottom: 3px solid var(--teal); padding-bottom: 6mm; margin-bottom: 7mm; }
 .brand-mark { color: #fff; background: var(--ink); border-radius: 4px; font-weight: 700; letter-spacing: .14em; padding: 8mm 3mm; text-align: center; font-size: 14px; }
 .eyebrow, .section-kicker { color: var(--teal); font-size: 8px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
@@ -492,13 +493,13 @@ h2 { margin-bottom: 3mm; font-size: 16px; line-height: 1.15; }
 h3 { margin: 5mm 0 2mm; font-size: 11px; }
 .period { color: var(--muted); font-size: 13px; margin: 0; }
 .header-meta { display: grid; gap: 2mm; justify-items: end; text-align: right; color: var(--muted); font-size: 9px; }
-.report-section { break-inside: avoid; margin: 0 0 8mm; }
+.report-section { break-inside: auto; margin: 0 0 5mm; }
 .executive { break-inside: auto; }
 .section-intro, .lead, .method-note { color: var(--muted); }
 .lead { font-size: 12px; max-width: 210mm; margin-bottom: 5mm; }
 .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3mm; }
 .compact-grid { grid-template-columns: repeat(4, 1fr); }
-.kpi-card { min-height: 25mm; background: var(--wash); border: 1px solid var(--line); border-top: 3px solid var(--blue); border-radius: 3px; padding: 3mm; break-inside: avoid; }
+.kpi-card { min-height: 22mm; background: var(--wash); border: 1px solid var(--line); border-top: 3px solid var(--blue); border-radius: 3px; padding: 3mm; break-inside: avoid; }
 .kpi-card.financial { border-top-color: var(--teal); }
 .kpi-label { color: var(--muted); font-size: 9px; min-height: 8mm; }
 .kpi-value { color: var(--ink); font-size: 19px; font-weight: 700; line-height: 1.1; margin: 2mm 0; }
@@ -540,5 +541,5 @@ small { display: block; color: var(--muted); font-size: 8px; font-weight: 400; m
 .warning-list { margin: 2mm 0 0; padding-left: 5mm; color: var(--amber); }
 .success-note { color: var(--teal); font-weight: 700; }
 .methodology { break-before: auto; }
-@media print { .report-section { break-inside: avoid; } .executive, .handler-table, .attention-table, .action-table { break-inside: auto; } }
+@media print { .two-column, .kpi-grid, .callout, .sla-panel { break-inside: avoid; } .handler-table, .attention-table, .action-table { break-inside: auto; } }
 `;

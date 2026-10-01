@@ -3780,7 +3780,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   </div>
 </div>
 
-<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="../oauth-route.js"></script><script type="module" src="./claims-qa.mjs"></script><script type="module" src="./ux-model.mjs"></script><script type="module" src="./reporting-ui.mjs"></script><script type="module" src="./briefing-model.mjs"></script>
+<script data-cfasync="false" src="/cdn-cgi/scripts/5c5dd728/cloudflare-static/email-decode.min.js"></script><script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script><script src="../oauth-route.js"></script><script type="module" src="./claims-qa.mjs"></script><script type="module" src="./cardinal-ingestion.mjs"></script><script type="module" src="./current-state-adapter.mjs"></script><script type="module" src="./ux-model.mjs"></script><script type="module" src="./reporting-ui.mjs"></script><script type="module" src="./briefing-model.mjs"></script>
 <script>
 
 // XSS SANITISER
@@ -4235,19 +4235,6 @@ function parseDateField(value) {
   return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().split("T")[0];
 }
 
-function firstValidDate(...values) {
-  for (const value of values) {
-    if (typeof value === "boolean") continue;
-    const parsed = parseDateField(value);
-    if (parsed) return parsed;
-  }
-  return "";
-}
-
-function parseBooleanField(value) {
-  return value === true || ["true", "yes", "y", "1"].includes(String(value || "").trim().toLowerCase());
-}
-
 function calendarDaysBetween(startStr, endStr) {
   if (!startStr) return null;
   const [sy, sm, sd] = startStr.split("-").map(Number);
@@ -4268,10 +4255,12 @@ function getPriority(claim) {
   const rule = getStatusRule(claim.status);
   const isLegalStatus = rule?.cat === "legal";
   const movementDays = Number(claim.daysSinceMovement);
-  const age = Number(claim.workingAge || claim.age || 0);
-  const calendarAge = Number(claim.calendarAge || age);
-  const estimate = Number(claim.estimate || 0);
-  const outstanding = Number(claim.outstanding || 0);
+  const ageSource = claim.workingAge ?? claim.age;
+  const age = ageSource === null || ageSource === undefined || ageSource === "" ? null : Number(ageSource);
+  const calendarAgeSource = claim.calendarAge ?? age;
+  const calendarAge = calendarAgeSource === null || calendarAgeSource === undefined || calendarAgeSource === "" ? null : Number(calendarAgeSource);
+  const estimate = claim.estimate === null || claim.estimate === undefined || claim.estimate === "" ? null : Number(claim.estimate);
+  const outstanding = claim.outstanding === null || claim.outstanding === undefined || claim.outstanding === "" ? null : Number(claim.outstanding);
   const isPaymentStatus = rule?.cat === "payment";
   const isActiveOrAssessor = ["active", "assessor"].includes(rule?.cat);
 
@@ -4536,7 +4525,7 @@ function getClaimAgeLabel(c) {
     };
   }
   return {
-    text: c.workingAge + "wd old",
+    text: Number.isFinite(c.workingAge) ? c.workingAge + "wd old" : "Age unavailable",
     dateText: "No last-updated date",
     days: c.workingAge,
     hasMovementDate: false,
@@ -4562,9 +4551,9 @@ function deriveLastUpdatedFromPreviousExtract(rawClaims) {
 function isZeroEstimateAnomaly(c) {
   if (isTerminalStatus(c.status)) return false;
   const rule = getStatusRule(c.status);
-  const estimate = Number(c.estimate || 0);
-  const outstanding = Number(c.outstanding || 0);
-  const paid = Number(c.paid || 0);
+  const estimate = c.estimate === null || c.estimate === undefined || c.estimate === "" ? null : Number(c.estimate);
+  const outstanding = c.outstanding === null || c.outstanding === undefined || c.outstanding === "" ? null : Number(c.outstanding);
+  const paid = c.paid === null || c.paid === undefined || c.paid === "" ? null : Number(c.paid);
   if (estimate !== 0) return false;
   if (outstanding > 0) return true;
   if (!rule) return outstanding === 0 && paid === 0;
@@ -4607,8 +4596,9 @@ function hasRecoveryPending(c) {
 function getReadyToCloseCandidate(c) {
   const st = normaliseStatus(c.status);
   if (isTerminalStatus(c.status) && !st.startsWith("settled")) return null;
-  const age = Number(c.workingAge || c.age || 0);
-  const estimate = Number(c.estimate || 0);
+  const ageSource = c.workingAge ?? c.age;
+  const age = ageSource === null || ageSource === undefined || ageSource === "" ? null : Number(ageSource);
+  const estimate = c.estimate === null || c.estimate === undefined || c.estimate === "" ? null : Number(c.estimate);
   const recoveryPending = hasRecoveryPending(c);
 
   if (st === "repudiated - awaiting closure" && age > 7) {
@@ -4821,9 +4811,15 @@ const PRIORITY_PAGE_SIZE = 25;
 const EXTRACT_HISTORY_KEY = "scout_extract_history_v1";
 const MAX_EXTRACT_HISTORY = 10;
 
+function businessDateFromInstant(value = new Date()) {
+  const formatter = window.ScoutCurrentStateAdapter?.businessDateFromInstant;
+  if (!formatter) throw new Error("Current-state claim adapter did not load");
+  return formatter(value);
+}
+
 function currentExtractManifest() {
   if (!Array.isArray(serverHistoryCache)) return null;
-  const extractDate = extractUploadDate ? extractUploadDate.toISOString().split("T")[0] : "";
+  const extractDate = extractUploadDate ? businessDateFromInstant(extractUploadDate) : "";
   return serverHistoryCache.find((entry) =>
     (!["rejected", "processing", "partial_failure"].includes(entry.status)) &&
     ((currentExtractId && entry.id === currentExtractId) ||
@@ -4913,7 +4909,7 @@ function invalidateProcessedClaims() {
 function getProcessedClaims() {
   if (!processedClaimsCache) {
     const extractDate = extractUploadDate instanceof Date && !Number.isNaN(extractUploadDate.getTime())
-      ? extractUploadDate.toISOString().split("T")[0]
+      ? businessDateFromInstant(extractUploadDate)
       : undefined;
     processedClaimsCache = processData(claims, extractDate);
   }
@@ -5016,13 +5012,6 @@ function getExtractChangeSummary(entry, previous) {
 }
 
 // Parse Cardinal currency values — handles "R 1,234.56", "(500.00)" negatives, blanks
-function parseCardinalDate(value) {
-  if (!value) return "";
-  if (value instanceof Date && !Number.isNaN(value.getTime())) return value.toISOString().split("T")[0];
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? "" : parsed.toISOString().split("T")[0];
-}
-
 function getExtractChangeDetails(currentClaims = claims) {
   const previous = getPreviousProcessedClaimsForCurrent();
   const currentByNo = new Map((currentClaims || []).filter(c => c.claimNo).map(c => [c.claimNo, c]));
@@ -5039,8 +5028,10 @@ function getExtractChangeDetails(currentClaims = claims) {
     if (normaliseStatus(prev.status) !== normaliseStatus(c.status)) {
       details.statusChanges.push({ claim: c, previousStatus: prev.status || "", currentStatus: c.status || "" });
     }
-    if (Math.round(Number(prev.estimate || 0) * 100) !== Math.round(Number(c.estimate || 0) * 100)) {
-      details.estimateChanges.push({ claim: c, previousEstimate: Number(prev.estimate || 0), currentEstimate: Number(c.estimate || 0) });
+    const previousEstimate = prev.estimate === null || prev.estimate === undefined || prev.estimate === "" ? null : Number(prev.estimate);
+    const currentEstimate = c.estimate === null || c.estimate === undefined || c.estimate === "" ? null : Number(c.estimate);
+    if (previousEstimate !== currentEstimate) {
+      details.estimateChanges.push({ claim: c, previousEstimate, currentEstimate });
     }
   });
 
@@ -5052,28 +5043,17 @@ function getExtractChangeDetails(currentClaims = claims) {
   return details;
 }
 
-function parseCurrency(val) {
-  if (val === null || val === undefined || val === "") return 0;
-  if (typeof val === "number") return val;
-  let s = String(val).trim();
-  let negative = false;
-  if (s.startsWith("(") && s.endsWith(")")) { negative = true; s = s.slice(1, -1); }
-  s = s.replace(/[Rr]\s?/g, "").replace(/\s/g, "").replace(/,/g, "");
-  const n = parseFloat(s);
-  if (isNaN(n)) return 0;
-  return negative ? -n : n;
-}
-
 function processData(rawClaims, refDateStr) {
   const ref = refDateStr ? new Date(refDateStr + "T12:00:00") : new Date();
   const todayStr = `${ref.getFullYear()}-${String(ref.getMonth()+1).padStart(2,"0")}-${String(ref.getDate()).padStart(2,"0")}`;
   const enrichedClaims = rawClaims.map(c => {
-    const cardinalAge = Number(c.age || 0);
-    const ageProvided = c.ageProvided ?? c.cardinalAgeProvided ?? cardinalAge > 0;
-    const ageFromExtract = !c.registered && ageProvided && cardinalAge > 0;
-    const workingAge = c.registered ? workingDaysBetween(c.registered, todayStr) : (c.age || 0);
-    const calendarAge = c.registered ? calendarDaysBetween(c.registered, todayStr) : (c.age || 0);
-    const ageDiscrepancyDays = c.registered && ageProvided && Number.isFinite(cardinalAge)
+    const parsedCardinalAge = c.age === null || c.age === undefined || c.age === "" ? null : Number(c.age);
+    const cardinalAge = Number.isFinite(parsedCardinalAge) ? parsedCardinalAge : null;
+    const ageProvided = c.ageProvided ?? c.cardinalAgeProvided ?? cardinalAge !== null;
+    const ageFromExtract = !c.registeredDate && ageProvided && cardinalAge !== null;
+    const workingAge = c.registeredDate ? workingDaysBetween(c.registeredDate, todayStr) : cardinalAge;
+    const calendarAge = c.registeredDate ? calendarDaysBetween(c.registeredDate, todayStr) : cardinalAge;
+    const ageDiscrepancyDays = c.registeredDate && ageProvided && Number.isFinite(cardinalAge)
       ? Math.abs(cardinalAge - workingAge)
       : 0;
     const repudiationDate = parseDateField(c.repudiationDate || c.repudiation_date || "");
@@ -5146,9 +5126,9 @@ function isKnownHandlerName(rawName, normalisedName) {
 }
 
 function dataQualityFlagsForClaim(c) {
-  const flags = [];
-  const estimate = Number(c.estimate || 0);
-  const outstanding = Number(c.outstanding || 0);
+  const flags = Array.isArray(c.ingestionQualityFlags) ? [...c.ingestionQualityFlags] : [];
+  const estimate = c.estimate === null || c.estimate === undefined || c.estimate === "" ? null : Number(c.estimate);
+  const outstanding = c.outstanding === null || c.outstanding === undefined || c.outstanding === "" ? null : Number(c.outstanding);
   if (c.duplicateClaimNoInExtract) flags.push("Duplicate claim number in extract");
   if (estimate > 0 && outstanding === 0) flags.push("Estimate present but outstanding is zero");
   if (estimate === 0 && outstanding > 0) flags.push("Outstanding is present but estimate is zero");
@@ -5165,9 +5145,10 @@ function dataQualityFlagsForClaim(c) {
 function buildDataQualityReport(data = getProcessedClaims()) {
   const changeDetails = getExtractChangeDetails(data);
   const duplicateClaimNos = data.filter(c => c.duplicateClaimNoInExtract);
-  const estimateNoOutstanding = data.filter(c => Number(c.estimate || 0) > 0 && Number(c.outstanding || 0) === 0);
-  const outstandingNoEstimate = data.filter(c => Number(c.estimate || 0) === 0 && Number(c.outstanding || 0) > 0);
-  const paymentZeroEstimate = data.filter(c => isPayment(c) && Number(c.estimate || 0) === 0);
+  const estimateNoOutstanding = data.filter(c => Number(c.estimate) > 0 && c.outstanding !== null && c.outstanding !== undefined && c.outstanding !== "" && Number(c.outstanding) === 0);
+  const outstandingNoEstimate = data.filter(c => c.estimate !== null && c.estimate !== undefined && c.estimate !== "" && Number(c.estimate) === 0 && Number(c.outstanding) > 0);
+  const paymentZeroEstimate = data.filter(c => isPayment(c) && c.estimate !== null && c.estimate !== undefined && c.estimate !== "" && Number(c.estimate) === 0);
+  const malformedSourceClaims = data.filter(c => Array.isArray(c.ingestionQualityFlags) && c.ingestionQualityFlags.length > 0);
   const settledWithoutDate = data.filter(c => normaliseStatus(c.status).startsWith("settled") && !c.settledDate);
   const repudiatedWithoutDate = data.filter(c => getStatusRule(c.status)?.cat === "repudiated" && !c.repudiationDate);
   const ageDiscrepancies = data.filter(c => c.ageDiscrepancy);
@@ -5187,7 +5168,8 @@ function buildDataQualityReport(data = getProcessedClaims()) {
     ageDiscrepancies.length +
     unrecognisedHandlers.length +
     missingStatuses.length +
-    unmappedStatuses.length;
+    unmappedStatuses.length +
+    malformedSourceClaims.length;
 
   return {
     issueCount,
@@ -5201,6 +5183,7 @@ function buildDataQualityReport(data = getProcessedClaims()) {
     unrecognisedHandlers,
     missingStatuses,
     unmappedStatuses,
+    malformedSourceClaims,
     changeDetails,
   };
 }
@@ -5218,6 +5201,7 @@ function dataQualityUploadSummary(report) {
   if (report.unrecognisedHandlers.length) parts.push(`${report.unrecognisedHandlers.length} unrecognised handler name(s)`);
   if (report.missingStatuses.length) parts.push(`${report.missingStatuses.length} missing status(es)`);
   if (report.unmappedStatuses.length) parts.push(`${report.unmappedStatuses.length} unmapped status(es)`);
+  if (report.malformedSourceClaims.length) parts.push(`${report.malformedSourceClaims.length} claim(s) with malformed source values`);
   const changes = report.changeDetails;
   if (changes) {
     parts.push(changes.hasPrevious
@@ -6691,7 +6675,8 @@ function renderManager(data = getProcessedClaims()) {
   const staleCount = active.filter(c => isClaimStale(c) && !isClaimCritical(c)).length;
   const zeroCount = active.filter(isZeroEstimateAnomaly).length;
   const readyCount = getReadyToCloseClaims(data).length;
-  const avgAge = active.length ? Math.round(active.reduce((s,c) => s + (c.workingAge || 0), 0) / active.length) : 0;
+  const knownAges = active.map(c => c.workingAge).filter(Number.isFinite);
+  const avgAge = knownAges.length ? Math.round(knownAges.reduce((sum, age) => sum + age, 0) / knownAges.length) : null;
   const riskCount = getRiskClaims(active).length;
   const mandateCount = active.filter(c => c.outstanding >= MANDATE_THRESHOLD).length;
 
@@ -6739,7 +6724,7 @@ function renderManager(data = getProcessedClaims()) {
     </div>
     <div class="stat-card">
       <div class="stat-label">Average claim age</div>
-      <div class="stat-value accent">${avgAge}wd</div>
+      <div class="stat-value accent">${avgAge === null ? "—" : `${avgAge}wd`}</div>
       <div class="stat-sub">active portfolio</div>
     </div>
     <div class="stat-card">
@@ -6926,7 +6911,7 @@ function renderWeeklySummary(active, allData = getProcessedClaims()) {
   const today = new Date();
   const cutoff = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 7);
   const cutoffStr = cutoff.toISOString().split("T")[0];
-  const openedByDate = allData.filter(c => (parseDateField(c.registered) || parseDateField(c.dol)) >= cutoffStr).length;
+  const openedByDate = allData.filter(c => (parseDateField(c.registeredDate) || parseDateField(c.dol)) >= cutoffStr).length;
   const { prev, previousAvailable, prevByNo, curByNo } = previousCurrentClaimSets(allData);
   const openedVsPrevious = [...curByNo.keys()].filter(no => !prevByNo.has(no)).length;
   const closedVsPrevious = prev.filter(c => c.claimNo && !curByNo.has(c.claimNo)).length;
@@ -6973,7 +6958,8 @@ function renderWorkloadBalance(active, handlers) {
     const critical = hc.filter(isClaimCritical).length;
     const stale = hc.filter(c => isClaimStale(c) && !isClaimCritical(c)).length;
     const exposure = hc.reduce((s,c) => s + (c.outstanding || 0), 0);
-    const avgAge = total ? Math.round(hc.reduce((s,c) => s + (c.workingAge || 0), 0) / total) : 0;
+    const knownAges = hc.map(c => c.workingAge).filter(Number.isFinite);
+    const avgAge = knownAges.length ? Math.round(knownAges.reduce((sum, age) => sum + age, 0) / knownAges.length) : null;
     const criticalRate = total ? critical / total : 0;
     const staleRate = total ? stale / total : 0;
     const heat = critical >= 3 || criticalRate >= 0.3 ? "red" : critical > 0 || staleRate >= 0.25 ? "amber" : "green";
@@ -6992,7 +6978,7 @@ function renderWorkloadBalance(active, handlers) {
         <span class="td-mono-muted">${r.total}</span>
         <span class="td-mono-right${r.critical ? " red" : ""}">${r.critical}</span>
         <span class="td-mono-right${r.stale ? " amber" : ""}">${r.stale}</span>
-        <span class="td-mono-muted">${r.avgAge}wd</span>
+        <span class="td-mono-muted">${r.avgAge === null ? "—" : `${r.avgAge}wd`}</span>
         <span class="td-mono-right amber">${fmtCurrency(r.exposure)}</span>
       </div>`).join("")}`;
 }
@@ -7846,7 +7832,7 @@ function setAllClaimsSort(col) {
 
 function claimDateInRange(c, from, to) {
   if (!from && !to) return true;
-  const dates = [c.dol, c.registered].filter(Boolean).map(d => parseDateField(d)).filter(Boolean);
+  const dates = [c.dol, c.registeredDate].filter(Boolean).map(d => parseDateField(d)).filter(Boolean);
   if (!dates.length) return false;
   return dates.some(date => (!from || date >= from) && (!to || date <= to));
 }
@@ -8664,72 +8650,31 @@ function handleFileUpload(file) {
       const wb = XLSX.read(e.target.result, { type: "array", cellDates: true });
       const ws = wb.Sheets[wb.SheetNames[0]];
       const json = XLSX.utils.sheet_to_json(ws);
-      const MOVEMENT_COLS = ["Last Updated", "Last Modified", "Status Updated", "Status Date", "Last Movement Date", "Modified Date", "Updated At"];
+      const ingestion = window.ScoutCardinalIngestion;
+      if (!ingestion) throw new Error("Cardinal ingestion contract did not load");
       let hasMovementColumn = false;
-      // Validate required columns before mapping
-      const REQUIRED_COLS = ["Claim No.", "Claims Status", "Claim Handler", "Age", "Insurer"];
-      const KNOWN_COLS = new Set([
-        "Claim No.", "Claim No", "Claims Status", "Status", "Claim Handler", "Age", "Insurer",
-        "Claim Registered", "DOL", "Description of Loss", "Insured",
-        "Repudiation Date", "Repudiation Notification Date", "Repudiation Letter Date", "Date Repudiated", "Manual Repudiation Date", "Settled Date", "Repudiated",
-        "Last Updated", "Last Modified", "Status Updated", "Status Date", "Last Movement Date", "Modified Date", "Updated At",
-        "Origional Estimate", "Original Estimate", "Own Damage Original Estimate", "Sum Insured", "Outstanding", "Nett Claim", "Claim Value", "Value",
-        "Paid", "RepudiateAmount", "Mandate", "Peril", "Settled", "Comments"
-      ]);
       const uploadWarnings = [];
       if (json.length > 0) {
         const fileColumns = Object.keys(json[0]);
-        hasMovementColumn = MOVEMENT_COLS.some(c => fileColumns.includes(c));
-        const missingCols = REQUIRED_COLS.filter(c => !fileColumns.includes(c));
-        const unmappedCols = fileColumns.filter(c => !KNOWN_COLS.has(c));
-        if (missingCols.length > 0) {
-          uploadWarnings.push(`Missing required columns: ${missingCols.join(", ")}`);
+        const validation = ingestion.validateCardinalColumns(fileColumns);
+        hasMovementColumn = validation.hasMovementColumn;
+        if (validation.missingGroups.length > 0) {
+          uploadWarnings.push(`Missing required fields: ${validation.missingGroups.map(group => `${group.field} (${group.aliases.join(" or ")})`).join(", ")}`);
         }
-        if (unmappedCols.length > 0) {
-          console.warn("[SCOUT upload] Unmapped columns (not mapped to any field):", unmappedCols.join(", "));
+        if (validation.unmappedColumns.length > 0) {
+          console.warn("[SCOUT upload] Unmapped columns (not mapped to any field):", validation.unmappedColumns.join(", "));
         }
         if (!hasMovementColumn) {
           uploadWarnings.push("No Last Updated / Last Modified column found; Scout will derive last movement from successive uploads");
         }
       }
       extractUploadDate = new Date();
-      const extractDate = extractUploadDate.toISOString().split("T")[0];
+      const extractDate = businessDateFromInstant(extractUploadDate);
       // Map Cardinal columns to our internal format
-      claims = deriveLastUpdatedFromPreviousExtract(json.map(row => ({
-        age: Number(row["Age"]) || 0,
-        ageProvided: row["Age"] !== undefined && row["Age"] !== null && row["Age"] !== "",
-        handler: normaliseHandler(String(row["Claim Handler"] || "")),
-        handlerRaw: String(row["Claim Handler"] || "").trim(),
-        claimNo: String(row["Claim No."] || row["Claim No"] || ""),
-        status: normaliseStatus(String(row["Claims Status"] || row["Status"] || "")),
-        registered: parseCardinalDate(row["Claim Registered"]),
-        dol: parseCardinalDate(row["DOL"]),
-        repudiationDate: firstValidDate(row["Repudiation Date"], row["Repudiation Notification Date"], row["Repudiation Letter Date"], row["Date Repudiated"], row["Manual Repudiation Date"]),
-        settledDate: firstValidDate(row["Settled Date"]),
-        lastUpdated: parseDateField(
-          row["Last Updated"] ||
-          row["Status Updated"] ||
-          row["Status Date"] ||
-          row["Last Movement Date"] ||
-          row["Last Modified"] ||
-          row["Modified Date"] ||
-          row["Updated At"]
-        ),
-        description: String(row["Description of Loss"] || ""),
-        insured: String(row["Insured"] || ""),
-        outstanding: parseCurrency(row["Outstanding"] ?? row["Nett Claim"] ?? 0),
-        sumInsured: parseCurrency(row["Sum Insured"] ?? 0),  // DISPLAY ONLY — never used for SLA/mandate
-        estimate: parseCurrency(row["Origional Estimate"] ?? row["Original Estimate"] ?? row["Own Damage Original Estimate"] ?? 0),
-        cardinalEstimate: parseCurrency(row["Origional Estimate"] ?? row["Original Estimate"] ?? row["Own Damage Original Estimate"] ?? 0),
-        paid: parseCurrency(row["Paid"] ?? 0),
-        nettClaim: parseCurrency(row["Nett Claim"] ?? 0),
-        repudiateAmount: parseCurrency(row["RepudiateAmount"] ?? 0),
-        mandate: String(row["Mandate"] || ""),  // Cardinal's own per-claim mandate flag
-        peril: String(row["Peril"] || ""),
-        settled: parseBooleanField(row["Settled"]),
-        insurer: String(row["Insurer"] || ""),
-        comments: String(row["Comments"] || ""),
-      })).filter(c => c.claimNo));
+      claims = deriveLastUpdatedFromPreviousExtract(ingestion.mapCardinalRows(json, {
+        normalizeHandler: normaliseHandler,
+        normalizeStatus: normaliseStatus,
+      }));
       claimsLoaded = true;
       invalidateProcessedClaims();
       const repudiatedWithoutDate = claims.filter(c => getStatusRule(c.status)?.cat === "repudiated" && !c.repudiationDate).length;
@@ -8738,7 +8683,7 @@ function handleFileUpload(file) {
       }
       const historyResult = saveExtractHistoryEntry(claims, file.name, extractDate);
       if (uploadWarnings.length > 0) {
-        status.innerHTML = `⚠ Loaded ${claims.length} claims  -  <strong>Column warning:</strong> ${uploadWarnings.join("; ")}. Affected fields will show as blank or zero.`;
+        status.innerHTML = `⚠ Loaded ${claims.length} claims  -  <strong>Column warning:</strong> ${uploadWarnings.join("; ")}. Missing or malformed fields remain unavailable.`;
       } else {
         status.textContent = `✓ Loaded ${claims.length} claims from ${file.name}`;
       }
@@ -9108,30 +9053,9 @@ async function loadClaimsFromBackend() {
       return false;
     }
     if (Array.isArray(data.claims)) {
-      // Map backend claims to Scout's internal format
-      claims = data.claims.map(c => ({
-        claimId:      c.claim_id || c.history_claim_id || null,
-        age:         c.age_days || 0,
-        ageProvided: c.age_days !== undefined && c.age_days !== null && c.age_days !== "",
-        handler:     c.handler_name || "Unassigned",
-        handlerEmail: c.handler_email || "",
-        claimNo:     c.claim_no || "",
-        status:      c.status || "",
-        registered:  c.registered_date || c.registered || "",
-        repudiationDate: c.repudiation_date || c.repudiationDate || "",
-        settledDate: c.settled_date || c.settledDate || "",
-        lastUpdated: parseDateField(c.last_updated || c.lastUpdated || c.status_updated || c.statusUpdated || c.updated_at || c.updatedAt || c.modified_date || c.modifiedDate || c.status_date || c.statusDate),
-        lastUpdatedSource: c.last_updated_source || c.lastUpdatedSource || "",
-        description: c.description || "",
-        insured:     c.insured_name || "",
-        outstanding: parseFloat(c.outstanding) || 0,
-        peril:       c.peril || "",
-        insurer:     c.insurer || "",
-        comments:    c.comments || "",
-        settled:     false,
-        estimate:    parseFloat(c.estimate ?? c.cardinal_estimate ?? c.original_estimate ?? 0) || 0,
-        cardinalEstimate: parseFloat(c.cardinal_estimate ?? c.estimate ?? c.original_estimate ?? 0) || 0,
-      }));
+      const adapter = window.ScoutCurrentStateAdapter;
+      if (!adapter) throw new Error("Current-state claim adapter did not load");
+      claims = data.claims.map(adapter.currentStateRowToClaim);
       // Defense-in-depth: ensure handlers never hold another handler's data in memory
       if (currentUser.role === "handler") {
         claims = claims.filter(c => c.handler.toLowerCase() === currentUser.name.toLowerCase());
@@ -9177,7 +9101,7 @@ async function saveExtractToBackend(processedClaims, fileName, extractMeta = nul
   if (!currentUser || !["manager","admin"].includes(currentUser.role)) {
     return { ok: false, data: null, error: new Error("Only managers and admins can upload extracts") };
   }
-  const extractDate = extractMeta?.extractDate || new Date().toISOString().split("T")[0];
+  const extractDate = extractMeta?.extractDate || businessDateFromInstant();
   const extractId = extractMeta?.id || `${extractDate}-${Date.now()}`;
   let responseData = null;
   try {
@@ -9192,6 +9116,10 @@ async function saveExtractToBackend(processedClaims, fileName, extractMeta = nul
         fileName,
         extractDate,
         extractId,
+        sourceMetadata: {
+          effective_date_basis: "upload_received_date",
+          source_file_type: String(fileName || "").split(".").pop()?.toLowerCase() || null,
+        },
         dataQuality: latestDataQualityReport || buildDataQualityReport(processedClaims),
         claimSnapshot: processedClaims.map(c => ({
           claimNo: c.claimNo,
@@ -9421,7 +9349,7 @@ function trapOverlayFocus(event, selector) {
 function buildClaimTimeline(c) {
   const events = [];
   if (c.dol) events.push({ label: "Date of loss", value: c.dol, source: "Claim field" });
-  if (c.registered) events.push({ label: "Claim registered", value: c.registered, source: "Claim field" });
+  if (c.registeredDate) events.push({ label: "Claim registered", value: c.registeredDate, source: "Claim field" });
   if (c.lastUpdated) events.push({ label: "Last movement recorded", value: c.lastUpdated, source: c.lastUpdatedSource ? c.lastUpdatedSource.replace(/-/g, " ") : "Claim movement field" });
   if (c.repudiationDate) events.push({ label: "Repudiation recorded", value: c.repudiationDate, source: "Claim field" });
   return events;

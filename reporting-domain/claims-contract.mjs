@@ -43,11 +43,17 @@ export function normalizeClaim(source = {}) {
       source.handler ??
       null,
     registeredDate: dateOrNull(
-      source.registeredDate ?? source.claim_registered ?? source.registered_at,
+      source.registeredDate ??
+        source.registered ??
+        source.claim_registered ??
+        source.registered_at,
     ),
     dolDate: dateOrNull(source.dolDate ?? source.dol ?? source.date_of_loss),
     movementDate: dateOrNull(
-      source.movementDate ?? source.lastMovementDate ?? source.last_updated,
+      source.movementDate ??
+        source.lastMovementDate ??
+        source.lastUpdated ??
+        source.last_updated,
     ),
     repudiationDate: dateOrNull(
       source.repudiationDate ?? source.repudiation_date,
@@ -55,7 +61,8 @@ export function normalizeClaim(source = {}) {
     extractEffectiveAt:
       source.extractEffectiveAt ?? source.extract_effective_at ?? null,
     firstObservedAt: source.firstObservedAt ?? source.first_observed_at ?? null,
-    outstanding: numberOrNull(source.outstanding ?? source.nett_claim),
+    outstanding: numberOrNull(source.outstanding),
+    nettClaim: numberOrNull(source.nettClaim ?? source.nett_claim),
     estimate: numberOrNull(source.estimate ?? source.original_estimate),
     paid: numberOrNull(source.paid),
     mandate: numberOrNull(source.mandate),

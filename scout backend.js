@@ -74,6 +74,7 @@ import {
   persistHistoryEvidenceWithStore,
   HISTORY_BATCH_SIZE,
 } from "./reporting-domain/history-persistence.mjs";
+import { resolveScoutHandler } from "./reporting-domain/roles.mjs";
 import {
   corsHeaders,
   isApprovedPreviewRead,
@@ -466,6 +467,7 @@ export function historicalManifestRecord({
   correctionOfExtractId,
 }) {
   const sourceEffectiveAt = exactEffectiveAt(effectiveAt);
+  const effectiveDateBasis = sourceMetadata?.effective_date_basis || null;
   return {
     source_system: DEFAULT_SOURCE_SYSTEM,
     source_file_name: fileName || "cardinal-extract.xlsx",
@@ -477,7 +479,9 @@ export function historicalManifestRecord({
     effective_precision: sourceEffectiveAt
       ? "exact_timestamp"
       : extractDate
-        ? "source_date"
+        ? effectiveDateBasis === "upload_received_date"
+          ? "unknown"
+          : "source_date"
         : "unknown",
     received_at: receivedAt,
     uploaded_by_email: currentUser.email,
@@ -1861,6 +1865,77 @@ function maskClaim(claim, role) {
   return claim;
 }
 
+function nullableCurrentNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function nullableCurrentDate(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const text = String(value).trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+}
+
+function nullableCurrentText(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+export function buildCurrentStateClaimRecord(
+  claim,
+  extractDate,
+  users = [],
+) {
+  const handlerSource =
+    claim?.handlerRaw ?? claim?.handler ?? claim?.handlerEmail ?? "";
+  const handlerResolution = resolveScoutHandler(users, handlerSource);
+  const resolvedHandler = handlerResolution.user;
+  return {
+    handlerResolution: handlerResolution.status,
+    handlerSource: String(handlerSource || "").trim(),
+    record: {
+      extract_date: extractDate,
+      claim_no: claim?.claimNo || "",
+      handler_email: resolvedHandler?.email || "",
+      handler_name:
+        resolvedHandler?.displayName || claim?.handler || handlerSource || "",
+      insured_name: claim?.insured || "",
+      insured_masked: maskName(claim?.insured || ""),
+      status: claim?.status || "",
+      age_days: nullableCurrentNumber(claim?.workingAge ?? claim?.age),
+      cardinal_age_days: nullableCurrentNumber(
+        claim?.cardinalAge ?? claim?.age,
+      ),
+      peril: claim?.peril || "",
+      peril_type: claim?.perilType || "",
+      insurer: claim?.insurer || "",
+      outstanding: nullableCurrentNumber(claim?.outstanding),
+      estimate: nullableCurrentNumber(claim?.estimate),
+      paid: nullableCurrentNumber(claim?.paid),
+      description: claim?.description || "",
+      dol: nullableCurrentDate(claim?.dolDate ?? claim?.dol),
+      registered_date: nullableCurrentDate(
+        claim?.registeredDate ?? claim?.registered,
+      ),
+      repudiation_date: nullableCurrentDate(claim?.repudiationDate),
+      last_updated: nullableCurrentDate(
+        claim?.lastUpdated ?? claim?.lastMovementDate,
+      ),
+      last_updated_source: nullableCurrentText(claim?.lastUpdatedSource),
+      settled_date: nullableCurrentDate(claim?.settledDate),
+      ingestion_quality_flags: Array.isArray(claim?.ingestionQualityFlags)
+        ? [...new Set(claim.ingestionQualityFlags)]
+        : [],
+      comments: claim?.comments || "",
+      priority_score: nullableCurrentNumber(claim?.priority?.score) ?? 0,
+      priority_flags: claim?.priority?.flags || [],
+      recommended_action: claim?.priority?.action || "",
+    },
+  };
+}
+
 // ── Microsoft token verification ─────────────────────────────
 async function verifyMsToken(token, env) {
   // Verify via Microsoft Graph — get user info from the token
@@ -2502,28 +2577,19 @@ export default {
         // Insert new claims in batches of 200
         const batchSize = 200;
         for (let i = 0; i < claims.length; i += batchSize) {
-          const batch = claims.slice(i, i + batchSize).map((c) => {
-            const handlerEmail = resolveEmail(c.handler, handlerDirectory);
-            if (c.handler && !handlerEmail) unresolvedHandlers.add(c.handler);
-            return {
-              extract_date: date,
-              claim_no: c.claimNo || "",
-              handler_email: handlerEmail,
-              handler_name: c.handler || "",
-              insured_name: c.insured || "",
-              insured_masked: maskName(c.insured || ""),
-              status: c.status || "",
-              age_days: c.age || 0,
-              peril: c.peril || "",
-              peril_type: c.perilType || "",
-              insurer: c.insurer || "",
-              outstanding: c.outstanding || 0,
-              description: c.description || "",
-              comments: c.comments || "",
-              priority_score: c.priority?.score || 0,
-              priority_flags: c.priority?.flags || [],
-              recommended_action: c.priority?.action || "",
-            };
+          const batch = claims.slice(i, i + batchSize).map((claim) => {
+            const mapped = buildCurrentStateClaimRecord(
+              claim,
+              date,
+              handlerDirectory,
+            );
+            if (
+              mapped.handlerSource &&
+              ["unrecognised", "ambiguous"].includes(mapped.handlerResolution)
+            ) {
+              unresolvedHandlers.add(mapped.handlerSource);
+            }
+            return mapped.record;
           });
           await supabase(env, "/scout_claims", "POST", batch, true);
         }
@@ -3672,61 +3738,3 @@ export default {
     return err("Not found", 404);
   },
 };
-
-// ── Handler email resolution ─────────────────────────────────
-// Handler identity is sourced from the active Scout user directory. No
-// individual production names or email addresses are embedded in the Worker.
-function handlerIdentityKey(value) {
-  return String(value || "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "");
-}
-
-function handlerIdentityTokens(value) {
-  return String(value || "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean)
-    .sort()
-    .join("|");
-}
-
-function handlerIdentityFirstToken(value) {
-  return (
-    String(value || "")
-      .normalize("NFKC")
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter(Boolean)[0] || ""
-  );
-}
-
-function resolveEmail(handlerName, users = []) {
-  const targetKey = handlerIdentityKey(handlerName);
-  const targetTokens = handlerIdentityTokens(handlerName);
-  if (!targetKey) return "";
-  const candidates = users.filter(
-    (user) => user?.active !== false && user?.email,
-  );
-  const exact = candidates.filter((user) =>
-    [user.display_name, user.email].some(
-      (value) => handlerIdentityKey(value) === targetKey,
-    ),
-  );
-  if (exact.length === 1) return String(exact[0].email).toLowerCase();
-
-  const reordered = candidates.filter(
-    (user) => handlerIdentityTokens(user.display_name) === targetTokens,
-  );
-  if (reordered.length === 1) return String(reordered[0].email).toLowerCase();
-
-  const firstToken = handlerIdentityFirstToken(handlerName);
-  const firstNameMatches = candidates.filter(
-    (user) => handlerIdentityFirstToken(user.display_name) === firstToken,
-  );
-  return firstNameMatches.length === 1
-    ? String(firstNameMatches[0].email).toLowerCase()
-    : "";
-}

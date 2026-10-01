@@ -398,14 +398,14 @@ export function sourceChecksumPayload(claims) {
 }
 
 const DATE_FIELDS = [
-  ["registered_date", ["registeredDate", "claim_registered", "registered_at"]],
+  ["registered_date", ["registeredDate", "registered", "claim_registered", "registered_at"]],
   ["dol_date", ["dolDate", "dol", "date_of_loss"]],
-  ["movement_date", ["movementDate", "lastMovementDate", "last_updated"]],
+  ["movement_date", ["movementDate", "lastMovementDate", "lastUpdated", "last_updated"]],
   ["repudiation_date", ["repudiationDate", "repudiation_date"]],
 ];
 
 const NUMERIC_FIELDS = [
-  ["outstanding", ["outstanding", "nett_claim"]],
+  ["outstanding", ["outstanding"]],
   ["estimate", ["estimate", "original_estimate"]],
   ["paid", ["paid"]],
   ["mandate", ["mandate"]],
@@ -465,6 +465,7 @@ function sourceEvidence(source) {
     "status",
     "claims_status",
     "handler",
+    "handlerRaw",
     "handler_name",
     "handlerEmail",
     "handler_email",
@@ -479,6 +480,7 @@ function sourceEvidence(source) {
     "description_of_loss",
     "comments",
     "registeredDate",
+    "registered",
     "claim_registered",
     "dolDate",
     "dol",
@@ -488,12 +490,21 @@ function sourceEvidence(source) {
     "last_updated",
     "repudiationDate",
     "repudiation_date",
+    "settledDate",
+    "settled_date",
+    "settled",
     "outstanding",
+    "nettClaim",
     "nett_claim",
     "estimate",
     "original_estimate",
     "paid",
     "mandate",
+    "sumInsured",
+    "sum_insured",
+    "repudiateAmount",
+    "claimValue",
+    "ingestionQualityFlags",
     "sourceEventAt",
     "event_at",
   ];
@@ -520,13 +531,16 @@ function normalizedSourceHandler(source) {
   return firstValue(source, [
     "handlerEmail",
     "handler_email",
+    "handlerRaw",
     "handler",
     "handler_name",
   ]);
 }
 
 function buildSnapshot(source, index, context) {
-  const qualityFlags = [];
+  const qualityFlags = Array.isArray(source?.ingestionQualityFlags)
+    ? source.ingestionQualityFlags.map(String)
+    : [];
   const sourceClaimNumber = firstValue(source, [
     "claimNo",
     "claim_no",

@@ -75,10 +75,16 @@ function dateFromInstant(value, timeZone = BUSINESS_TIME_ZONE) {
   return `${String(values.year).padStart(4, "0")}-${String(values.month).padStart(2, "0")}-${String(values.day).padStart(2, "0")}`;
 }
 
+function hasAuthoritativeEffectiveDate(manifest) {
+  if (!manifest?.effective_date) return false;
+  if (manifest.effective_precision === "unknown") return false;
+  return manifest?.source_metadata?.effective_date_basis !== "upload_received_date";
+}
+
 function manifestInstant(manifest, timeZone = BUSINESS_TIME_ZONE) {
   const exact = parseInstant(manifest?.effective_at);
   if (exact) return exact;
-  if (manifest?.effective_date) {
+  if (hasAuthoritativeEffectiveDate(manifest)) {
     try {
       return localDateTimeToInstant(
         manifest.effective_date,
@@ -89,7 +95,20 @@ function manifestInstant(manifest, timeZone = BUSINESS_TIME_ZONE) {
       /* fall through to receipt time */
     }
   }
-  return parseInstant(manifest?.received_at);
+  const received = parseInstant(manifest?.received_at);
+  if (received) return received;
+  if (manifest?.effective_date) {
+    try {
+      return localDateTimeToInstant(
+        manifest.effective_date,
+        "00:00:00",
+        timeZone,
+      );
+    } catch {
+      return null;
+    }
+  }
+  return null;
 }
 
 export function extractObservationInstant(
@@ -101,16 +120,19 @@ export function extractObservationInstant(
 
 function manifestPrecision(manifest) {
   if (manifest?.effective_at) return "source_exact";
-  if (manifest?.effective_date) return "source_date";
+  if (hasAuthoritativeEffectiveDate(manifest)) return "source_date";
   if (manifest?.received_at) return "observed_period";
+  if (manifest?.effective_date) return "source_date";
   return "unavailable";
 }
 
 function manifestReferenceDate(manifest, timeZone = BUSINESS_TIME_ZONE) {
   return (
-    manifest?.effective_date ||
     dateFromInstant(manifest?.effective_at, timeZone) ||
-    dateFromInstant(manifest?.received_at, timeZone)
+    (hasAuthoritativeEffectiveDate(manifest)
+      ? manifest.effective_date
+      : dateFromInstant(manifest?.received_at, timeZone)) ||
+    manifest?.effective_date
   );
 }
 

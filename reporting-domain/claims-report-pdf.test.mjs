@@ -51,6 +51,7 @@ function fixtureRun(reportType = "weekly") {
         compliant: 14,
         breached: 2,
         unmapped: 1,
+        unknown: 3,
         denominator: 16,
       }),
       operational_health: available({
@@ -155,6 +156,10 @@ test("weekly PDF HTML is deterministic, escaped, complete, and snapshot-bound", 
   assert.match(first, /Claims Movement/);
   assert.match(first, /Management Ageing/);
   assert.match(first, /SLA Performance/);
+  assert.match(first, /Unmapped status/);
+  assert.match(first, /Age\/SLA unavailable/);
+  assert.match(first, /Total open claims/);
+  assert.match(first, /SLA denominator/);
   assert.match(first, /Operational Health/);
   assert.match(first, /Handler Performance/);
   assert.match(first, /Activity &amp; Changes/);
@@ -202,4 +207,12 @@ test("zero stays zero and unavailable values never become zero", () => {
   const html = renderClaimsReportHtml(run, { available: true });
   assert.match(html, /Data unavailable/);
   assert.match(html, /<td class="numeric">0<\/td>/);
+});
+
+test("PDF print contract preserves landscape branding without footer collision or blanket section page breaks", () => {
+  const html = renderClaimsReportHtml(fixtureRun(), { available: true });
+  assert.match(html, /@page \{ size: A4 landscape; margin: 14mm 12mm 15mm; \}/);
+  assert.match(html, /\.page-footer \{ bottom: -10mm;/);
+  assert.match(html, /\.report-section \{ break-inside: auto;/);
+  assert.doesNotMatch(html, /@media print \{ \.report-section \{ break-inside: avoid;/);
 });

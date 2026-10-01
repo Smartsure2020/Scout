@@ -71,19 +71,38 @@ function normalizeDisplayValue(value) {
     .toLowerCase();
 }
 
+function identityKey(value) {
+  return normalizeDisplayValue(value).replace(/[^a-z0-9]+/g, "");
+}
+
+function identityTokens(value) {
+  return normalizeDisplayValue(value)
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
+
 /** Resolve an extract handler against active configuration without name maps. */
 export function resolveScoutHandler(users, sourceValue) {
   const source = normalizeDisplayValue(sourceValue);
   if (!source) return { user: null, status: "unassigned" };
   const activeUsers = resolveActiveScoutUsers(users);
-  const matches = activeUsers.filter((user) => {
-    const displayName = normalizeDisplayValue(
-      user.displayName ?? user.display_name,
-    );
-    return source === user.email || source === displayName;
-  });
+  const sourceKey = identityKey(source);
+  const matches = activeUsers.filter((user) =>
+    [user.displayName, user.email].some(
+      (value) => identityKey(value) === sourceKey,
+    ),
+  );
   if (matches.length === 1) return { user: matches[0], status: "resolved" };
   if (matches.length > 1) return { user: null, status: "ambiguous" };
+  const sourceTokens = identityTokens(source);
+  const reordered = activeUsers.filter(
+    (user) => identityTokens(user.displayName) === sourceTokens,
+  );
+  if (reordered.length === 1)
+    return { user: reordered[0], status: "resolved" };
+  if (reordered.length > 1) return { user: null, status: "ambiguous" };
   return { user: null, status: "unrecognised" };
 }
 

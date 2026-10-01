@@ -17,6 +17,10 @@ const claimsUi = fs.readFileSync(
   path.join(root, "scout-smartsure", "claims", "index.html"),
   "utf8",
 );
+const cardinalIngestion = fs.readFileSync(
+  path.join(root, "scout-smartsure", "claims", "cardinal-ingestion.mjs"),
+  "utf8",
+);
 const reportingUi = fs.readFileSync(
   path.join(root, "scout-smartsure", "claims", "reporting-ui.mjs"),
   "utf8",
@@ -256,7 +260,9 @@ test("zero-estimate drill-through remains canonical and frozen", () => {
 
 test("source dates are explicit and missing Cardinal age is not treated as a discrepancy", () => {
   assert.match(claimsUi, /ageProvided/);
-  assert.match(claimsUi, /typeof value === "boolean"\) continue/);
+  assert.match(claimsUi, /src="\.\/cardinal-ingestion\.mjs"/);
+  assert.match(cardinalIngestion, /typeof value === "boolean"/);
+  assert.match(cardinalIngestion, /registeredDate:/);
   assert.equal(
     claimsUi.includes('"Awaiting Agreement of Loss \\\\ Invoice"'),
     true,

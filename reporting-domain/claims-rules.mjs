@@ -332,6 +332,7 @@ export function getStatusEvaluation(status) {
 }
 
 function finiteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -482,7 +483,7 @@ export function getReadyToCloseCandidate(claim) {
   if (isTerminalStatus(claim?.status) && !status.startsWith("settled"))
     return null;
   const age = finiteNumber(claim?.workingAge ?? claim?.age) ?? 0;
-  const estimate = finiteNumber(claim?.estimate) ?? 0;
+  const estimate = finiteNumber(claim?.estimate);
   const recoveryPending = hasRecoveryPending(claim);
   if (status === "repudiated - awaiting closure" && age > 7) {
     return {
@@ -556,9 +557,9 @@ export function getReadyToCloseCandidate(claim) {
 export function isZeroEstimateAnomaly(claim) {
   if (isTerminalStatus(claim?.status)) return false;
   const rule = getStatusRule(claim?.status);
-  const estimate = finiteNumber(claim?.estimate) ?? 0;
-  const outstanding = finiteNumber(claim?.outstanding) ?? 0;
-  const paid = finiteNumber(claim?.paid) ?? 0;
+  const estimate = finiteNumber(claim?.estimate);
+  const outstanding = finiteNumber(claim?.outstanding);
+  const paid = finiteNumber(claim?.paid);
   if (estimate !== 0) return false;
   if (outstanding > 0) return true;
   if (!rule) return outstanding === 0 && paid === 0;
@@ -569,8 +570,8 @@ export function isZeroEstimateAnomaly(claim) {
 }
 
 export function evaluateValueConflicts(claim) {
-  const estimate = finiteNumber(claim?.estimate) ?? 0;
-  const outstanding = finiteNumber(claim?.outstanding) ?? 0;
+  const estimate = finiteNumber(claim?.estimate);
+  const outstanding = finiteNumber(claim?.outstanding);
   return {
     estimateWithoutOutstanding: estimate > 0 && outstanding === 0,
     outstandingExceedsEstimateBy50:
@@ -633,7 +634,7 @@ export function evaluateMandateAndRisk(claim) {
       risk: false,
     };
   const normalized = status.normalizedStatus;
-  const outstanding = finiteNumber(claim?.outstanding) ?? 0;
+  const outstanding = finiteNumber(claim?.outstanding);
   const highValue = outstanding >= MANDATE_THRESHOLD;
   const mandate =
     status.category === "mandate" ||
@@ -672,8 +673,8 @@ export function evaluatePriority(claim) {
   const rule = getStatusRule(claim?.status);
   const age = finiteNumber(claim?.workingAge ?? claim?.age) ?? 0;
   const movementDays = finiteNumber(claim?.daysSinceMovement);
-  const estimate = finiteNumber(claim?.estimate) ?? 0;
-  const outstanding = finiteNumber(claim?.outstanding) ?? 0;
+  const estimate = finiteNumber(claim?.estimate);
+  const outstanding = finiteNumber(claim?.outstanding);
   const flags = [];
   let score = 0;
   let tier1 = 0;
