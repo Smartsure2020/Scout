@@ -249,6 +249,16 @@ test("weekly period is Monday inclusive through Saturday exclusive", () => {
   assert.equal(period.end.toISOString(), "2026-08-28T22:00:00.000Z");
 });
 
+test("persisted UTC period starts round-trip through the business timezone", () => {
+  const period = reportingPeriod("weekly", "2026-09-27T22:00:00.000Z");
+  assert.equal(period.startLocalDate, "2026-09-28");
+  assert.equal(period.endLocalDateExclusive, "2026-10-03");
+  assert.equal(
+    previousReportingPeriod("weekly", "2026-09-27T22:00:00.000Z").startLocalDate,
+    "2026-09-21",
+  );
+});
+
 test("monthly period uses local calendar boundaries and month length", () => {
   const period = reportingPeriod("monthly", "2026-02-15");
   assert.equal(period.startLocalDate, "2026-02-01");

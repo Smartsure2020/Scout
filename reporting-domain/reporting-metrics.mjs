@@ -333,8 +333,25 @@ export function reportingPeriod(
   periodStart,
   timeZone = BUSINESS_TIME_ZONE,
 ) {
-  if (reportType === "weekly") return weeklyPeriod(periodStart, timeZone);
-  if (reportType === "monthly") return monthlyPeriod(periodStart, timeZone);
+  // Persisted report rows store period_start as the UTC instant for the
+  // business-day boundary (for example, Monday 00:00 Johannesburg is Sunday
+  // 22:00 UTC). Convert timestamp inputs back through the business timezone
+  // before deriving the calendar period; otherwise regeneration can shift a
+  // report into the preceding week/month by using the UTC date component.
+  const normalizedPeriodStart =
+    typeof periodStart === "string" && /[T\s]/.test(periodStart)
+      ? new Date(periodStart)
+      : periodStart;
+  if (
+    normalizedPeriodStart instanceof Date &&
+    Number.isNaN(normalizedPeriodStart.getTime())
+  ) {
+    throw new RangeError(`Invalid reporting period start: ${periodStart}`);
+  }
+  if (reportType === "weekly")
+    return weeklyPeriod(normalizedPeriodStart, timeZone);
+  if (reportType === "monthly")
+    return monthlyPeriod(normalizedPeriodStart, timeZone);
   throw new RangeError(`Unsupported claims report type: ${reportType}`);
 }
 
