@@ -156,6 +156,8 @@ test("weekly PDF HTML is deterministic, escaped, complete, and snapshot-bound", 
   assert.match(first, /Claims Movement/);
   assert.match(first, /Management Ageing/);
   assert.match(first, /SLA Performance/);
+  assert.match(first, /<th scope="row">Compliant<\/th>/);
+  assert.match(first, /<th scope="row">Breached<\/th>/);
   assert.match(first, /Unmapped status/);
   assert.match(first, /Age\/SLA unavailable/);
   assert.match(first, /Total open claims/);

@@ -102,6 +102,46 @@ test("zero remains zero while unavailable remains an unavailable state", () => {
   assert.equal(metricState(snapshot, "unavailable_metric").value, null);
 });
 
+test("on-screen SLA breakdown exposes all six required populations", () => {
+  const controller = new ReportsController({ document: reportDocument() });
+  const html = controller.renderSla({
+    metrics: {
+      sla_compliance: {
+        value: 0.75,
+        availability: "available",
+        precision: "snapshot_exact",
+      },
+      sla_breaches: {
+        value: 1,
+        availability: "available",
+        precision: "snapshot_exact",
+      },
+      sla_summary: {
+        value: {
+          compliant: 3,
+          breached: 1,
+          unmapped: 2,
+          unknown: 4,
+          total_evaluated: 10,
+          denominator: 4,
+        },
+        availability: "available",
+        precision: "snapshot_exact",
+      },
+    },
+  });
+  for (const label of [
+    "Compliant claims",
+    "Breached claims",
+    "Unmapped statuses",
+    "Age/SLA unavailable",
+    "Total open claims",
+    "SLA denominator",
+  ]) assert.ok(html.includes(label), `missing ${label}`);
+  for (const value of ["3", "1", "2", "4", "10", "4"])
+    assert.ok(html.includes(value), `missing SLA value ${value}`);
+});
+
 test("management formatting is restrained", () => {
   assert.equal(formatRand(4832115), "R 4 832 115");
   assert.equal(formatPercent(0.9142857), "91.4%");

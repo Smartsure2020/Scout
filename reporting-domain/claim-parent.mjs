@@ -48,6 +48,17 @@ const DATE_FIELDS = new Set([
   "movement_date",
   "repudiation_date",
 ]);
+const NUMERIC_FIELDS = new Set([
+  "working_age",
+  "calendar_age",
+  "outstanding",
+  "estimate",
+  "paid",
+  "mandate",
+  "sum_insured",
+  "repudiate_amount",
+  "nett_claim",
+]);
 
 function asArray(value) {
   return Array.isArray(value) ? value : [];
@@ -82,6 +93,10 @@ function normalizedSourceSystem(value) {
 function normalizeFieldValue(value, field) {
   if (!hasValue(value)) return "";
   if (DATE_FIELDS.has(field)) return String(value).trim();
+  if (NUMERIC_FIELDS.has(field)) {
+    const numeric = Number(value);
+    if (Number.isFinite(numeric)) return String(numeric);
+  }
   return String(value).trim().replace(/\s+/g, " ").toLowerCase();
 }
 

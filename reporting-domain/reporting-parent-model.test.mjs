@@ -157,56 +157,53 @@ test("multi-row parent counts once in closing inventory (not excluded, not per-r
   assert.ok(!ids.includes("ambiguous-b"));
 });
 
-test("financial metrics fail closed (value null) when a multi-row parent is in scope", () => {
+test("financial metrics resolve repeated values once and isolate conflicting fields", () => {
   const snap = report();
-  for (const id of [
-    "financial_open_outstanding",
-    "financial_estimate_total",
-    "financial_paid_total",
-  ]) {
-    const metric = snap.metrics[id];
-    assert.equal(metric.availability, "unavailable");
-    assert.equal(metric.value, null);
-    assert.equal(metric.details.reason, "financial_aggregation_unresolved");
-    assert.ok(metric.details.unresolved_claim_numbers.includes("MULTI-1"));
-    // Diagnostic subtotal only - never published as the value.
-    assert.equal(typeof metric.details.known_single_row_subtotal, "number");
-  }
-  // SOLO-1 outstanding is the single-row subtotal diagnostic.
+  assert.equal(snap.metrics.financial_open_outstanding.availability, "unavailable");
+  assert.equal(snap.metrics.financial_open_outstanding.value, null);
+  assert.ok(
+    snap.metrics.financial_open_outstanding.details.unresolved_claim_numbers.includes(
+      "MULTI-1",
+    ),
+  );
+  // Estimate is repeated identically across the two sections, so count it once.
+  assert.equal(snap.metrics.financial_estimate_total.availability, "available");
+  assert.equal(snap.metrics.financial_estimate_total.value, 1900);
+  assert.equal(snap.metrics.financial_estimate_total.details.total_open_claim_count, 2);
+  // Paid differs between sections and affects only the paid total.
+  assert.equal(snap.metrics.financial_paid_total.availability, "unavailable");
+  assert.equal(snap.metrics.financial_paid_total.value, null);
   assert.equal(
-    snap.metrics.financial_open_outstanding.details.known_single_row_subtotal,
-    1000,
+    snap.metrics.financial_paid_total.details.reason,
+    "financial_aggregation_unresolved",
   );
 });
 
-test("C-metrics become wholly unavailable when a multi-row parent is unresolved", () => {
+test("safe parent fields keep SLA, handler, movement, and anomaly metrics available", () => {
   const snap = report();
   for (const id of [
     "sla_compliance",
     "sla_breaches",
+    "sla_summary",
     "no_movement_over_14",
     "no_movement_over_30",
     "ready_to_close",
     "zero_estimate_payment_request",
     "operational_health",
     "handler_performance",
-    "assignment_activity",
-  ]) {
-    assert.equal(
-      snap.metrics[id].availability,
-      "unavailable",
-      `${id} should be unavailable`,
-    );
-    assert.equal(snap.metrics[id].value, null);
-    assert.equal(
-      snap.metrics[id].details.excluded_parent_count,
-      1,
-      `${id} excluded_parent_count`,
-    );
-  }
+  ]) assert.equal(snap.metrics[id].availability, "available", id);
+  assert.equal(snap.metrics.assignment_activity.availability, "unavailable");
+  assert.equal(snap.metrics.sla_summary.value.total_evaluated, 2);
+  assert.equal(snap.metrics.handler_performance.value.handlers[0].open_claims, 2);
+  assert.equal(
+    snap.metrics.handler_performance.value.handlers[0].open_claims +
+      snap.metrics.handler_performance.value.manager_held_other.count +
+      snap.metrics.handler_performance.value.unassigned_unresolved.count,
+    snap.metrics.closing_inventory.value,
+  );
 });
 
-test("report claim row for a multi-row parent: parent key set, claim_id null, financials null", () => {
+test("report claim row uses parent identity and safe consensus financial values", () => {
   const snap = report();
   const row = snap.claim_rows.find(
     (claim) => claim.parent_identity_key === "cardinal_claims:MULTI-1",
@@ -215,12 +212,12 @@ test("report claim row for a multi-row parent: parent key set, claim_id null, fi
   assert.equal(row.claim_id, null); // no canonical UUID; never a child UUID
   assert.equal(row.source_claim_number, "MULTI-1");
   assert.equal(row.outstanding_snapshot, null);
-  assert.equal(row.estimate_snapshot, null);
+  assert.equal(row.estimate_snapshot, 400);
   assert.equal(row.paid_snapshot, null);
   assert.equal(row.relevant_flags.row_count, 2);
 });
 
-test("future canonical multi-row parent: shared claim_id UUID, row_count>1, financials still null", () => {
+test("future canonical multi-row parent: shared claim_id UUID and repeated financials counted once", () => {
   const opening = manifest("opening", "2026-08-24");
   const closing = manifest("closing", "2026-08-27");
   // Two section rows written the FUTURE way: same shared canonical parent UUID.
@@ -272,10 +269,11 @@ test("future canonical multi-row parent: shared claim_id UUID, row_count>1, fina
   assert.ok(row);
   assert.equal(row.claim_id, "parent-uuid"); // shared canonical UUID, not a child
   assert.equal(row.relevant_flags.row_count, 2);
-  // Financial aggregation still unproven for multi-row parents -> NULL.
+  // Conflicting outstanding stays unavailable; repeated estimate and paid
+  // values are represented once at the parent level.
   assert.equal(row.outstanding_snapshot, null);
-  assert.equal(row.estimate_snapshot, null);
-  assert.equal(row.paid_snapshot, null);
+  assert.equal(row.estimate_snapshot, 1500);
+  assert.equal(row.paid_snapshot, 0);
 });
 
 test("single-row-only portfolio keeps financial metrics available and numeric", () => {

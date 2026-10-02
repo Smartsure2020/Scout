@@ -774,8 +774,92 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
     registeredDate && asOfDate
       ? calendarDaysBetween(registeredDate, asOfDate)
       : null;
+  const parentId = parentReferenceId(parent, canonicalByKey);
+  const financial = Object.fromEntries(
+    ["outstanding", "estimate", "paid", "mandate"].map((field) => {
+      const result = consensusValue(parent.rows, field);
+      const resolved = result.status === "agree" || result.status === "all_missing";
+      return [
+        field,
+        {
+          value: resolved ? result.value : null,
+          resolution: resolved ? result.status : "unresolved",
+        },
+      ];
+    }),
+  );
+  const childClaims = parent.rows.map((row) =>
+    mapSnapshotToClaim(row, manifest, timeZone),
+  );
+  const movementClass = (claim) => {
+    const result = evaluateMovement(claim, { asOfDate });
+    if (result.over30) return "over30";
+    if (result.over14) return "over14";
+    return result.daysSinceMovement === null ? "unknown" : "within14";
+  };
+  const slaClass = (claim) => {
+    const result = evaluateSla(claim, {
+      asOfDate,
+      onUnsupported: "return",
+    });
+    return result.state === "on_track" ? "compliant" : result.state;
+  };
+  const readyClass = (claim) => Boolean(getReadyToCloseCandidate(claim));
+  const zeroEstimateClass = (claim) =>
+    evaluateClaim(claim, { asOfDate, onUnsupported: "return" })
+      .zeroEstimateAnomaly;
+  const operationalClass = (claim, category) => {
+    const operational = evaluateOperationalCategories(claim);
+    const risk = evaluateMandateAndRisk(claim);
+    if (category === "assessor_overdue") return operational.assessorOverdue;
+    if (category === "investigator_overdue") return operational.investigatorOverdue;
+    if (category === "broker_overdue") return operational.brokerOverdue;
+    if (category === "high_value_mandate_attention")
+      return risk.highValue || risk.mandate;
+    if (category === "legal_recovery") return operational.legalRecovery;
+    if (category === "nfo_ombudsman")
+      return operational.nfoOmbudsman || risk.nfoOrOmbudsman;
+    if (category === "fraud") return operational.fraud || risk.fraud;
+    if (category === "repudiation_expired") return operational.repudiationExpired;
+    return false;
+  };
+  const childState = (readValue) => {
+    const values = childClaims.map(readValue);
+    return values.every((value) => value === values[0]) ? values[0] : null;
+  };
+  const operationalCategories = Object.fromEntries(
+    [
+      "assessor_overdue",
+      "investigator_overdue",
+      "broker_overdue",
+      "high_value_mandate_attention",
+      "legal_recovery",
+      "nfo_ombudsman",
+      "fraud",
+      "repudiation_expired",
+    ].map((category) => [
+      category,
+      childState((claim) => operationalClass(claim, category)),
+    ]),
+  );
+  const status = consensusScalar(parent, "status_normalized");
+  const statusRows = parent.rows.filter((row) => row.terminal !== true);
+  const rowSlaClasses = statusRows.map((row) =>
+    slaClass(mapSnapshotToClaim(row, manifest, timeZone)),
+  );
+  const resolvedSlaClass =
+    rowSlaClasses.length && rowSlaClasses.every((value) => value === rowSlaClasses[0])
+      ? rowSlaClasses[0]
+      : "unknown";
+  const handlerSource = consensusScalar(parent, "handler_source");
+  const handlerEmail = consensusScalar(parent, "handler_email");
+  const handlerResolution = consensusScalar(parent, "handler_resolution");
+  const resolvedScoutUserId = consensusScalar(parent, "resolved_scout_user_id");
+  const parentMovementClass = childState(movementClass);
+  const parentReadyClass = childState(readyClass);
+  const parentZeroEstimateClass = childState(zeroEstimateClass);
   return {
-    id: parentReferenceId(parent, canonicalByKey),
+    id: parentId,
     claim_id: parentCanonicalClaimId(parent, canonicalByKey),
     parent_identity_key: parent.parent_identity_key,
     canonical_claim_id: parentCanonicalClaimId(parent, canonicalByKey),
@@ -784,7 +868,8 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
     open: parent.lifecycle_state === "open",
     terminal: parent.lifecycle_state === "terminal",
     stateResolution: parent.state_resolution,
-    statusNormalized: consensusScalar(parent, "status_normalized"),
+    status,
+    statusNormalized: status,
     registeredDate,
     dolDate: consensusScalar(parent, "dol_date"),
     movementDate,
@@ -794,16 +879,19 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
       movementDate && asOfDate
         ? calendarDaysBetween(movementDate, asOfDate)
         : null,
-    // Financial aggregation semantics are unproven for multi-row parents:
-    // never sum/max/first - leave null and let the metric fail closed.
-    outstanding: null,
-    estimate: null,
-    paid: null,
-    mandate: null,
-    handlerSource: consensusScalar(parent, "handler_source"),
-    handlerEmail: consensusScalar(parent, "handler_email"),
-    resolvedScoutUserId: consensusScalar(parent, "resolved_scout_user_id"),
-    handlerResolution: "unassigned",
+    // A repeated financial value is projected once. Conflicting or partial
+    // evidence stays null and is handled independently by each financial metric.
+    outstanding: financial.outstanding.value,
+    estimate: financial.estimate.value,
+    paid: financial.paid.value,
+    mandate: financial.mandate.value,
+    financialResolution: Object.fromEntries(
+      Object.entries(financial).map(([field, result]) => [field, result.resolution]),
+    ),
+    handlerSource,
+    handlerEmail,
+    resolvedScoutUserId,
+    handlerResolution: handlerResolution || "unassigned",
     insurer: consensusScalar(parent, "insurer"),
     insured: consensusScalar(parent, "insured"),
     dataQualityFlags: parent.quality_flags,
@@ -813,6 +901,13 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
     multiRow: true,
     identityQuality: parent.identity_quality,
     parentQualityFlags: parent.quality_flags,
+    parentMetricStates: {
+      sla: resolvedSlaClass,
+      movement: parentMovementClass,
+      readyToClose: parentReadyClass,
+      zeroEstimateAnomaly: parentZeroEstimateClass,
+      operational: operationalCategories,
+    },
   };
 }
 
@@ -820,12 +915,6 @@ function parentClaimsForExtract(snapshots, manifest, timeZone, canonicalByKey) {
   return groupSnapshotsByParent(snapshots).map((parent) =>
     mapParentToClaim(parent, manifest, timeZone, canonicalByKey),
   );
-}
-
-// Open multi-row parents whose aggregation semantics remain unresolved - the
-// population that forces financial and C-metrics to fail closed.
-function unresolvedMultiRowParents(rows) {
-  return asArray(rows).filter((claim) => claim.multiRow && claim.open);
 }
 
 function excludedParentNumbers(parents) {
@@ -1080,10 +1169,18 @@ function slaMetrics(closingOpen, evidence) {
   const unmapped = [];
   const unknown = [];
   for (const claim of closingOpen) {
-    const result = evaluateSla(claim, {
-      asOfDate: claim.snapshotEffectiveDate,
-      onUnsupported: "return",
-    });
+    const evaluatedState = claim.multiRow
+      ? claim.parentMetricStates?.sla || "unknown"
+      : evaluateSla(claim, {
+          asOfDate: claim.snapshotEffectiveDate,
+          onUnsupported: "return",
+        }).state;
+    const state = evaluatedState === "on_track" ? "compliant" : evaluatedState;
+    const result = {
+      state,
+      compliant: state === "compliant",
+      breached: state === "breached",
+    };
     if (result.compliant) compliant.push(claim.id);
     else if (result.breached) breached.push(claim.id);
     else if (result.state === "unmapped") unmapped.push(claim.id);
@@ -1134,6 +1231,13 @@ function movementMetrics(closingOpen, evidence) {
   const over30 = [];
   const unknown = [];
   for (const claim of closingOpen) {
+    if (claim.multiRow) {
+      const state = claim.parentMetricStates?.movement;
+      if (state === "over30") over30.push(claim.id);
+      else if (state === "over14") over14.push(claim.id);
+      else if (state === "unknown" || state === null) unknown.push(claim.id);
+      continue;
+    }
     const result = evaluateMovement(claim, {
       asOfDate: claim.snapshotEffectiveDate,
     });
@@ -1168,33 +1272,73 @@ function readyAndAnomalyMetrics(closingOpen, evidence) {
   const readyIds = [];
   const byReason = {};
   const zeroEstimate = [];
+  const unresolvedReady = [];
+  const unresolvedZeroEstimate = [];
   for (const claim of closingOpen) {
+    if (claim.multiRow && claim.parentMetricStates?.readyToClose === null)
+      unresolvedReady.push(claim);
+    if (
+      claim.multiRow &&
+      claim.parentMetricStates?.zeroEstimateAnomaly === null
+    )
+      unresolvedZeroEstimate.push(claim);
     const ready = getReadyToCloseCandidate(claim);
-    if (ready) {
+    const readyState = claim.multiRow
+      ? claim.parentMetricStates?.readyToClose
+      : Boolean(ready);
+    if (readyState) {
       readyIds.push(claim.id);
-      byReason[ready.code] = byReason[ready.code] || [];
-      byReason[ready.code].push(claim.id);
+      if (ready?.code) {
+        byReason[ready.code] = byReason[ready.code] || [];
+        byReason[ready.code].push(claim.id);
+      }
     }
-    const evaluation = claimEvaluation(claim);
-    if (evaluation.zeroEstimateAnomaly) zeroEstimate.push(claim.id);
+    const isZeroEstimate = claim.multiRow
+      ? claim.parentMetricStates?.zeroEstimateAnomaly
+      : claimEvaluation(claim).zeroEstimateAnomaly;
+    if (isZeroEstimate === true) zeroEstimate.push(claim.id);
   }
+  const readyMetric = unresolvedReady.length
+    ? unavailableMetric(
+        "ready_to_close",
+        "parent_metric_aggregation_unresolved",
+        [],
+        {
+          reason: "parent_metric_aggregation_unresolved",
+          unresolved_claim_numbers: excludedParentNumbers(unresolvedReady),
+        },
+      )
+    : metric("ready_to_close", readyIds.length, {
+        precision: "snapshot_exact",
+        claimIds: readyIds,
+        evidence,
+        details: {
+          claim_ids_by_reason: byReason,
+          count_by_reason: Object.fromEntries(
+            Object.entries(byReason).map(([key, ids]) => [key, ids.length]),
+          ),
+        },
+      });
+  const zeroEstimateMetric = unresolvedZeroEstimate.length
+    ? unavailableMetric(
+        "zero_estimate_payment_request",
+        "parent_metric_aggregation_unresolved",
+        [],
+        {
+          reason: "parent_metric_aggregation_unresolved",
+          unresolved_claim_numbers: excludedParentNumbers(
+            unresolvedZeroEstimate,
+          ),
+        },
+      )
+    : metric("zero_estimate_payment_request", zeroEstimate.length, {
+        precision: "snapshot_exact",
+        claimIds: zeroEstimate,
+        evidence,
+      });
   return {
-    ready: metric("ready_to_close", readyIds.length, {
-      precision: "snapshot_exact",
-      claimIds: readyIds,
-      evidence,
-      details: {
-        claim_ids_by_reason: byReason,
-        count_by_reason: Object.fromEntries(
-          Object.entries(byReason).map(([key, ids]) => [key, ids.length]),
-        ),
-      },
-    }),
-    zeroEstimate: metric("zero_estimate_payment_request", zeroEstimate.length, {
-      precision: "snapshot_exact",
-      claimIds: zeroEstimate,
-      evidence,
-    }),
+    ready: readyMetric,
+    zeroEstimate: zeroEstimateMetric,
   };
 }
 
@@ -1209,30 +1353,67 @@ function operationalHealthMetric(closingOpen, evidence) {
     fraud: [],
     repudiation_expired: [],
   };
+  const unavailableCategories = [];
   for (const claim of closingOpen) {
     const operational = evaluateOperationalCategories(claim);
     const risk = evaluateMandateAndRisk(claim);
-    if (operational.assessorOverdue) categories.assessor_overdue.push(claim.id);
-    if (operational.investigatorOverdue)
+    const parent = claim.multiRow ? claim.parentMetricStates?.operational : null;
+    if (parent?.assessor_overdue === null)
+      unavailableCategories.push("assessor_overdue");
+    else if (parent ? parent.assessor_overdue : operational.assessorOverdue)
+      categories.assessor_overdue.push(claim.id);
+    if (parent?.investigator_overdue === null)
+      unavailableCategories.push("investigator_overdue");
+    else if (parent ? parent.investigator_overdue : operational.investigatorOverdue)
       categories.investigator_overdue.push(claim.id);
-    if (operational.brokerOverdue) categories.broker_overdue.push(claim.id);
-    if (risk.highValue || risk.mandate)
+    if (parent?.broker_overdue === null)
+      unavailableCategories.push("broker_overdue");
+    else if (parent ? parent.broker_overdue : operational.brokerOverdue)
+      categories.broker_overdue.push(claim.id);
+    if (parent?.high_value_mandate_attention === null)
+      unavailableCategories.push("high_value_mandate_attention");
+    else if (
+      parent
+        ? parent.high_value_mandate_attention
+        : risk.highValue || risk.mandate
+    )
       categories.high_value_mandate_attention.push(claim.id);
-    if (operational.legalRecovery) categories.legal_recovery.push(claim.id);
-    if (operational.nfoOmbudsman || risk.nfoOrOmbudsman)
+    if (parent?.legal_recovery === null)
+      unavailableCategories.push("legal_recovery");
+    else if (parent ? parent.legal_recovery : operational.legalRecovery)
+      categories.legal_recovery.push(claim.id);
+    if (parent?.nfo_ombudsman === null)
+      unavailableCategories.push("nfo_ombudsman");
+    else if (
+      parent
+        ? parent.nfo_ombudsman
+        : operational.nfoOmbudsman || risk.nfoOrOmbudsman
+    )
       categories.nfo_ombudsman.push(claim.id);
-    if (operational.fraud || risk.fraud) categories.fraud.push(claim.id);
-    if (operational.repudiationExpired)
+    if (parent?.fraud === null) unavailableCategories.push("fraud");
+    else if (parent ? parent.fraud : operational.fraud || risk.fraud)
+      categories.fraud.push(claim.id);
+    if (parent?.repudiation_expired === null)
+      unavailableCategories.push("repudiation_expired");
+    else if (parent ? parent.repudiation_expired : operational.repudiationExpired)
       categories.repudiation_expired.push(claim.id);
   }
+  const unresolved = new Set(unavailableCategories);
   const value = Object.fromEntries(
-    Object.entries(categories).map(([key, ids]) => [key, ids.length]),
+    Object.entries(categories).map(([key, ids]) => [
+      key,
+      unresolved.has(key) ? null : ids.length,
+    ]),
   );
   return metric("operational_health", value, {
     precision: "snapshot_exact",
     claimIds: Object.values(categories).flat(),
+    warnings: unresolved.size ? ["operational_category_unavailable"] : [],
     evidence,
-    details: { claim_ids_by_category: categories },
+    details: {
+      claim_ids_by_category: categories,
+      unavailable_categories: [...unresolved],
+    },
   });
 }
 
@@ -1243,21 +1424,13 @@ function financialMetrics(closingOpen, evidence) {
     ["financial_paid_total", "paid", "paid_total"],
   ];
   const metrics = {};
-  // Each financial field fails closed independently when any open multi-row
-  // parent has unresolved aggregation semantics. The single-row subtotal is a
-  // diagnostic only - it is NEVER published as the metric value, because
-  // identical child values do not prove additive-vs-repeated semantics.
-  const unresolved = unresolvedMultiRowParents(closingOpen);
-  const singleRow = closingOpen.filter((claim) => !claim.multiRow);
-  const excludedNumbers = excludedParentNumbers(unresolved);
   for (const [id, field, definition] of fields) {
+    const unresolved = closingOpen.filter(
+      (claim) =>
+        claim.multiRow &&
+        claim.financialResolution?.[field] === "unresolved",
+    );
     if (unresolved.length > 0) {
-      const knownSingleRow = singleRow.filter(
-        (claim) =>
-          claim[field] !== null &&
-          claim[field] !== undefined &&
-          Number.isFinite(Number(claim[field])),
-      );
       metrics[id] = unavailableMetric(
         id,
         "financial_aggregation_unresolved",
@@ -1266,11 +1439,7 @@ function financialMetrics(closingOpen, evidence) {
           reason: "financial_aggregation_unresolved",
           definition,
           unresolved_parent_count: unresolved.length,
-          unresolved_claim_numbers: excludedNumbers,
-          known_single_row_subtotal: knownSingleRow.reduce(
-            (sum, claim) => sum + Number(claim[field]),
-            0,
-          ),
+          unresolved_claim_numbers: excludedParentNumbers(unresolved),
         },
       );
       continue;
@@ -1662,6 +1831,10 @@ function buildReportClaimRows(
       singleRow && manifest
         ? mapSnapshotToClaim(singleRow, manifest, timeZone)
         : null;
+    const parentClaim =
+      isMultiRow && manifest
+        ? mapParentToClaim(parent, manifest, timeZone, canonicalByKey)
+        : null;
     const scalar = (field, singleValue) =>
       isMultiRow ? consensusScalar(parent, field) : singleValue;
     return {
@@ -1695,13 +1868,17 @@ function buildReportClaimRows(
       ),
       calendar_age_snapshot: isMultiRow ? null : (claim?.calendarAge ?? null),
       working_age_snapshot: isMultiRow ? null : (claim?.workingAge ?? null),
-      // Multi-row financial aggregation is unresolved: never copy or sum a
-      // child row's money onto the parent - persist NULL.
+      // A multi-row financial value is shown only when every source row agrees;
+      // conflicts/partial values remain NULL and are never summed.
       outstanding_snapshot: isMultiRow
-        ? null
+        ? (parentClaim?.outstanding ?? null)
         : (singleRow?.outstanding ?? null),
-      estimate_snapshot: isMultiRow ? null : (singleRow?.estimate ?? null),
-      paid_snapshot: isMultiRow ? null : (singleRow?.paid ?? null),
+      estimate_snapshot: isMultiRow
+        ? (parentClaim?.estimate ?? null)
+        : (singleRow?.estimate ?? null),
+      paid_snapshot: isMultiRow
+        ? (parentClaim?.paid ?? null)
+        : (singleRow?.paid ?? null),
       relevant_flags: {
         priority: singleRow?.priority_flags ?? [],
         operational: singleRow?.operational_flags ?? [],
@@ -1963,38 +2140,6 @@ export function buildReportSnapshot({
       evidence: closingEvidence,
     },
   );
-
-  // C-metric capability boundary: any open multi-row parent whose semantics are
-  // unresolved makes the WHOLE affected metric unavailable - never a hidden
-  // partial that silently omits those parents from a portfolio figure.
-  const unresolvedParents = unresolvedMultiRowParents(closingOpen);
-  if (unresolvedParents.length > 0) {
-    const details = {
-      reason: "multi_row_parent_aggregation_unresolved",
-      excluded_parent_count: unresolvedParents.length,
-      excluded_claim_numbers: excludedParentNumbers(unresolvedParents),
-    };
-    const gatedMetricIds = [
-      "sla_compliance",
-      "sla_breaches",
-      "sla_summary",
-      "no_movement_over_14",
-      "no_movement_over_30",
-      "ready_to_close",
-      "zero_estimate_payment_request",
-      "operational_health",
-      "handler_performance",
-      "assignment_activity",
-    ];
-    for (const id of gatedMetricIds) {
-      metrics[id] = unavailableMetric(
-        id,
-        "multi_row_parent_aggregation_unresolved",
-        [],
-        details,
-      );
-    }
-  }
 
   if (
     !closingSelection.manifest ||
