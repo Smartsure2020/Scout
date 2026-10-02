@@ -211,6 +211,23 @@ test("zero stays zero and unavailable values never become zero", () => {
   assert.match(html, /<td class="numeric">0<\/td>/);
 });
 
+test("PDF explains unresolved financial aggregation counts", () => {
+  const run = fixtureRun();
+  run.metrics_snapshot.metrics.financial_open_outstanding = {
+    value: null,
+    availability: "unavailable",
+    details: {
+      reason: "financial_aggregation_unresolved",
+      unresolved_parent_count: 2,
+    },
+  };
+  const html = renderClaimsReportHtml(run, { available: true });
+  assert.match(
+    html,
+    /Unavailable — 2 multi-row claims contain conflicting section-level values\./,
+  );
+});
+
 test("PDF print contract preserves landscape branding without footer collision or blanket section page breaks", () => {
   const html = renderClaimsReportHtml(fixtureRun(), { available: true });
   assert.match(html, /@page \{ size: A4 landscape; margin: 14mm 12mm 15mm; \}/);

@@ -95,7 +95,12 @@ function normalizeFieldValue(value, field) {
   if (DATE_FIELDS.has(field)) return String(value).trim();
   if (NUMERIC_FIELDS.has(field)) {
     const numeric = Number(value);
-    if (Number.isFinite(numeric)) return String(numeric);
+    if (Number.isFinite(numeric)) {
+      // Spreadsheet exports can leave a tiny floating-point residue where the
+      // business value is zero. Treat that residue as zero for consensus, but
+      // retain all meaningful non-zero differences as disagreements.
+      return String(Math.abs(numeric) < 1e-9 ? 0 : numeric);
+    }
   }
   return String(value).trim().replace(/\s+/g, " ").toLowerCase();
 }

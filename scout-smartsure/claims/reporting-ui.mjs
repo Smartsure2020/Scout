@@ -415,6 +415,18 @@ export function warningText(value) {
   );
 }
 
+export function unavailableMetricText(metric) {
+  const details = asObject(metric?.details);
+  if (details.reason === "financial_aggregation_unresolved") {
+    const count = Number(details.unresolved_parent_count);
+    if (Number.isFinite(count)) {
+      const noun = count === 1 ? "multi-row claim" : "multi-row claims";
+      return `Unavailable — ${count} ${noun} contain conflicting section-level values.`;
+    }
+  }
+  return "Not available";
+}
+
 export function createReportingApi({
   baseUrl,
   getToken,
@@ -653,7 +665,7 @@ function metricCard(
   return `<article class="report-kpi-card ${tone}">
     <div class="report-kpi-label">${escapeHtml(label)} <span class="report-info" title="${escapeHtml(info)}" aria-label="${escapeHtml(info)}">ⓘ</span></div>
     <button class="report-kpi-value${state.drillable ? " is-drillable" : ""}" ${drill} ${state.drillable ? `aria-label="Inspect ${escapeHtml(label)} claims"` : "disabled"}>${value}</button>
-    <div class="report-kpi-sub">${state.available ? escapeHtml(formatComparison(comparison, kind)) : escapeHtml(state.reason === UNAVAILABLE_REASON ? UNAVAILABLE_REASON : warningText(state.reason))}</div>
+    <div class="report-kpi-sub">${state.available ? escapeHtml(formatComparison(comparison, kind)) : escapeHtml(state.metric?.details?.reason === "financial_aggregation_unresolved" ? unavailableMetricText(state.metric) : state.reason === UNAVAILABLE_REASON ? UNAVAILABLE_REASON : warningText(state.reason))}</div>
   </article>`;
 }
 

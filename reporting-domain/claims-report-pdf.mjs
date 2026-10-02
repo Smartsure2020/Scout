@@ -157,6 +157,18 @@ function formatPercent(value) {
 function metricValue(snapshot, id, formatter = formatInteger) {
   const item = metric(snapshot, id);
   if (!metricAvailable(item)) {
+    const details = asObject(item?.details);
+    if (details.reason === "financial_aggregation_unresolved") {
+      const count = Number(details.unresolved_parent_count);
+      if (Number.isFinite(count)) {
+        const noun = count === 1 ? "multi-row claim" : "multi-row claims";
+        return {
+          text: `Unavailable — ${count} ${noun} contain conflicting section-level values.`,
+          available: false,
+          item,
+        };
+      }
+    }
     return { text: "Data unavailable", available: false, item };
   }
   return { text: formatter(item.value), available: true, item };

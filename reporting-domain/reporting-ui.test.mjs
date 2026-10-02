@@ -14,6 +14,7 @@ import {
   reportSnapshot,
   ReportsController,
   shiftReportPeriod,
+  unavailableMetricText,
 } from "../scout-smartsure/claims/reporting-ui.mjs";
 
 function reportDocument() {
@@ -100,6 +101,18 @@ test("zero remains zero while unavailable remains an unavailable state", () => {
   });
   assert.equal(metricState(snapshot, "unavailable_metric").available, false);
   assert.equal(metricState(snapshot, "unavailable_metric").value, null);
+});
+
+test("financial ambiguity is explained on unavailable report metrics", () => {
+  assert.equal(
+    unavailableMetricText({
+      details: {
+        reason: "financial_aggregation_unresolved",
+        unresolved_parent_count: 2,
+      },
+    }),
+    "Unavailable — 2 multi-row claims contain conflicting section-level values.",
+  );
 });
 
 test("on-screen SLA breakdown exposes all six required populations", () => {
