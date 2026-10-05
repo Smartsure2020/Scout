@@ -48,6 +48,8 @@ import {
   PDF_RENDERER_VERSION,
   PDF_TEMPLATE_VERSION,
   renderClaimsReportHtml,
+  renderClaimsReportPdfFooterTemplate,
+  renderClaimsReportPdfHeaderTemplate,
   reportPdfFilename,
 } from "./reporting-domain/claims-report-pdf.mjs";
 import {
@@ -3533,6 +3535,11 @@ export default {
           },
         );
         const html = renderClaimsReportHtml(run, workflow);
+        const headerTemplate = renderClaimsReportPdfHeaderTemplate(
+          run,
+          workflow,
+        );
+        const footerTemplate = renderClaimsReportPdfFooterTemplate();
         const rendered = await env.BROWSER.quickAction("pdf", {
           html,
           pdfOptions: {
@@ -3540,6 +3547,15 @@ export default {
             format: "a4",
             landscape: true,
             preferCSSPageSize: true,
+            displayHeaderFooter: true,
+            headerTemplate,
+            footerTemplate,
+            margin: {
+              top: "14mm",
+              right: "12mm",
+              bottom: "15mm",
+              left: "12mm",
+            },
           },
         });
         if (!(rendered instanceof Response))

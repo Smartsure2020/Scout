@@ -1,6 +1,6 @@
 const TIME_ZONE = "Africa/Johannesburg";
 
-export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v5";
+export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v6";
 export const PDF_RENDERER_VERSION = "cloudflare-browser-run-quick-action";
 
 const MONTHS = [
@@ -497,7 +497,16 @@ function renderHeader(view) {
 export function renderClaimsReportHtml(run = {}, workflow = {}) {
   const view = buildClaimsReportPdfViewModel(run, workflow);
   const type = view.reportType === "monthly" ? "Monthly" : "Weekly";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Scout ${escapeHtml(type)} Claims Report - ${escapeHtml(view.periodLabel)}</title><style>${PDF_CSS}</style></head><body><div class="page-header"><span>SCOUT / CLAIMS MANAGEMENT</span><span>${escapeHtml(view.periodLabel)}</span></div><main>${renderHeader(view)}<section class="report-section executive"><div class="section-kicker">Executive summary</div><h2>Executive Summary</h2><p class="lead">A deterministic ${escapeHtml(type.toLowerCase())} management view of the accepted historical claim population for <strong>${escapeHtml(view.periodLabel)}</strong>. This report is frozen at finalisation and is suitable for management circulation.</p><div class="kpi-grid">${metricCard(view, "closing_inventory")}${metricCard(view, "new_claims_registered")}${metricCard(view, "claims_closed")}${metricCard(view, "sla_compliance", formatPercent)}</div></section>${renderAgeing(view)}${renderSla(view)}${renderOperational(view)}${renderHandlers(view)}${renderActivity(view)}${renderFinancial(view)}${renderAttention(view)}${renderActions(view)}${renderCoverage(view)}</main><footer class="page-footer"><span>Scout management reporting - ${escapeHtml(PDF_TEMPLATE_VERSION)}</span><span>Finalised snapshot | Page <span class="page-number"></span></span></footer></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Scout ${escapeHtml(type)} Claims Report - ${escapeHtml(view.periodLabel)}</title><style>${PDF_CSS}</style></head><body><main>${renderHeader(view)}<section class="report-section executive"><div class="section-kicker">Executive summary</div><h2>Executive Summary</h2><p class="lead">A deterministic ${escapeHtml(type.toLowerCase())} management view of the accepted historical claim population for <strong>${escapeHtml(view.periodLabel)}</strong>. This report is frozen at finalisation and is suitable for management circulation.</p><div class="kpi-grid">${metricCard(view, "closing_inventory")}${metricCard(view, "new_claims_registered")}${metricCard(view, "claims_closed")}${metricCard(view, "sla_compliance", formatPercent)}</div></section>${renderAgeing(view)}${renderSla(view)}${renderOperational(view)}${renderHandlers(view)}${renderActivity(view)}${renderFinancial(view)}${renderAttention(view)}${renderActions(view)}${renderCoverage(view)}</main></body></html>`;
+}
+
+export function renderClaimsReportPdfHeaderTemplate(run = {}, workflow = {}) {
+  const { periodLabel } = buildClaimsReportPdfViewModel(run, workflow);
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:#617286;width:100%;display:flex;justify-content:space-between"><span>SCOUT / CLAIMS MANAGEMENT</span><span>${escapeHtml(periodLabel)}</span></div>`;
+}
+
+export function renderClaimsReportPdfFooterTemplate() {
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:#617286;width:100%;display:flex;justify-content:space-between;border-top:1px solid #dce5ec;padding-top:2mm"><span>Scout management reporting - ${escapeHtml(PDF_TEMPLATE_VERSION)}</span><span>Finalised snapshot | Page <span class="pageNumber"></span> of <span class="totalPages"></span></span></div>`;
 }
 
 const PDF_CSS = `
@@ -506,9 +515,6 @@ const PDF_CSS = `
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: #fff; color: var(--ink); font-family: Arial, Helvetica, sans-serif; font-size: 10px; line-height: 1.4; }
 body { padding: 0; }
-.page-header, .page-footer { position: fixed; left: 0; right: 0; color: var(--muted); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; display: flex; justify-content: space-between; }
-.page-header { top: -10mm; background: #fff; padding: 1mm 0; z-index: 2; }
-.page-footer { bottom: -11mm; background: #fff; border-top: 1px solid var(--line); padding-top: 2mm; z-index: 2; }
 .report-header { display: grid; grid-template-columns: 28mm 1fr 58mm; gap: 7mm; align-items: center; border-bottom: 3px solid var(--teal); padding-bottom: 6mm; margin-bottom: 7mm; }
 .brand-mark { color: #fff; background: var(--ink); border-radius: 4px; font-weight: 700; letter-spacing: .14em; padding: 8mm 3mm; text-align: center; font-size: 14px; }
 .eyebrow, .section-kicker { color: var(--teal); font-size: 8px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }

@@ -33,11 +33,16 @@ test("2. quickAction payload includes the rendered html", () => {
   assert.match(pdfRoute, /quickAction\(\s*"pdf",\s*\{\s*html,/);
 });
 
-test("3. quickAction payload requests A4 landscape and CSS page sizing", () => {
+test("3. quickAction uses A4 landscape with native margin headers and footers", () => {
   assert.match(
     pdfRoute,
-    /quickAction\(\s*"pdf",\s*\{\s*html,\s*pdfOptions:\s*\{\s*printBackground:\s*true,\s*format:\s*"a4",\s*landscape:\s*true,\s*preferCSSPageSize:\s*true,?\s*\},?\s*\},?\s*\)/,
+    /quickAction\(\s*"pdf",\s*\{\s*html,\s*pdfOptions:\s*\{\s*printBackground:\s*true,\s*format:\s*"a4",\s*landscape:\s*true,\s*preferCSSPageSize:\s*true,\s*displayHeaderFooter:\s*true,\s*headerTemplate,\s*footerTemplate,\s*margin:\s*\{\s*top:\s*"14mm",\s*right:\s*"12mm",\s*bottom:\s*"15mm",\s*left:\s*"12mm",?\s*\},?\s*\},?\s*\},?\s*\)/,
   );
+  assert.match(
+    pdfRoute,
+    /renderClaimsReportPdfHeaderTemplate\(\s*run,\s*workflow,?\s*\)/,
+  );
+  assert.match(pdfRoute, /renderClaimsReportPdfFooterTemplate\(\s*\)/);
 });
 
 test("4. quickAction payload has no top-level printBackground", () => {

@@ -4,6 +4,8 @@ import {
   buildClaimsReportPdfViewModel,
   PDF_TEMPLATE_VERSION,
   renderClaimsReportHtml,
+  renderClaimsReportPdfFooterTemplate,
+  renderClaimsReportPdfHeaderTemplate,
   reportPdfFilename,
 } from "./claims-report-pdf.mjs";
 
@@ -178,7 +180,10 @@ test("weekly PDF HTML is deterministic, escaped, complete, and snapshot-bound", 
   assert.match(first, /Frozen &lt;strong&gt;action&lt;\/strong&gt;/);
   assert.match(first, /Long note Long note/);
   assert.match(first, /Carried forward/);
-  assert.match(first, new RegExp(PDF_TEMPLATE_VERSION));
+  assert.match(
+    renderClaimsReportPdfFooterTemplate(),
+    new RegExp(PDF_TEMPLATE_VERSION),
+  );
   assert.doesNotMatch(
     first,
     /insured|source_claim_number|attention-0|action-0/i,
@@ -244,11 +249,16 @@ test("PDF pagination reserves header and footer areas for table rows", () => {
   const html = renderClaimsReportHtml(fixtureRun(), { available: true });
   assert.match(html, /@page \{ size: A4 landscape; margin: 14mm 12mm 15mm; \}/);
   assert.match(html, /body \{ padding: 0; \}/);
-  assert.match(html, /\.page-header \{ top: -10mm; background: #fff;/);
-  assert.match(html, /\.page-footer \{ bottom: -11mm; background: #fff;/);
+  assert.doesNotMatch(html, /\.page-header|\.page-footer|position:\s*fixed/);
   assert.match(html, /tr \{ break-inside: avoid; page-break-inside: avoid; \}/);
-  assert.match(html, /\.operational-section \{ break-inside: avoid; page-break-inside: avoid; \}/);
-  assert.match(html, /\.operational-table \{ break-inside: auto; page-break-inside: auto; \}/);
+  assert.match(
+    html,
+    /\.operational-section \{ break-inside: avoid; page-break-inside: avoid; \}/,
+  );
+  assert.match(
+    html,
+    /\.operational-table \{ break-inside: auto; page-break-inside: auto; \}/,
+  );
   assert.match(
     html,
     /\.operational-table thead \{ display: table-header-group; break-inside: avoid; page-break-inside: avoid; \}/,
@@ -258,7 +268,10 @@ test("PDF pagination reserves header and footer areas for table rows", () => {
 test("PDF pagination repeats table headers at page breaks and keeps section headings with content", () => {
   const html = renderClaimsReportHtml(fixtureRun(), { available: true });
   assert.match(html, /thead \{ display: table-header-group; \}/);
-  assert.match(html, /thead tr \{ break-inside: avoid; page-break-inside: avoid; \}/);
+  assert.match(
+    html,
+    /thead tr \{ break-inside: avoid; page-break-inside: avoid; \}/,
+  );
   assert.match(
     html,
     /\.report-section > \.section-kicker \{ break-after: avoid; page-break-after: avoid; \}/,
@@ -268,5 +281,23 @@ test("PDF pagination repeats table headers at page breaks and keeps section head
     /h2 \{ margin-bottom: 3mm; font-size: 16px; line-height: 1\.15; break-after: avoid; page-break-after: avoid; \}/,
   );
   assert.match(html, /\.report-section \{ break-inside: auto;/);
-  assert.doesNotMatch(html, /@media print \{ \.report-section \{ break-inside: avoid;/);
+  assert.doesNotMatch(
+    html,
+    /@media print \{ \.report-section \{ break-inside: avoid;/,
+  );
+});
+
+test("PDF running header and footer use native print-margin templates", () => {
+  const run = fixtureRun();
+  const workflow = { available: true };
+  const header = renderClaimsReportPdfHeaderTemplate(run, workflow);
+  const footer = renderClaimsReportPdfFooterTemplate();
+
+  assert.match(header, /SCOUT \/ CLAIMS MANAGEMENT/);
+  assert.ok(
+    header.includes(buildClaimsReportPdfViewModel(run, workflow).periodLabel),
+  );
+  assert.match(footer, /claims-management-pdf-v6/);
+  assert.match(footer, /class="pageNumber"/);
+  assert.match(footer, /class="totalPages"/);
 });
