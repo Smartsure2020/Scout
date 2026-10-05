@@ -1,6 +1,6 @@
 const TIME_ZONE = "Africa/Johannesburg";
 
-export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v4";
+export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v5";
 export const PDF_RENDERER_VERSION = "cloudflare-browser-run-quick-action";
 
 const MONTHS = [
@@ -458,7 +458,7 @@ function renderOperational(view) {
         `<tr><th scope="row">${escapeHtml(OPERATIONAL_LABELS[key] || key)}</th><td class="numeric">${escapeHtml(formatInteger(value))}</td></tr>`,
     )
     .join("");
-  return `<section class="report-section"><div class="section-kicker">Operational health</div><h2>Operational Health</h2><table class="simple-table operational-table">${tableHeader(["Category", "Open claims"])}<tbody>${rows || emptyRow(2)}</tbody></table></section>`;
+  return `<section class="report-section operational-section"><div class="section-kicker">Operational health</div><h2>Operational Health</h2><table class="simple-table operational-table">${tableHeader(["Category", "Open claims"])}<tbody>${rows || emptyRow(2)}</tbody></table></section>`;
 }
 
 function renderHandlers(view) {
@@ -501,14 +501,14 @@ export function renderClaimsReportHtml(run = {}, workflow = {}) {
 }
 
 const PDF_CSS = `
-@page { size: A4 landscape; margin: 20mm 12mm 22mm; }
+@page { size: A4 landscape; margin: 14mm 12mm 15mm; }
 :root { color-scheme: light; --ink: #17324d; --muted: #617286; --line: #dce5ec; --wash: #f4f7fa; --blue: #23658b; --teal: #168b85; --amber: #b8781c; --red: #a63d3d; }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: #fff; color: var(--ink); font-family: Arial, Helvetica, sans-serif; font-size: 10px; line-height: 1.4; }
 body { padding: 0; }
 .page-header, .page-footer { position: fixed; left: 0; right: 0; color: var(--muted); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; display: flex; justify-content: space-between; }
-.page-header { top: 4mm; background: #fff; padding: 1mm 0; z-index: 2; }
-.page-footer { bottom: 4mm; background: #fff; border-top: 1px solid var(--line); padding-top: 2mm; z-index: 2; }
+.page-header { top: -10mm; background: #fff; padding: 1mm 0; z-index: 2; }
+.page-footer { bottom: -11mm; background: #fff; border-top: 1px solid var(--line); padding-top: 2mm; z-index: 2; }
 .report-header { display: grid; grid-template-columns: 28mm 1fr 58mm; gap: 7mm; align-items: center; border-bottom: 3px solid var(--teal); padding-bottom: 6mm; margin-bottom: 7mm; }
 .brand-mark { color: #fff; background: var(--ink); border-radius: 4px; font-weight: 700; letter-spacing: .14em; padding: 8mm 3mm; text-align: center; font-size: 14px; }
 .eyebrow, .section-kicker { color: var(--teal); font-size: 8px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
@@ -548,6 +548,7 @@ td.numeric { text-align: right; white-space: nowrap; }
 small { display: block; color: var(--muted); font-size: 8px; font-weight: 400; margin-top: 1mm; }
 .simple-table th:first-child { width: 45%; }
 .simple-table td { text-align: right; }
+.operational-section { break-inside: avoid; page-break-inside: avoid; }
 .operational-table { break-inside: auto; page-break-inside: auto; }
 .operational-table thead { display: table-header-group; break-inside: avoid; page-break-inside: avoid; }
 .simple-table .empty-cell, .management-table .empty-cell { text-align: left; color: var(--muted); }

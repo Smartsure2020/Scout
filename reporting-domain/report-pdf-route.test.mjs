@@ -33,10 +33,10 @@ test("2. quickAction payload includes the rendered html", () => {
   assert.match(pdfRoute, /quickAction\(\s*"pdf",\s*\{\s*html,/);
 });
 
-test("3. quickAction payload nests printBackground: true under pdfOptions", () => {
+test("3. quickAction payload requests A4 landscape and CSS page sizing", () => {
   assert.match(
     pdfRoute,
-    /quickAction\(\s*"pdf",\s*\{\s*html,\s*pdfOptions:\s*\{\s*printBackground:\s*true,?\s*\},?\s*\},?\s*\)/,
+    /quickAction\(\s*"pdf",\s*\{\s*html,\s*pdfOptions:\s*\{\s*printBackground:\s*true,\s*format:\s*"a4",\s*landscape:\s*true,\s*preferCSSPageSize:\s*true,?\s*\},?\s*\},?\s*\)/,
   );
 });
 

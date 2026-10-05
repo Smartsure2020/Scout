@@ -3537,6 +3537,9 @@ export default {
           html,
           pdfOptions: {
             printBackground: true,
+            format: "a4",
+            landscape: true,
+            preferCSSPageSize: true,
           },
         });
         if (!(rendered instanceof Response))

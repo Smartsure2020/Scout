@@ -242,11 +242,12 @@ test("PDF explains unresolved financial aggregation counts", () => {
 
 test("PDF pagination reserves header and footer areas for table rows", () => {
   const html = renderClaimsReportHtml(fixtureRun(), { available: true });
-  assert.match(html, /@page \{ size: A4 landscape; margin: 20mm 12mm 22mm; \}/);
+  assert.match(html, /@page \{ size: A4 landscape; margin: 14mm 12mm 15mm; \}/);
   assert.match(html, /body \{ padding: 0; \}/);
-  assert.match(html, /\.page-header \{ top: 4mm; background: #fff;/);
-  assert.match(html, /\.page-footer \{ bottom: 4mm; background: #fff;/);
+  assert.match(html, /\.page-header \{ top: -10mm; background: #fff;/);
+  assert.match(html, /\.page-footer \{ bottom: -11mm; background: #fff;/);
   assert.match(html, /tr \{ break-inside: avoid; page-break-inside: avoid; \}/);
+  assert.match(html, /\.operational-section \{ break-inside: avoid; page-break-inside: avoid; \}/);
   assert.match(html, /\.operational-table \{ break-inside: auto; page-break-inside: auto; \}/);
   assert.match(
     html,
