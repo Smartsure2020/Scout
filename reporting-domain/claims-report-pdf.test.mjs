@@ -297,7 +297,10 @@ test("PDF running header and footer use native print-margin templates", () => {
   assert.ok(
     header.includes(buildClaimsReportPdfViewModel(run, workflow).periodLabel),
   );
-  assert.match(footer, /claims-management-pdf-v6/);
+  assert.match(header, /padding:0 12mm;box-sizing:border-box/);
+  assert.match(header, /<table style="width:100%;border-collapse:collapse">/);
+  assert.match(footer, /claims-management-pdf-v7/);
+  assert.match(footer, /padding:0 12mm;box-sizing:border-box/);
   assert.match(footer, /class="pageNumber"/);
   assert.match(footer, /class="totalPages"/);
 });

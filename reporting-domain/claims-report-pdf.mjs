@@ -1,6 +1,6 @@
 const TIME_ZONE = "Africa/Johannesburg";
 
-export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v6";
+export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v7";
 export const PDF_RENDERER_VERSION = "cloudflare-browser-run-quick-action";
 
 const MONTHS = [
@@ -502,11 +502,11 @@ export function renderClaimsReportHtml(run = {}, workflow = {}) {
 
 export function renderClaimsReportPdfHeaderTemplate(run = {}, workflow = {}) {
   const { periodLabel } = buildClaimsReportPdfViewModel(run, workflow);
-  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:#617286;width:100%;display:flex;justify-content:space-between"><span>SCOUT / CLAIMS MANAGEMENT</span><span>${escapeHtml(periodLabel)}</span></div>`;
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:#617286;width:100%;padding:0 12mm;box-sizing:border-box"><table style="width:100%;border-collapse:collapse"><tr><td style="padding:0;text-align:left;color:#617286">SCOUT / CLAIMS MANAGEMENT</td><td style="padding:0;text-align:right;color:#617286">${escapeHtml(periodLabel)}</td></tr></table></div>`;
 }
 
 export function renderClaimsReportPdfFooterTemplate() {
-  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:#617286;width:100%;display:flex;justify-content:space-between;border-top:1px solid #dce5ec;padding-top:2mm"><span>Scout management reporting - ${escapeHtml(PDF_TEMPLATE_VERSION)}</span><span>Finalised snapshot | Page <span class="pageNumber"></span> of <span class="totalPages"></span></span></div>`;
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:#617286;width:100%;padding:0 12mm;box-sizing:border-box"><table style="width:100%;border-collapse:collapse;border-top:1px solid #dce5ec"><tr><td style="padding:2mm 0 0;text-align:left;color:#617286">Scout management reporting - ${escapeHtml(PDF_TEMPLATE_VERSION)}</td><td style="padding:2mm 0 0;text-align:right;color:#617286">Finalised snapshot | Page <span class="pageNumber"></span> of <span class="totalPages"></span></td></tr></table></div>`;
 }
 
 const PDF_CSS = `
