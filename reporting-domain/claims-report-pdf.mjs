@@ -1,6 +1,6 @@
 const TIME_ZONE = "Africa/Johannesburg";
 
-export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v2";
+export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v3";
 export const PDF_RENDERER_VERSION = "cloudflare-browser-run-quick-action";
 
 const MONTHS = [
@@ -213,7 +213,20 @@ function periodLabel(run, snapshot) {
   if (!startDate || !endDate) return "Weekly reporting period";
   const inclusiveEnd = new Date(endDate.getTime());
   inclusiveEnd.setUTCDate(inclusiveEnd.getUTCDate() - 1);
-  return `${startDate.getUTCDate()}-${inclusiveEnd.getUTCDate()} ${MONTHS[startDate.getUTCMonth()].slice(0, 3)} ${startDate.getUTCFullYear()}`;
+  const startMonth = MONTHS[startDate.getUTCMonth()].slice(0, 3);
+  const endMonth = MONTHS[inclusiveEnd.getUTCMonth()].slice(0, 3);
+  const startYear = startDate.getUTCFullYear();
+  const endYear = inclusiveEnd.getUTCFullYear();
+  if (
+    startDate.getUTCMonth() === inclusiveEnd.getUTCMonth() &&
+    startYear === endYear
+  ) {
+    return `${startDate.getUTCDate()}-${inclusiveEnd.getUTCDate()} ${startMonth} ${startYear}`;
+  }
+  if (startYear === endYear) {
+    return `${startDate.getUTCDate()} ${startMonth} - ${inclusiveEnd.getUTCDate()} ${endMonth} ${endYear}`;
+  }
+  return `${startDate.getUTCDate()} ${startMonth} ${startYear} - ${inclusiveEnd.getUTCDate()} ${endMonth} ${endYear}`;
 }
 
 function coverageLabel(status) {
@@ -492,10 +505,10 @@ const PDF_CSS = `
 :root { color-scheme: light; --ink: #17324d; --muted: #617286; --line: #dce5ec; --wash: #f4f7fa; --blue: #23658b; --teal: #168b85; --amber: #b8781c; --red: #a63d3d; }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: #fff; color: var(--ink); font-family: Arial, Helvetica, sans-serif; font-size: 10px; line-height: 1.4; }
-body { padding: 0; }
+body { padding: 8mm 0 9mm; }
 .page-header, .page-footer { position: fixed; left: 0; right: 0; color: var(--muted); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; display: flex; justify-content: space-between; }
-.page-header { top: -9mm; }
-.page-footer { bottom: -10mm; border-top: 1px solid var(--line); padding-top: 2mm; }
+.page-header { top: 4mm; background: #fff; padding: 1mm 0; z-index: 2; }
+.page-footer { bottom: 4mm; background: #fff; border-top: 1px solid var(--line); padding-top: 2mm; z-index: 2; }
 .report-header { display: grid; grid-template-columns: 28mm 1fr 58mm; gap: 7mm; align-items: center; border-bottom: 3px solid var(--teal); padding-bottom: 6mm; margin-bottom: 7mm; }
 .brand-mark { color: #fff; background: var(--ink); border-radius: 4px; font-weight: 700; letter-spacing: .14em; padding: 8mm 3mm; text-align: center; font-size: 14px; }
 .eyebrow, .section-kicker { color: var(--teal); font-size: 8px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
@@ -553,5 +566,10 @@ small { display: block; color: var(--muted); font-size: 8px; font-weight: 400; m
 .warning-list { margin: 2mm 0 0; padding-left: 5mm; color: var(--amber); }
 .success-note { color: var(--teal); font-weight: 700; }
 .methodology { break-before: auto; }
-@media print { .two-column, .kpi-grid, .callout, .sla-panel { break-inside: avoid; } .handler-table, .attention-table, .action-table { break-inside: auto; } }
+@media print {
+  .two-column, .kpi-grid { break-inside: auto; }
+  .callout, .sla-panel, .kpi-card { break-inside: avoid; }
+  .report-section > h2, .report-section > .section-intro { break-after: avoid; page-break-after: avoid; }
+  .handler-table, .attention-table, .action-table { break-inside: auto; }
+}
 `;

@@ -200,6 +200,15 @@ test("monthly PDF uses the monthly snapshot period and official filename", () =>
   );
 });
 
+test("weekly PDF formats a cross-month period with both month names", () => {
+  const run = fixtureRun();
+  run.metrics_snapshot.period_start_local_date = "2026-09-28";
+  run.metrics_snapshot.period_end_local_date = "2026-10-03";
+  const view = buildClaimsReportPdfViewModel(run, workflowFixture());
+  assert.equal(view.periodLabel, "28 Sep - 2 Oct 2026");
+  assert.match(renderClaimsReportHtml(run, { available: true }), /28 Sep - 2 Oct 2026/);
+});
+
 test("zero stays zero and unavailable values never become zero", () => {
   const run = fixtureRun();
   run.metrics_snapshot.metrics.financial_paid_total = {
@@ -231,7 +240,10 @@ test("PDF explains unresolved financial aggregation counts", () => {
 test("PDF print contract preserves landscape branding without footer collision or blanket section page breaks", () => {
   const html = renderClaimsReportHtml(fixtureRun(), { available: true });
   assert.match(html, /@page \{ size: A4 landscape; margin: 14mm 12mm 15mm; \}/);
-  assert.match(html, /\.page-footer \{ bottom: -10mm;/);
+  assert.match(html, /body \{ padding: 8mm 0 9mm; \}/);
+  assert.match(html, /\.page-header \{ top: 4mm; background: #fff;/);
+  assert.match(html, /\.page-footer \{ bottom: 4mm; background: #fff;/);
+  assert.match(html, /\.report-section > h2, \.report-section > \.section-intro \{ break-after: avoid; page-break-after: avoid; \}/);
   assert.match(html, /\.report-section \{ break-inside: auto;/);
   assert.doesNotMatch(html, /@media print \{ \.report-section \{ break-inside: avoid;/);
 });
