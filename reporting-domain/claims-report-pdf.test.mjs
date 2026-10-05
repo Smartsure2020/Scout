@@ -206,7 +206,10 @@ test("weekly PDF formats a cross-month period with both month names", () => {
   run.metrics_snapshot.period_end_local_date = "2026-10-03";
   const view = buildClaimsReportPdfViewModel(run, workflowFixture());
   assert.equal(view.periodLabel, "28 Sep - 2 Oct 2026");
-  assert.match(renderClaimsReportHtml(run, { available: true }), /28 Sep - 2 Oct 2026/);
+  assert.match(
+    renderClaimsReportHtml(run, { available: true }),
+    /28 Sep - 2 Oct 2026/,
+  );
 });
 
 test("zero stays zero and unavailable values never become zero", () => {
@@ -237,13 +240,32 @@ test("PDF explains unresolved financial aggregation counts", () => {
   );
 });
 
-test("PDF print contract preserves landscape branding without footer collision or blanket section page breaks", () => {
+test("PDF pagination reserves header and footer areas for table rows", () => {
   const html = renderClaimsReportHtml(fixtureRun(), { available: true });
-  assert.match(html, /@page \{ size: A4 landscape; margin: 14mm 12mm 15mm; \}/);
-  assert.match(html, /body \{ padding: 8mm 0 9mm; \}/);
+  assert.match(html, /@page \{ size: A4 landscape; margin: 20mm 12mm 22mm; \}/);
+  assert.match(html, /body \{ padding: 0; \}/);
   assert.match(html, /\.page-header \{ top: 4mm; background: #fff;/);
   assert.match(html, /\.page-footer \{ bottom: 4mm; background: #fff;/);
-  assert.match(html, /\.report-section > h2, \.report-section > \.section-intro \{ break-after: avoid; page-break-after: avoid; \}/);
+  assert.match(html, /tr \{ break-inside: avoid; page-break-inside: avoid; \}/);
+  assert.match(html, /\.operational-table \{ break-inside: auto; page-break-inside: auto; \}/);
+  assert.match(
+    html,
+    /\.operational-table thead \{ display: table-header-group; break-inside: avoid; page-break-inside: avoid; \}/,
+  );
+});
+
+test("PDF pagination repeats table headers at page breaks and keeps section headings with content", () => {
+  const html = renderClaimsReportHtml(fixtureRun(), { available: true });
+  assert.match(html, /thead \{ display: table-header-group; \}/);
+  assert.match(html, /thead tr \{ break-inside: avoid; page-break-inside: avoid; \}/);
+  assert.match(
+    html,
+    /\.report-section > \.section-kicker \{ break-after: avoid; page-break-after: avoid; \}/,
+  );
+  assert.match(
+    html,
+    /h2 \{ margin-bottom: 3mm; font-size: 16px; line-height: 1\.15; break-after: avoid; page-break-after: avoid; \}/,
+  );
   assert.match(html, /\.report-section \{ break-inside: auto;/);
   assert.doesNotMatch(html, /@media print \{ \.report-section \{ break-inside: avoid;/);
 });

@@ -1,6 +1,6 @@
 const TIME_ZONE = "Africa/Johannesburg";
 
-export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v3";
+export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v4";
 export const PDF_RENDERER_VERSION = "cloudflare-browser-run-quick-action";
 
 const MONTHS = [
@@ -501,11 +501,11 @@ export function renderClaimsReportHtml(run = {}, workflow = {}) {
 }
 
 const PDF_CSS = `
-@page { size: A4 landscape; margin: 14mm 12mm 15mm; }
+@page { size: A4 landscape; margin: 20mm 12mm 22mm; }
 :root { color-scheme: light; --ink: #17324d; --muted: #617286; --line: #dce5ec; --wash: #f4f7fa; --blue: #23658b; --teal: #168b85; --amber: #b8781c; --red: #a63d3d; }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: #fff; color: var(--ink); font-family: Arial, Helvetica, sans-serif; font-size: 10px; line-height: 1.4; }
-body { padding: 8mm 0 9mm; }
+body { padding: 0; }
 .page-header, .page-footer { position: fixed; left: 0; right: 0; color: var(--muted); font-size: 8px; letter-spacing: .08em; text-transform: uppercase; display: flex; justify-content: space-between; }
 .page-header { top: 4mm; background: #fff; padding: 1mm 0; z-index: 2; }
 .page-footer { bottom: 4mm; background: #fff; border-top: 1px solid var(--line); padding-top: 2mm; z-index: 2; }
@@ -514,12 +514,13 @@ body { padding: 8mm 0 9mm; }
 .eyebrow, .section-kicker { color: var(--teal); font-size: 8px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
 h1, h2, h3, p { margin-top: 0; }
 h1 { margin-bottom: 1mm; font-size: 24px; line-height: 1.1; letter-spacing: -.02em; }
-h2 { margin-bottom: 3mm; font-size: 16px; line-height: 1.15; }
+h2 { margin-bottom: 3mm; font-size: 16px; line-height: 1.15; break-after: avoid; page-break-after: avoid; }
 h3 { margin: 5mm 0 2mm; font-size: 11px; }
 .period { color: var(--muted); font-size: 13px; margin: 0; }
 .header-meta { display: grid; gap: 2mm; justify-items: end; text-align: right; color: var(--muted); font-size: 9px; }
 .report-section { break-inside: auto; margin: 0 0 5mm; }
 .executive { break-inside: auto; }
+.report-section > .section-kicker { break-after: avoid; page-break-after: avoid; }
 .section-intro, .lead, .method-note { color: var(--muted); }
 .lead { font-size: 12px; max-width: 210mm; margin-bottom: 5mm; }
 .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3mm; }
@@ -537,7 +538,8 @@ h3 { margin: 5mm 0 2mm; font-size: 11px; }
 .callout p { color: var(--muted); margin: 0; }
 table { width: 100%; border-collapse: collapse; table-layout: fixed; }
 thead { display: table-header-group; }
-tr { break-inside: avoid; }
+thead tr { break-inside: avoid; page-break-inside: avoid; }
+tr { break-inside: avoid; page-break-inside: avoid; }
 th, td { border-bottom: 1px solid var(--line); padding: 2.5mm 2mm; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
 th { color: var(--ink); font-weight: 700; }
 thead th { background: var(--ink); color: #fff; font-size: 8px; text-transform: uppercase; letter-spacing: .06em; }
@@ -546,6 +548,8 @@ td.numeric { text-align: right; white-space: nowrap; }
 small { display: block; color: var(--muted); font-size: 8px; font-weight: 400; margin-top: 1mm; }
 .simple-table th:first-child { width: 45%; }
 .simple-table td { text-align: right; }
+.operational-table { break-inside: auto; page-break-inside: auto; }
+.operational-table thead { display: table-header-group; break-inside: avoid; page-break-inside: avoid; }
 .simple-table .empty-cell, .management-table .empty-cell { text-align: left; color: var(--muted); }
 .management-table { font-size: 8.5px; }
 .attention-table th:nth-child(1) { width: 19%; } .attention-table th:nth-child(2) { width: 11%; } .attention-table th:nth-child(3) { width: 9%; } .attention-table th:nth-child(4) { width: 12%; } .attention-table th:nth-child(5) { width: 16%; } .attention-table th:nth-child(6) { width: 10%; } .attention-table th:nth-child(7) { width: 23%; }
