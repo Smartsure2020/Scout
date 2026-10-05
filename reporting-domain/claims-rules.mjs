@@ -297,6 +297,28 @@ const TERMINAL_STATUS_NAMES = [
   "Ex Gratia - Finalized",
   "Not Taken Up",
   "Knock for Knock Settled",
+  // Added 2026-10-05 after auditing every Claims Status string across the real Cardinal
+  // workbooks. Exact strings only (no "contains closed" matching): each states a final
+  // outcome. PARITY: "Settled - TP approach pending" was already terminal on the claims page.
+  "Settled - TP approach pending",
+  "Settled repudiated",
+  "Settled within excess",
+  "Settled no claim from client/claim withdrawn/NTU",
+  "Settled Full Recovery",
+  "Settled Duplicated",
+  "Settled partial recovery made",
+  "Settled File Closed",
+  "Settled no claim from client",
+  "Settled OD and TP claim paid",
+  "Settled – Partial Repudiation",
+  "Settled each party bears own costs",
+  "Settled TP claim repudiated",
+  "Settled no claim/no cover/no peril",
+  "Settled TP claim Paid",
+  "Settled OD paid TP claim repudiated",
+  "Settled No TP claim made",
+  "Settled – Ex Gratia",
+  "Closed - Notification Only",
 ];
 
 export const TERMINAL_STATUSES = Object.freeze(
@@ -309,6 +331,41 @@ export function getStatusRule(status) {
 
 export function isTerminalStatus(status) {
   return TERMINAL_STATUSES.has(normalizeStatus(status));
+}
+
+// Reporting-only classification (management decision 2026-10-05): "Repudiated"
+// is a closure for the weekly / monthly report. The claims page and briefings
+// deliberately keep it on the worklist (270-day close-or-escalate reminders),
+// so this does NOT change isTerminalStatus. Other repudiation workflow statuses
+// (for example "Repudiated - Awaiting Closure") remain open.
+export const REPORTING_TERMINAL_STATUS_OVERRIDES = Object.freeze(
+  new Set(["repudiated"]),
+);
+
+export function isReportingTerminalStatus(status) {
+  const normalized = normalizeStatus(status);
+  return (
+    TERMINAL_STATUSES.has(normalized) ||
+    REPORTING_TERMINAL_STATUS_OVERRIDES.has(normalized)
+  );
+}
+
+export function isPaymentRelatedStatus(status) {
+  return getStatusRule(status)?.category === "payment";
+}
+
+/**
+ * "Payment status with zero estimate": the claim is open, its status is
+ * payment-related (canonical status category "payment") AND its estimate is
+ * known and exactly zero. A missing estimate is not a zero estimate.
+ */
+export function isPaymentZeroEstimate(claim) {
+  if (isTerminalStatus(claim?.status)) return false;
+  if (!isPaymentRelatedStatus(claim?.status)) return false;
+  const estimate = claim?.estimate;
+  if (estimate === null || estimate === undefined || estimate === "") return false;
+  const number = Number(estimate);
+  return Number.isFinite(number) && number === 0;
 }
 
 export function isOpenStatus(status) {

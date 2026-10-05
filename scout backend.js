@@ -302,6 +302,25 @@ async function updateHistoryManifest(env, id, patch) {
   );
 }
 
+// The reporting roster (who is an active handler, the claims manager, the claims
+// administrator or a former handler) is data in scout_settings, never names in
+// code. A missing row is normal (cards then derive from SCOUT user roles and the
+// report says so); a failed lookup is reported as its own warning.
+async function getReportingRoster(env) {
+  try {
+    const rows = await supabase(
+      env,
+      "/scout_settings?id=eq.reporting_roster&select=value&limit=1",
+      "GET",
+      null,
+      true,
+    );
+    return { roster: rows?.[0]?.value ?? null, unavailable: false };
+  } catch {
+    return { roster: null, unavailable: true };
+  }
+}
+
 async function getActiveHistoryUsers(env) {
   try {
     return {
@@ -1701,14 +1720,17 @@ async function loadReportEvidence(env, { reportType, periodStart, scope }) {
     period.end,
   );
   const activeUsers = await getActiveHistoryUsers(env);
-  const configurationWarnings = activeUsers.unavailable
-    ? ["user_lookup_unavailable"]
-    : [];
+  const reportingRoster = await getReportingRoster(env);
+  const configurationWarnings = [
+    ...(activeUsers.unavailable ? ["user_lookup_unavailable"] : []),
+    ...(reportingRoster.unavailable ? ["reporting_roster_unavailable"] : []),
+  ];
   const shared = {
     manifests,
     snapshotsByExtract,
     changes,
     activeUsers: activeUsers.users,
+    handlerRoster: reportingRoster.roster,
     scope,
     configurationWarnings,
   };
@@ -1876,7 +1898,9 @@ function nullableCurrentNumber(value) {
 function nullableCurrentDate(value) {
   if (value === null || value === undefined || value === "") return null;
   const text = String(value).trim();
-  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  // Excel's empty date (1899-12-31 / 1900-01-01) means "no date".
+  return Number(text.slice(0, 4)) <= 1900 ? null : text;
 }
 
 function nullableCurrentText(value) {

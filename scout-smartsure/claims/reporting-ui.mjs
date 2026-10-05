@@ -61,7 +61,8 @@ const OPERATIONAL_LABELS = {
   assessor_overdue: "Assessor overdue",
   investigator_overdue: "Investigator overdue",
   broker_overdue: "Broker overdue",
-  high_value_mandate_attention: "High value / mandate attention",
+  high_value: "High value (outstanding)",
+  high_value_mandate_attention: "High value / mandate attention", // reports finalised before the split
   legal_recovery: "Legal / recovery",
   nfo_ombudsman: "NFO / Ombudsman",
   fraud: "Fraud",
@@ -669,6 +670,18 @@ function metricCard(
   </article>`;
 }
 
+const SCORECARD_PRIMARY_ROLES = new Set(["handler", "claims_manager", "management"]);
+
+function scorecardDelta(current, previous, worseWhenUp = false) {
+  if (previous === null || previous === undefined) return "";
+  const delta = Number(current) - Number(previous);
+  if (!Number.isFinite(delta)) return "";
+  const tone = delta === 0 || !worseWhenUp ? "flat" : delta > 0 ? "bad" : "good";
+  const label =
+    delta === 0 ? "No change" : `${delta > 0 ? "+" : "−"}${formatInteger(Math.abs(delta))}`;
+  return `<span class="scorecard-delta ${tone}">${escapeHtml(label)} vs previous</span>`;
+}
+
 function reportTableRow(label, value, action = "", note = "") {
   return `<div class="report-table-row"><span>${escapeHtml(label)}</span><span>${action || escapeHtml(value)}</span>${note ? `<small>${escapeHtml(note)}</small>` : ""}</div>`;
 }
@@ -710,8 +723,11 @@ function pdfFilename(run) {
   return `Scout-${type}-Claims-Report-${date}.pdf`;
 }
 
-function claimRowMatchesFilter(row, filter) {
+function claimRowMatchesFilter(row, filter, metricId = "") {
   if (!filter) return true;
+  // Scorecard figures tag every claim with the handler card it belongs to.
+  if (filter.startsWith("card:"))
+    return String(row.membership_reasons?.[metricId] || "") === filter.slice(5);
   if (filter.startsWith("handler:"))
     return String(row.handler_email_snapshot || "") === filter.slice(8);
   if (filter.startsWith("category:"))
@@ -1055,7 +1071,7 @@ export class ReportsController {
     try {
       const response = await this.api.metricClaims(reportId, metricId);
       this.state.drill.claims = Array.isArray(response?.claims)
-        ? response.claims.filter((row) => claimRowMatchesFilter(row, filter))
+        ? response.claims.filter((row) => claimRowMatchesFilter(row, filter, metricId))
         : [];
       this.state.drill.loading = false;
     } catch (error) {
@@ -1514,8 +1530,7 @@ export class ReportsController {
       </div>
       <div class="report-coverage-banner ${coverage === "complete" ? "is-complete" : coverage === "insufficient" ? "is-insufficient" : "is-warning"}"><div><strong>Coverage</strong> ${coverageBadge(coverage, warnings.length)}</div><span>${escapeHtml(this.coverageCopy(coverage, snapshot))}</span></div>
       ${!isDraft && this.state.workflowForm?.type === "attention" ? `<section class="report-section workflow-section workflow-standalone">${this.renderExistingClaimAttention()}<div class="section-header"><div><div class="section-title">Add Management Attention</div><p class="section-help">This creates a live item without changing the historical report snapshot.</p></div></div>${this.workflowForm(this.state.workflowForm)}</section>` : ""}
-      ${coverage === "insufficient" ? this.renderInsufficient(snapshot) : this.renderReportSections(snapshot)}
-      ${coverage === "insufficient" ? "" : this.renderWorkflow(run)}
+      ${coverage === "insufficient" ? this.renderInsufficient(snapshot) : this.renderReportBody(run, snapshot)}
       ${this.renderReportDetails(run, snapshot)}
     </section>`;
   }
@@ -1626,12 +1641,72 @@ export class ReportsController {
       return `<section class="report-section workflow-section"><div class="section-header"><div class="section-title">Management workflow</div></div><div class="workflow-empty"><strong>Management workflow is not available yet.</strong><span>An administrator needs to complete the Phase 5 database setup.</span></div></section>`;
     const attention = this.workflowItems(run, "attention");
     const actions = this.workflowItems(run, "action");
-    return `<section class="report-section workflow-section"><div class="section-header"><div><div class="section-title">Management Attention</div><p class="section-help">Human-selected items requiring management visibility.</p></div>${isDraft ? `<button class="btn-secondary" data-report-action="new-attention">Add attention item</button>` : `<span class="section-badge accent">Historical snapshot</span>`}</div>${isDraft && this.state.workflowForm?.type === "attention" ? this.workflowForm(this.state.workflowForm) : ""}${this.renderAttentionItems(attention, isDraft)}</section><section class="report-section workflow-section"><div class="section-header"><div><div class="section-title">Action Plan</div><p class="section-help">Lightweight actions linked to this report.</p></div>${isDraft ? `<button class="btn-secondary" data-report-action="new-action">Add action</button>` : `<span class="section-badge accent">Historical snapshot</span>`}</div>${isDraft && this.state.workflowForm?.type === "action" ? this.workflowForm(this.state.workflowForm) : ""}${this.renderActionItems(actions, isDraft)}</section>${isDraft && (this.state.workflowForm?.type === "attention-resolve" || this.state.workflowForm?.type === "action-complete") ? this.workflowForm(this.state.workflowForm) : ""}`;
+    return `<section class="report-section workflow-section"><div class="section-header"><div><div class="section-title">Claims Queries &amp; Management Attention</div><p class="section-help">Human-selected items requiring management visibility.</p></div>${isDraft ? `<button class="btn-secondary" data-report-action="new-attention">Add attention item</button>` : `<span class="section-badge accent">Historical snapshot</span>`}</div>${isDraft && this.state.workflowForm?.type === "attention" ? this.workflowForm(this.state.workflowForm) : ""}${this.renderAttentionItems(attention, isDraft)}</section><section class="report-section workflow-section"><div class="section-header"><div><div class="section-title">Recommendations &amp; Action Plan</div><p class="section-help">Lightweight actions linked to this report.</p></div>${isDraft ? `<button class="btn-secondary" data-report-action="new-action">Add action</button>` : `<span class="section-badge accent">Historical snapshot</span>`}</div>${isDraft && this.state.workflowForm?.type === "action" ? this.workflowForm(this.state.workflowForm) : ""}${this.renderActionItems(actions, isDraft)}</section>${isDraft && (this.state.workflowForm?.type === "attention-resolve" || this.state.workflowForm?.type === "action-complete") ? this.workflowForm(this.state.workflowForm) : ""}`;
   }
 
   renderInsufficient(snapshot) {
     const start = snapshot.coverage?.historical_capability_start_date;
     return `<div class="report-insufficient"><div class="report-insufficient-mark">!</div><div><h3>Insufficient historical coverage</h3><p>Scout does not have a valid historical snapshot for this reporting period. No zero-valued report is being shown.</p>${start ? `<p class="report-muted">Earliest trustworthy reporting date: <strong>${escapeHtml(start)}</strong></p>` : ""}</div></div>`;
+  }
+
+  hasScorecards(snapshot) {
+    return metricState(snapshot, "handler_scorecards").available;
+  }
+
+  // The headline figures are printed from the server's handler_scorecards
+  // metric and never recomputed here, so this page and the PDF cannot disagree.
+  renderScorecards(snapshot) {
+    const state = metricState(snapshot, "handler_scorecards");
+    if (!state.available || !state.value)
+      return `<section class="report-section"><div class="section-header"><div class="section-title">Claims Performance</div></div><div class="report-unavailable">— <span>Handler scorecards are not available for this report.</span></div></section>`;
+    const value = state.value;
+    const cards = Array.isArray(value.cards) ? value.cards : [];
+    const primary = cards.filter((card) => SCORECARD_PRIMARY_ROLES.has(card.role));
+    const others = cards.filter((card) => !SCORECARD_PRIMARY_ROLES.has(card.role));
+    const alerts = asObject(value.alerts);
+    const alertBox = (alert, tone) =>
+      alert
+        ? `<div class="report-alert ${tone}" role="${tone === "critical" ? "alert" : "note"}"><strong>${escapeHtml(alert.title)}</strong><span>${escapeHtml(alert.text)}</span></div>`
+        : "";
+    const figure = (label, metricId, count, previous, key, worseWhenUp = false) =>
+      `<div class="scorecard-metric"><span class="scorecard-label">${escapeHtml(label)}</span>${metricDrillButton(label, metricId, metricState(snapshot, metricId), `<strong>${escapeHtml(formatInteger(count))}</strong>`, key ? `card:${key}` : "")}${scorecardDelta(count, previous, worseWhenUp)}</div>`;
+    const totals = asObject(value.totals);
+    const previousTotals = totals.previous;
+    const closed = metricState(snapshot, "claims_closed");
+    const left = metricState(snapshot, "claims_left_extract");
+    const card = (item) => {
+      const previous = item.previous;
+      const tone =
+        item.action === "allocate" ? "is-critical" : item.action === "confirm" ? "is-warning" : "";
+      const oldest =
+        item.oldest_open_age_days === null || item.oldest_open_age_days === undefined
+          ? "n/a"
+          : `${formatInteger(item.oldest_open_age_days)} days`;
+      return `<article class="scorecard-card ${tone}"><header><h3>${escapeHtml(item.label)}</h3><span class="scorecard-role">${escapeHtml(item.role_label || "Handler")}</span></header>${figure("Total Gross Registered", "scorecard_gross_registered", item.gross_registered, previous ? previous.gross_registered : null, item.key)}${figure("New Allocated Claims", "scorecard_new_allocated", item.new_allocated, previous ? previous.new_allocated : null, item.key)}${figure("Over 60 Days", "scorecard_over_60", item.over_60, previous ? previous.over_60 : null, item.key, true)}<footer>91+ days: <strong>${escapeHtml(formatInteger(item.over_91))}</strong> · Oldest open: <strong>${escapeHtml(oldest)}</strong></footer></article>`;
+    };
+    const holders = others.length
+      ? `<div class="scorecard-holders"><h3>Other claim holders</h3><div class="report-table-scroll"><table class="report-handler-table"><thead><tr><th scope="col">Holder</th><th scope="col">Role</th><th scope="col">Total Gross Registered</th><th scope="col">New Allocated Claims</th><th scope="col">Over 60 Days</th><th scope="col">Action</th></tr></thead><tbody>${others
+          .map(
+            (item) =>
+              `<tr><th scope="row">${escapeHtml(item.label)}</th><td>${escapeHtml(item.role_label || "Handler")}</td><td>${metricDrillButton(`${item.label} gross registered`, "scorecard_gross_registered", metricState(snapshot, "scorecard_gross_registered"), escapeHtml(formatInteger(item.gross_registered)), `card:${item.key}`)}</td><td>${metricDrillButton(`${item.label} new allocated`, "scorecard_new_allocated", metricState(snapshot, "scorecard_new_allocated"), escapeHtml(formatInteger(item.new_allocated)), `card:${item.key}`)}</td><td>${metricDrillButton(`${item.label} over 60`, "scorecard_over_60", metricState(snapshot, "scorecard_over_60"), escapeHtml(formatInteger(item.over_60)), `card:${item.key}`)}</td><td><span class="scorecard-action ${item.action === "allocate" ? "critical" : item.action === "confirm" ? "warning" : "neutral"}">${escapeHtml(item.action_label || "No action")}</span></td></tr>`,
+          )
+          .join("")}</tbody></table></div></div>`
+      : "";
+    return `<section class="report-section scorecards"><div class="section-header"><div><div class="section-title">Claims Performance</div><p class="section-help">${escapeHtml(formatPeriodLabel(snapshot))}. Open claims only. New Allocated Claims: registered in the period. Over 60 Days: registered more than 60 days before close. Full definitions are under Report details.</p></div></div>${alertBox(alerts.critical, "critical")}${alertBox(alerts.confirm, "warning")}<div class="scorecard-team"><strong>Team total</strong><span>Total Gross Registered ${metricDrillButton("team gross registered", "scorecard_gross_registered", metricState(snapshot, "scorecard_gross_registered"), `<b>${escapeHtml(formatInteger(totals.gross_registered))}</b>`)}${scorecardDelta(totals.gross_registered, previousTotals ? previousTotals.gross_registered : null)}</span><span>New Allocated Claims ${metricDrillButton("team new allocated", "scorecard_new_allocated", metricState(snapshot, "scorecard_new_allocated"), `<b>${escapeHtml(formatInteger(totals.new_allocated))}</b>`)}${scorecardDelta(totals.new_allocated, previousTotals ? previousTotals.new_allocated : null)}</span><span>Over 60 Days ${metricDrillButton("team over 60", "scorecard_over_60", metricState(snapshot, "scorecard_over_60"), `<b>${escapeHtml(formatInteger(totals.over_60))}</b>`)}${scorecardDelta(totals.over_60, previousTotals ? previousTotals.over_60 : null, true)}</span><span>Terminal closures <b>${escapeHtml(renderMetricValue(closed, "integer"))}</b></span><span>Left the extract <b>${escapeHtml(renderMetricValue(left, "integer"))}</b> <small>not closures</small></span></div><div class="scorecard-grid">${primary.map(card).join("") || `<div class="report-unavailable">— <span>No handler data in the frozen snapshot.</span></div>`}</div>${holders}</section>`;
+  }
+
+  renderSupporting(snapshot) {
+    return `<div class="report-supporting-head"><div class="report-period-label">Supporting intelligence</div><h2>Supporting Intelligence</h2><p class="page-sub">The context behind the headline figures. SLA status is a supporting indicator, not a handler-performance measure.</p></div>
+    <div class="report-two-col"><section class="report-section"><div class="section-header"><div class="section-title">Claims Movement</div></div>${this.renderMovement(snapshot, true)}</section><section class="report-section"><div class="section-header"><div class="section-title">Management Ageing</div></div>${this.renderAgeing(snapshot)}</section></div>
+    <div class="report-two-col"><section class="report-section"><div class="section-header"><div class="section-title">Financial Position</div></div>${this.renderFinancial(snapshot)}</section><section class="report-section"><div class="section-header"><div class="section-title">Activity &amp; Changes</div></div>${this.renderActivity(snapshot)}</section></div>
+    <div class="report-two-col"><section class="report-section"><div class="section-header"><div class="section-title">SLA: Claim Age vs Status Threshold</div><span class="section-badge accent">Supporting indicator</span></div>${this.renderSla(snapshot, true)}<p class="report-footnote">SLA status compares each claim's total age since registration with its status threshold, so it is a supporting indicator and not a measure of handler performance.</p></section><section class="report-section"><div class="section-header"><div class="section-title">Operational Health</div><span class="section-badge amber">Categories may overlap</span></div>${this.renderOperational(snapshot, true)}${this.highValueNote(snapshot)}${this.repudiationNote(snapshot)}</section></div>
+    <section class="report-section"><div class="section-header"><div class="section-title">Registration &amp; Closure Evidence</div></div>${this.renderEvidence(snapshot)}</section>`;
+  }
+
+  renderReportBody(run, snapshot) {
+    if (this.hasScorecards(snapshot))
+      return `${this.renderScorecards(snapshot)}${this.renderWorkflow(run)}${this.renderSupporting(snapshot)}`;
+    return `${this.renderReportSections(snapshot)}${this.renderWorkflow(run)}`;
   }
 
   renderReportSections(snapshot) {
@@ -1652,7 +1727,7 @@ export class ReportsController {
     <div class="report-two-col"><section class="report-section"><div class="section-header"><div class="section-title">Activity &amp; Changes</div></div>${this.renderActivity(snapshot)}</section><section class="report-section"><div class="section-header"><div class="section-title">Registration &amp; Closure Evidence</div></div>${this.renderEvidence(snapshot)}</section></div>`;
   }
 
-  renderMovement(snapshot) {
+  renderMovement(snapshot, scorecardMode = false) {
     const items = [
       ["Opening Inventory", "opening_inventory"],
       ["New Claims Registered", "new_claims_registered"],
@@ -1660,7 +1735,12 @@ export class ReportsController {
         "First observed without trusted registration date",
         "new_claims_first_observed",
       ],
-      ["Closure Activity", "claims_closed"],
+      scorecardMode
+        ? ["Terminal closures", "claims_closed"]
+        : ["Closure Activity", "claims_closed"],
+      ...(scorecardMode
+        ? [["Left the extract (not closed)", "claims_left_extract"]]
+        : []),
       ["Closing Inventory", "closing_inventory"],
       ["Net Inventory Movement", "net_inventory_movement"],
     ];
@@ -1683,7 +1763,7 @@ export class ReportsController {
       })
       .join(
         "",
-      )}</div><p class="report-footnote">Closing inventory minus opening inventory is the authoritative net movement. Activity counts may not reconcile to inventory because observed changes and correction lineage are kept separate.</p>`;
+      )}</div><p class="report-footnote">Closing inventory minus opening inventory is the authoritative net movement. Activity counts may not reconcile to inventory because observed changes and correction lineage are kept separate.${scorecardMode ? " New claims registered counts every claim registered in the period. New Allocated Claims (Claims Performance) counts only those still open at close, attributed to the handler on the closing extract. Terminal closures are claims that reached a terminal status, including Repudiated. Claims that simply disappear from an extract are reported separately as left the extract and are never counted as closed." : ""}</p>`;
   }
 
   renderAgeing(snapshot) {
@@ -1702,20 +1782,42 @@ export class ReportsController {
       )}</div><p class="report-footnote">Management ageing uses calendar days. SLA performance uses working days.</p>`;
   }
 
-  renderSla(snapshot) {
+  renderSla(snapshot, scorecardMode = false) {
     const compliance = metricState(snapshot, "sla_compliance");
     const summary = metricState(snapshot, "sla_summary").value || {};
     const breach = metricState(snapshot, "sla_breaches");
-    return `<div class="report-sla-highlight"><span>SLA Compliance</span><strong>${renderMetricValue(compliance, "percent")}</strong><small>${escapeHtml(precisionPresentation(compliance.metric))}</small></div><div class="report-data-table">${reportTableRow("Compliant claims", formatInteger(summary.compliant), metricDrillButton("compliant", "sla_compliance", compliance, formatInteger(summary.compliant)))}${reportTableRow("Breached claims", "", metricDrillButton("breached", "sla_breaches", breach, renderMetricValue(breach, "integer")))}${reportTableRow("Unmapped statuses", formatInteger(summary.unmapped), "", "Excluded from denominator")}${reportTableRow("Age/SLA unavailable", formatInteger(summary.unknown), "", "Open claims with missing age or unresolved status")}${reportTableRow("Total open claims", formatInteger(summary.total_evaluated))}${reportTableRow("SLA denominator", formatInteger(summary.denominator), "", "Compliant + breached")}</div>`;
+    return `<div class="report-sla-highlight"><span>${scorecardMode ? "Within Status Threshold" : "SLA Compliance"}</span><strong>${renderMetricValue(compliance, "percent")}</strong><small>${escapeHtml(precisionPresentation(compliance.metric))}</small></div><div class="report-data-table">${reportTableRow("Compliant claims", formatInteger(summary.compliant), metricDrillButton("compliant", "sla_compliance", compliance, formatInteger(summary.compliant)))}${reportTableRow("Breached claims", "", metricDrillButton("breached", "sla_breaches", breach, renderMetricValue(breach, "integer")))}${reportTableRow("Unmapped statuses", formatInteger(summary.unmapped), "", "Excluded from denominator")}${reportTableRow("Age/SLA unavailable", formatInteger(summary.unknown), "", "Open claims with missing age or unresolved status")}${reportTableRow("Total open claims", formatInteger(summary.total_evaluated))}${reportTableRow("SLA denominator", formatInteger(summary.denominator), "", "Compliant + breached")}</div>`;
   }
 
-  renderOperational(snapshot) {
+  highValueNote(snapshot) {
+    const details = metricState(snapshot, "operational_health").metric?.details;
+    if (!details || !details.high_value_basis) return "";
+    const excluded = Number(details.high_value_excluded_multi_row_claim_count) || 0;
+    return `<p class="report-footnote">High value is based on Outstanding of ${escapeHtml(formatRand(details.high_value_threshold))} or more; the Mandate column is not used.${excluded > 0 ? ` ${excluded} multi-row ${excluded === 1 ? "claim whose sections straddle" : "claims whose sections straddle"} the threshold ${excluded === 1 ? "is" : "are"} excluded.` : ""}</p>`;
+  }
+
+  repudiationNote(snapshot) {
+    const health = metricState(snapshot, "operational_health");
+    return health.value && health.value.repudiation_expired === null
+      ? `<p class="report-footnote">Repudiation expired is unavailable: it needs the date a claim was repudiated, which the Cardinal export does not currently supply. Repudiated claims are reported as terminal.</p>`
+      : "";
+  }
+
+  renderOperational(snapshot, scorecardMode = false) {
+    const healthValue = metricState(snapshot, "operational_health").value;
     const rows = [
       ["No Movement >14 Days", "no_movement_over_14"],
       ["No Movement >30 Days", "no_movement_over_30"],
       ["Ready to Close", "ready_to_close"],
-      ["Payment Requested / Estimate Zero", "zero_estimate_payment_request"],
-      ...Object.entries(OPERATIONAL_LABELS).map(([id, label]) => [
+      [
+        scorecardMode ? "Payment Status / Estimate Zero" : "Payment Requested / Estimate Zero",
+        "zero_estimate_payment_request",
+      ],
+      ...Object.entries(OPERATIONAL_LABELS)
+        // Show only the categories this report actually carries: older reports keep
+        // the combined key, newer ones the split High value category.
+        .filter(([id]) => !healthValue || Object.hasOwn(healthValue, id))
+        .map(([id, label]) => [
         label,
         `operational_health:${id}`,
       ]),
@@ -1768,8 +1870,28 @@ export class ReportsController {
     return `<div class="report-table-scroll"><table class="report-handler-table"><thead><tr><th scope="col">Handler</th><th scope="col">Open</th><th scope="col">60+</th><th scope="col">91+</th><th scope="col">SLA breach</th><th scope="col">14+ stuck</th><th scope="col">30+ stuck</th><th scope="col">Ready</th></tr></thead><tbody>${rows || `<tr><td colspan="8" class="report-table-empty">No handler populations supplied.</td></tr>`}</tbody></table></div><div class="report-ownership-notes"><span>Manager-held: <strong>${formatInteger(state.value.manager_held_other?.count || 0)}</strong></span><span>Unassigned / unresolved: <strong>${formatInteger(state.value.unassigned_unresolved?.count || 0)}</strong></span></div>`;
   }
 
+  financialExclusionNote(snapshot) {
+    const parts = [
+      ["financial_open_outstanding", "Open outstanding"],
+      ["financial_estimate_total", "Estimate"],
+      ["financial_paid_total", "Paid"],
+    ]
+      .map(([id, label]) => {
+        const count = Number(
+          metricState(snapshot, id).metric?.details?.excluded_multi_row_claim_count,
+        );
+        return Number.isFinite(count) && count > 0
+          ? `${label}: ${count} multi-row ${count === 1 ? "claim" : "claims"}`
+          : null;
+      })
+      .filter(Boolean);
+    return parts.length
+      ? `<p class="report-footnote">Excluded from these totals because their section amounts are not summed until Cardinal's section semantics are confirmed: ${escapeHtml(parts.join("; "))}.</p>`
+      : "";
+  }
+
   renderFinancial(snapshot) {
-    return `<div class="reports-kpi-grid reports-kpi-grid-3">${metricCard(snapshot, "Open Outstanding Exposure", "financial_open_outstanding", "currency", "brand")}${metricCard(snapshot, "Estimate Total", "financial_estimate_total", "currency", "accent")}${metricCard(snapshot, "Paid Total", "financial_paid_total", "currency", "green")}</div><div class="report-data-table report-financial-events">${reportTableRow("Payment Requested", "—", `<span class="report-value-muted">— <small>Source event data unavailable</small></span>`)}${reportTableRow("Payment Released", "—", `<span class="report-value-muted">— <small>Source event data unavailable</small></span>`)}</div>`;
+    return `<div class="reports-kpi-grid reports-kpi-grid-3">${metricCard(snapshot, "Open Outstanding Exposure", "financial_open_outstanding", "currency", "brand")}${metricCard(snapshot, "Estimate Total", "financial_estimate_total", "currency", "accent")}${metricCard(snapshot, "Paid Total", "financial_paid_total", "currency", "green")}</div><div class="report-data-table report-financial-events">${reportTableRow("Payment Requested", "—", `<span class="report-value-muted">— <small>Source event data unavailable</small></span>`)}${reportTableRow("Payment Released", "—", `<span class="report-value-muted">— <small>Source event data unavailable</small></span>`)}</div>${this.financialExclusionNote(snapshot)}`;
   }
 
   renderActivity(snapshot) {
@@ -1785,10 +1907,18 @@ export class ReportsController {
     return `<div class="report-data-table">${reportTableRow("Source-dated registrations", "", metricDrillButton("source-dated registrations", "new_claims_registered", registered, renderMetricValue(registered, "integer")))}${reportTableRow("Source-dated closures", formatInteger(details.exact_source_count))}${reportTableRow("Observed terminal transitions", formatInteger(details.observed_terminal_transition_count))}</div><p class="report-footnote">${escapeHtml(precisionPresentation(closed.metric))}</p>`;
   }
 
+  renderScorecardDefinitions(snapshot) {
+    const value = metricState(snapshot, "handler_scorecards").value;
+    if (!value) return "";
+    const definitions = asObject(value.definitions);
+    const roster = asObject(value.roster);
+    return `<div class="report-scorecard-definitions"><h4>Handler scorecard definitions</h4><p><strong>Total Gross Registered.</strong> ${escapeHtml(definitions.gross_registered || "")}</p><p><strong>New Allocated Claims.</strong> ${escapeHtml(definitions.new_allocated || "")}</p><p><strong>Over 60 Days.</strong> ${escapeHtml(definitions.over_60 || "")}</p><p>${escapeHtml(asObject(value.cardinal_age_check).summary || "")}</p><p>${roster.configured ? `Handler roles come from the reporting roster (${escapeHtml(formatInteger(roster.member_count))} members).` : "No reporting roster is configured, so handler roles were derived from SCOUT user roles."}</p></div>`;
+  }
+
   renderReportDetails(run, snapshot) {
     const coverage = snapshot.coverage || asObject(run.coverage_metadata);
     const warnings = coverage.warnings || [];
-    return `<details class="report-details"><summary>Report details &amp; data quality</summary><div class="report-details-grid"><div><span>Opening extract</span><strong>${escapeHtml(snapshot.opening_extract_id || run.opening_extract_id || "Not available")}</strong></div><div><span>Closing extract</span><strong>${escapeHtml(snapshot.closing_extract_id || run.closing_extract_id || "Not available")}</strong></div><div><span>Accepted extracts in period</span><strong>${formatInteger(coverage.accepted_extract_count)}</strong></div><div><span>Warning-quality extracts</span><strong>${formatInteger(coverage.warning_quality_extract_count)}</strong></div><div><span>Historical capability start</span><strong>${escapeHtml(coverage.historical_capability_start_date || "Not available")}</strong></div><div><span>Metric definition</span><strong>${escapeHtml(run.metric_definition_version || snapshot.metric_definition_version || "Not available")}</strong></div><div><span>Claims rules</span><strong>${escapeHtml(run.claims_rule_version || snapshot.claims_rule_version || "Not available")}</strong></div><div><span>Quality rules</span><strong>${escapeHtml(run.quality_rule_version || snapshot.quality_rule_version || "Not available")}</strong></div></div><div class="report-warning-list">${warnings.length ? warnings.map((warning) => `<span>• ${escapeHtml(warningText(warning))}</span>`).join("") : "<span>No additional data-quality warnings.</span>"}</div></details>`;
+    return `<details class="report-details"><summary>Report details &amp; data quality</summary>${this.renderScorecardDefinitions(snapshot)}<div class="report-details-grid"><div><span>Opening extract</span><strong>${escapeHtml(snapshot.opening_extract_id || run.opening_extract_id || "Not available")}</strong></div><div><span>Closing extract</span><strong>${escapeHtml(snapshot.closing_extract_id || run.closing_extract_id || "Not available")}</strong></div><div><span>Accepted extracts in period</span><strong>${formatInteger(coverage.accepted_extract_count)}</strong></div><div><span>Warning-quality extracts</span><strong>${formatInteger(coverage.warning_quality_extract_count)}</strong></div><div><span>Historical capability start</span><strong>${escapeHtml(coverage.historical_capability_start_date || "Not available")}</strong></div><div><span>Metric definition</span><strong>${escapeHtml(run.metric_definition_version || snapshot.metric_definition_version || "Not available")}</strong></div><div><span>Claims rules</span><strong>${escapeHtml(run.claims_rule_version || snapshot.claims_rule_version || "Not available")}</strong></div><div><span>Quality rules</span><strong>${escapeHtml(run.quality_rule_version || snapshot.quality_rule_version || "Not available")}</strong></div></div><div class="report-warning-list">${warnings.length ? warnings.map((warning) => `<span>• ${escapeHtml(warningText(warning))}</span>`).join("") : "<span>No additional data-quality warnings.</span>"}</div></details>`;
   }
 
   coverageCopy(status, snapshot) {
@@ -1861,6 +1991,18 @@ export class ReportsController {
   }
 
   drillLabel(metricId, filter) {
+    if (metricId.startsWith("scorecard_")) {
+      const base = {
+        scorecard_gross_registered: "Total Gross Registered",
+        scorecard_new_allocated: "New Allocated Claims",
+        scorecard_over_60: "Over 60 Days",
+        scorecard_cardinal_age_differs: "Cardinal Age differs from registration age",
+      }[metricId];
+      const key = filter.startsWith("card:") ? filter.slice(5) : "";
+      const cards = metricState(reportSnapshot(this.state.selected), "handler_scorecards").value?.cards || [];
+      const card = cards.find((item) => item.key === key);
+      return card ? `${base} · ${card.label}` : base;
+    }
     if (metricId === "ageing_distribution")
       return AGEING_LABELS[filter.slice(7)] || "Ageing claims";
     if (metricId === "operational_health")
@@ -1874,6 +2016,7 @@ export class ReportsController {
         sla_breaches: "SLA breaches",
         sla_compliance: "Compliant claims",
         claims_closed: "Closure activity",
+        claims_left_extract: "Left the extract (not closed)",
       }[metricId] || metricId.replaceAll("_", " ")
     );
   }

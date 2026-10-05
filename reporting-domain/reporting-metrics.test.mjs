@@ -707,18 +707,23 @@ test("ageing distribution reconciles to closing open inventory", () => {
   assert.equal(report.metrics.open_claims_91_plus.value, 1);
 });
 
-test("60 plus includes the exact 60-day boundary without changing ageing bands", () => {
-  const data = week1Evidence();
-  const closingRows = data.snapshotsByExtract.get("extract-closing");
-  closingRows.find((row) => row.claim_id === "C").calendar_age = 60;
-  const report = buildReportSnapshot({
-    reportType: "weekly",
-    periodStart: "2026-08-24",
-    ...data,
-  });
-  assert.equal(report.metrics.open_claims_60_plus.value, 1);
-  assert.equal(report.metrics.ageing_distribution.value["31-60"], 1);
-  assert.equal(report.metrics.ageing_distribution.value["91+"], 0);
+test("Over 60 is strictly more than 60 days and matches the 61-90 and 91+ bands", () => {
+  const build = (age) => {
+    const data = week1Evidence();
+    data.snapshotsByExtract
+      .get("extract-closing")
+      .find((row) => row.claim_id === "C").calendar_age = age;
+    return buildReportSnapshot({ reportType: "weekly", periodStart: "2026-08-24", ...data });
+  };
+  const sixty = build(60);
+  assert.equal(sixty.metrics.open_claims_60_plus.value, 0, "exactly 60 days is not over 60");
+  assert.equal(sixty.metrics.ageing_distribution.value["31-60"], 1);
+  const sixtyOne = build(61);
+  assert.equal(sixtyOne.metrics.open_claims_60_plus.value, 1, "61 days is over 60");
+  assert.equal(sixtyOne.metrics.ageing_distribution.value["61-90"], 1);
+  assert.equal(sixtyOne.metrics.ageing_distribution.value["91+"], 0);
+  const bands = sixtyOne.metrics.ageing_distribution.value;
+  assert.equal(sixtyOne.metrics.open_claims_60_plus.value, bands["61-90"] + bands["91+"]);
 });
 
 test("SLA excludes unmapped statuses from the denominator and handles breaches", () => {

@@ -2789,6 +2789,41 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
 .report-kpi-card.green::before { background: var(--green); }
 .report-kpi-card.amber::before { background: var(--amber); }
 .report-kpi-card.red::before { background: var(--red); }
+.report-alert { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; text-align: left; padding: 10px 14px; border-radius: var(--r-md); border: 1px solid; font-size: 12px; line-height: 1.5; }
+.report-alert strong { font-size: 12.5px; }
+.report-alert.critical { background: var(--red-bg); border-color: var(--red); color: #6d1f1f; }
+.report-alert.warning { background: var(--amber-bg); border-color: var(--amber); color: #6b4410; }
+.scorecard-team { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 26px; padding: 11px 15px; background: var(--ws-surface2); border: 1px solid var(--ws-border); border-radius: var(--r-md); color: var(--ws-text-muted); font-size: 12px; }
+.scorecard-team > strong { color: var(--ws-text); font-family: var(--mono); font-size: 10.5px; letter-spacing: .55px; text-transform: uppercase; }
+.scorecard-team b { color: var(--ws-text); font-size: 16px; margin-left: 4px; }
+.scorecard-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.scorecard-card { min-width: 0; padding: 14px 16px 12px; background: var(--ws-surface); border: 1px solid var(--ws-border); border-top: 3px solid var(--accent-mid); border-radius: var(--r-lg); box-shadow: var(--shadow-sm); }
+.scorecard-card.is-warning { border-top-color: var(--amber); }
+.scorecard-card.is-critical { border-top-color: var(--red); background: var(--red-bg); }
+.scorecard-card header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid var(--ws-border); }
+.scorecard-card h3 { margin: 0; font-size: 15px; }
+.scorecard-role { color: var(--ws-text-muted); font-family: var(--mono); font-size: 9.5px; letter-spacing: .5px; text-transform: uppercase; text-align: right; }
+.scorecard-metric { display: grid; grid-template-columns: 1fr auto; column-gap: 8px; align-items: baseline; padding: 9px 0; border-bottom: 1px solid var(--ws-border); }
+.scorecard-label { color: var(--ws-text-muted); font-size: 12px; }
+.scorecard-metric .report-metric-link, .scorecard-metric .report-value-muted { font-size: 22px; font-weight: 750; text-align: right; }
+.scorecard-team .scorecard-delta { margin-left: 6px; }
+.scorecard-team small { color: var(--ws-text-muted); font-size: 10px; letter-spacing: .4px; text-transform: uppercase; }
+.scorecard-delta { grid-column: 1 / -1; color: var(--ws-text-muted); font-size: 11px; }
+.scorecard-delta.bad { color: var(--red); } .scorecard-delta.good { color: var(--green); }
+.scorecard-card footer { padding-top: 8px; color: var(--ws-text-muted); font-size: 11px; }
+.scorecard-qa { display: block; margin-top: 3px; color: #83520e; }
+.scorecard-qa .report-metric-link { font-size: 11px; font-weight: 600; text-align: left; }
+.scorecard-holders h3 { margin: 4px 0 8px; font-size: 14px; }
+.scorecard-action { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 11px; font-weight: 700; background: var(--ws-surface2); color: var(--ws-text-2); }
+.scorecard-action.critical { background: var(--red-mid); color: #7a1f1f; }
+.scorecard-action.warning { background: var(--amber-mid); color: #6b4410; }
+.report-supporting-head { margin-top: 10px; padding-top: 18px; border-top: 1px solid var(--ws-border); }
+.report-supporting-head h2 { margin: 2px 0 4px; }
+.report-scorecard-definitions { padding: 4px 0 12px; font-size: 12px; line-height: 1.6; color: var(--ws-text-2); }
+.report-scorecard-definitions h4 { margin: 0 0 6px; font-size: 13px; }
+.report-scorecard-definitions p { margin: 0 0 6px; }
+@media (max-width: 1100px) { .scorecard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .scorecard-grid { grid-template-columns: minmax(0, 1fr); } }
 .report-kpi-label { display: flex; align-items: center; gap: 5px; min-height: 28px; color: var(--ws-text-muted); font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: .55px; line-height: 1.35; text-transform: uppercase; }
 .report-info { color: var(--accent); cursor: help; font-size: 12px; text-transform: none; }
 .report-kpi-value { display: block; width: 100%; margin: 9px 0 4px; padding: 0; background: none; border: 0; color: var(--ws-text); font-size: 29px; font-weight: 750; letter-spacing: -1px; line-height: 1.1; text-align: left; }
@@ -4173,6 +4208,25 @@ const TERMINAL_STATUSES = new Set([
   "Settled, no claim from client/claim withdrawn/NTU","Settled/Write Off",
   "Knock For Knock Settled","Recovery successful 100%","Recovery successful - apportionment",
   "Ex Gratia - Finalized","Not Taken Up","Knock for Knock Settled",
+  // Exact Cardinal strings evidenced in the workbooks (2026-10-05); never fuzzy matched.
+  "Settled repudiated",
+  "Settled within excess",
+  "Settled no claim from client/claim withdrawn/NTU",
+  "Settled Full Recovery",
+  "Settled Duplicated",
+  "Settled partial recovery made",
+  "Settled File Closed",
+  "Settled no claim from client",
+  "Settled OD and TP claim paid",
+  "Settled – Partial Repudiation",
+  "Settled each party bears own costs",
+  "Settled TP claim repudiated",
+  "Settled no claim/no cover/no peril",
+  "Settled TP claim Paid",
+  "Settled OD paid TP claim repudiated",
+  "Settled No TP claim made",
+  "Settled – Ex Gratia",
+  "Closed - Notification Only",
 ]);
 const TERMINAL_STATUSES_LC = new Set([...TERMINAL_STATUSES].map(normaliseStatus));
 

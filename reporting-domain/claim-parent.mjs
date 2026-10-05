@@ -355,9 +355,14 @@ export function diffParentPresence(previousParents, currentParents) {
       events.push({ type: "reopened", parent_identity_key: key });
     }
   }
-  for (const [key] of previous) {
+  for (const [key, previousParent] of previous) {
     if (!current.has(key))
-      events.push({ type: "missing_from_extract", parent_identity_key: key });
+      events.push({
+        type: "missing_from_extract",
+        parent_identity_key: key,
+        // Lets reports count only claims that left while OPEN. Never a closure.
+        previous_lifecycle_state: previousParent.lifecycle_state,
+      });
   }
   return events;
 }

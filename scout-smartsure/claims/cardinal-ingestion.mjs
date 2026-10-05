@@ -67,11 +67,25 @@ function firstSourceValue(row, aliases) {
   return null;
 }
 
+// Cardinal exports floating-point residue as text such as "1.16E-10" or
+// "-7.3E-12" for amounts that are really R0. Money is held to the cent, so
+// anything that rounds to zero is zero.
+function moneyValue(number) {
+  return Math.abs(number) < 0.005 ? 0 : number;
+}
+
+// Cardinal's "Mandate" column currently holds the literal word "Mandate" on every
+// row. That is a label, not an amount: it is neither parsed nor flagged, and no
+// mandate value is derived from it.
+export function isMandateLabel(value) {
+  return typeof value === "string" && value.trim().toLowerCase() === "mandate";
+}
+
 export function parseNullableNumber(value) {
   if (!hasSourceValue(value)) return { value: null, state: "missing" };
   if (typeof value === "number") {
     return Number.isFinite(value)
-      ? { value, state: "known" }
+      ? { value: moneyValue(value), state: "known" }
       : { value: null, state: "malformed" };
   }
   let text = String(value).trim();
@@ -81,13 +95,17 @@ export function parseNullableNumber(value) {
     text = text.slice(1, -1);
   }
   text = text.replace(/[Rr]\s?/g, "").replace(/\s/g, "").replace(/,/g, "");
-  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) {
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) {
     return { value: null, state: "malformed" };
   }
   const parsed = Number(text);
   if (!Number.isFinite(parsed)) return { value: null, state: "malformed" };
-  return { value: negative ? -parsed : parsed, state: "known" };
+  return { value: moneyValue(negative ? -parsed : parsed), state: "known" };
 }
+
+// Excel's "empty" date (serial 0/1, shown as 1899-12-31 or 1900-01-01) is how
+// Cardinal marks a blank date. No claim event predates 1901, so it means "none".
+const EXCEL_EMPTY_DATE_MAX_YEAR = 1900;
 
 export function parseNullableDate(value) {
   if (!hasSourceValue(value)) return { value: null, state: "missing" };
@@ -102,6 +120,7 @@ export function parseNullableDate(value) {
       : null;
   if (parts) {
     const [year, month, day] = parts;
+    if (year <= EXCEL_EMPTY_DATE_MAX_YEAR) return { value: null, state: "missing" };
     const check = new Date(Date.UTC(year, month - 1, day));
     if (
       check.getUTCFullYear() !== year ||
@@ -117,6 +136,8 @@ export function parseNullableDate(value) {
   }
   const parsed = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(parsed.getTime())) return { value: null, state: "malformed" };
+  if (parsed.getFullYear() <= EXCEL_EMPTY_DATE_MAX_YEAR)
+    return { value: null, state: "missing" };
   return {
     value: `${String(parsed.getFullYear()).padStart(4, "0")}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`,
     state: "known",
@@ -162,7 +183,12 @@ export function mapCardinalRow(
 ) {
   const financial = Object.fromEntries(
     ["outstanding", "estimate", "paid", "mandate", "nettClaim", "sumInsured", "repudiateAmount"].map(
-      (field) => [field, parseNullableNumber(firstSourceValue(row, FIELD_ALIASES[field]))],
+      (field) => {
+        const raw = firstSourceValue(row, FIELD_ALIASES[field]);
+        if (field === "mandate" && isMandateLabel(raw))
+          return [field, { value: null, state: "label" }];
+        return [field, parseNullableNumber(raw)];
+      },
     ),
   );
   const age = parseNullableNumber(firstSourceValue(row, FIELD_ALIASES.age));

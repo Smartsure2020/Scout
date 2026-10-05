@@ -430,22 +430,27 @@ function normalizedClaimNumber(value) {
 function parseDate(value, field, qualityFlags) {
   if (!hasValue(value)) return null;
   try {
-    return toDateOnly(value);
+    const date = toDateOnly(value);
+    // Excel's empty date (1899-12-31 / 1900-01-01) means "no date".
+    return date && Number(String(date).slice(0, 4)) <= 1900 ? null : date;
   } catch {
     qualityFlags.push(`invalid_date:${field}`);
     return null;
   }
 }
 
+// Money is held to the cent: floating-point residue such as 1.2E-10 is zero.
+const roundResidue = (number) => (Math.abs(number) < 0.005 ? 0 : number);
+
 function parseNumber(value, field, qualityFlags) {
   if (!hasValue(value)) return null;
   if (typeof value === "number") {
-    if (Number.isFinite(value)) return value;
+    if (Number.isFinite(value)) return roundResidue(value);
     qualityFlags.push(`numeric_parse_failure:${field}`);
     return null;
   }
   const parsed = Number(String(value).replace(/[Rr,\s]/g, ""));
-  if (Number.isFinite(parsed)) return parsed;
+  if (Number.isFinite(parsed)) return roundResidue(parsed);
   qualityFlags.push(`numeric_parse_failure:${field}`);
   return null;
 }
@@ -504,6 +509,9 @@ function sourceEvidence(source) {
     "sum_insured",
     "repudiateAmount",
     "claimValue",
+    // Cardinal's own Age, kept so reports can QA it against the registration age.
+    "age",
+    "cardinalAge",
     "ingestionQualityFlags",
     "sourceEventAt",
     "event_at",

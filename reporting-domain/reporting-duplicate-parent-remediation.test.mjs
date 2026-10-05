@@ -150,10 +150,16 @@ test("three anonymized production-shaped parents retain safe report metrics", ()
   assert.equal(report.metrics.new_claims_registered.value, 0);
   assert.equal(report.metrics.financial_estimate_total.availability, "available");
   assert.equal(report.metrics.financial_estimate_total.value, 3300);
-  assert.equal(report.metrics.financial_open_outstanding.availability, "unavailable");
-  assert.equal(report.metrics.financial_paid_total.availability, "unavailable");
+  // Conflicting multi-row claims are excluded and disclosed, never summed, and
+  // never block the total for unambiguous claims.
+  assert.equal(report.metrics.financial_open_outstanding.availability, "available");
+  assert.ok(report.metrics.financial_open_outstanding.details.excluded_multi_row_claim_count > 0);
+  assert.equal(report.metrics.financial_paid_total.availability, "available");
+  assert.ok(report.metrics.financial_paid_total.details.excluded_multi_row_claim_count > 0);
   assert.equal(report.metrics.zero_estimate_payment_request.availability, "available");
-  assert.equal(report.metrics.zero_estimate_payment_request.value, 1);
+  // Strict definition: payment-related status AND estimate = 0. These claims are
+  // "Registered" (not a payment status), so none qualifies.
+  assert.equal(report.metrics.zero_estimate_payment_request.value, 0);
 
   const operational = report.metrics.operational_health;
   assert.equal(operational.availability, "available");
@@ -163,13 +169,13 @@ test("three anonymized production-shaped parents retain safe report metrics", ()
     "safe operational categories remain available",
   );
   assert.equal(
-    operational.value.high_value_mandate_attention,
+    operational.value.high_value,
     0,
     "non-conflicting low values remain safe for high-value classification",
   );
 });
 
-test("an ambiguous high-value predicate hides only that category and regeneration is deterministic", () => {
+test("an ambiguous high-value predicate excludes only that claim, discloses it, and regeneration is deterministic", () => {
   const source = sourceRows();
   source[0] = { ...source[0], outstanding: 100 };
   source[1] = { ...source[1], outstanding: 600000 };
@@ -179,10 +185,14 @@ test("an ambiguous high-value predicate hides only that category and regeneratio
 
   assert.deepEqual(first, second);
   assert.equal(first.metrics.operational_health.availability, "available");
-  assert.equal(
-    first.metrics.operational_health.value.high_value_mandate_attention,
-    null,
-  );
+  const health = first.metrics.operational_health;
+  // The straddling multi-row claim is excluded and named; it does not blank the category.
+  assert.equal(typeof health.value.high_value, "number");
+  assert.equal(health.details.high_value_excluded_multi_row_claim_count, 1);
+  assert.equal(health.details.high_value_excluded_multi_row_claim_numbers.length, 1);
+  assert.equal(health.details.high_value_basis, "outstanding");
+  assert.ok(health.coverage_warnings.includes("high_value_multi_row_excluded"));
+  assert.ok(!("high_value_mandate_attention" in health.value), "the combined metric is gone");
   assert.equal(first.metrics.operational_health.value.assessor_overdue, 0);
   assert.equal(first.metrics.sla_summary.availability, "available");
   assert.equal(first.metrics.closing_inventory.value, 4);

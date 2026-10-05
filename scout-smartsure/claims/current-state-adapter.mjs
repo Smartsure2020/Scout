@@ -7,7 +7,9 @@ function nullableNumber(value) {
 function nullableDate(value) {
   if (value === null || value === undefined || value === "") return null;
   const text = String(value).trim();
-  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  // Rows stored before the Excel "empty date" fix carry 1899-12-31: that is none.
+  return Number(text.slice(0, 4)) <= 1900 ? null : text;
 }
 
 function qualityFlags(value) {

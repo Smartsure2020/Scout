@@ -71,11 +71,11 @@ function normalizeDisplayValue(value) {
     .toLowerCase();
 }
 
-function identityKey(value) {
+export function identityKey(value) {
   return normalizeDisplayValue(value).replace(/[^a-z0-9]+/g, "");
 }
 
-function identityTokens(value) {
+export function identityTokens(value) {
   return normalizeDisplayValue(value)
     .split(/[^a-z0-9]+/)
     .filter(Boolean)

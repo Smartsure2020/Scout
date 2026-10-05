@@ -159,23 +159,23 @@ test("multi-row parent counts once in closing inventory (not excluded, not per-r
 
 test("financial metrics resolve repeated values once and isolate conflicting fields", () => {
   const snap = report();
-  assert.equal(snap.metrics.financial_open_outstanding.availability, "unavailable");
-  assert.equal(snap.metrics.financial_open_outstanding.value, null);
-  assert.ok(
-    snap.metrics.financial_open_outstanding.details.unresolved_claim_numbers.includes(
-      "MULTI-1",
-    ),
-  );
+  // The conflicting multi-row claim is NOT summed, but it no longer blocks the
+  // total for the unambiguous claims: it is excluded and disclosed.
+  const outstanding = snap.metrics.financial_open_outstanding;
+  assert.equal(outstanding.availability, "available");
+  assert.equal(outstanding.details.excluded_multi_row_claim_count, 1);
+  assert.deepEqual(outstanding.details.excluded_multi_row_claim_numbers, ["MULTI-1"]);
+  assert.ok(outstanding.coverage_warnings.includes("financial_multi_row_excluded"));
+  assert.match(outstanding.details.multi_row_policy, /not summed/);
   // Estimate is repeated identically across the two sections, so count it once.
   assert.equal(snap.metrics.financial_estimate_total.availability, "available");
   assert.equal(snap.metrics.financial_estimate_total.value, 1900);
   assert.equal(snap.metrics.financial_estimate_total.details.total_open_claim_count, 2);
   // Paid differs between sections and affects only the paid total.
-  assert.equal(snap.metrics.financial_paid_total.availability, "unavailable");
-  assert.equal(snap.metrics.financial_paid_total.value, null);
-  assert.equal(
-    snap.metrics.financial_paid_total.details.reason,
-    "financial_aggregation_unresolved",
+  assert.equal(snap.metrics.financial_paid_total.availability, "available");
+  assert.equal(snap.metrics.financial_paid_total.details.excluded_multi_row_claim_count, 1);
+  assert.ok(
+    snap.metrics.financial_paid_total.coverage_warnings.includes("financial_multi_row_excluded"),
   );
 });
 

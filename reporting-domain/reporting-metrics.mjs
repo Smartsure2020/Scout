@@ -17,12 +17,17 @@ import {
   evaluateOperationalCategories,
   evaluateSla,
   getReadyToCloseCandidate,
+  isPaymentZeroEstimate,
+  isReportingTerminalStatus,
+  MANDATE_THRESHOLD,
+  REPUDIATION_EXPIRY_DAYS,
 } from "./claims-rules.mjs";
 import {
   DEFAULT_MAX_ROW_COUNT_DROP_RATIO,
   HISTORY_SCHEMA_VERSION,
 } from "./history.mjs";
 import { resolveActiveScoutUsers } from "./roles.mjs";
+import { buildHandlerScorecards } from "./handler-scorecards.mjs";
 import {
   consensusValue,
   diffParentPresence,
@@ -30,9 +35,11 @@ import {
   parentIdentityKey,
 } from "./claim-parent.mjs";
 
-export const REPORTING_METRIC_VERSION = "claims-reporting-metrics-v2";
-export const REPORT_SCHEMA_VERSION = "scout-report-v2";
+export const REPORTING_METRIC_VERSION = "claims-reporting-metrics-v3";
+export const REPORT_SCHEMA_VERSION = "scout-report-v3";
 export const REPORTING_QUALITY_VERSION = "scout-reporting-quality-v2";
+export const REPORTING_STATUS_CLASSIFICATION_VERSION =
+  "reporting-status-classification-v1";
 export const REPORTING_DOMAIN = "claims";
 export const REPORTING_TIME_ZONE = BUSINESS_TIME_ZONE;
 
@@ -365,6 +372,36 @@ export function previousReportingPeriod(
     reportType,
     addDateOnly(current.startLocalDate, reportType === "weekly" ? -7 : -1),
     timeZone,
+  );
+}
+
+/**
+ * Apply the CURRENT reporting status classification to snapshot rows at report
+ * time. Stored history is immutable and keeps whatever classification it was
+ * written with; reports copy a row only when the reporting override list says
+ * it is terminal (for example "Repudiated"), so every period is judged by one
+ * rule and the change can never masquerade as a wave of closures between two
+ * extracts.
+ */
+function applyReportingStatusClassification(snapshotsByExtract) {
+  const reclassify = (rows) =>
+    asArray(rows).map((row) => {
+      // Only ever UPGRADE an open row to terminal (the reporting override list).
+      // A row already stored as terminal is never touched.
+      if (row?.terminal) return row;
+      if (!isReportingTerminalStatus(row?.status_raw ?? row?.status_normalized))
+        return row;
+      return { ...row, terminal: true, open: false, stored_terminal: false };
+    });
+  if (snapshotsByExtract instanceof Map)
+    return new Map(
+      [...snapshotsByExtract].map(([id, rows]) => [id, reclassify(rows)]),
+    );
+  return Object.fromEntries(
+    Object.entries(asObject(snapshotsByExtract)).map(([id, rows]) => [
+      id,
+      reclassify(rows),
+    ]),
   );
 }
 
@@ -822,17 +859,16 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
     return result.state === "on_track" ? "compliant" : result.state;
   };
   const readyClass = (claim) => Boolean(getReadyToCloseCandidate(claim));
-  const zeroEstimateClass = (claim) =>
-    evaluateClaim(claim, { asOfDate, onUnsupported: "return" })
-      .zeroEstimateAnomaly;
+  const zeroEstimateClass = (claim) => isPaymentZeroEstimate(claim);
   const operationalClass = (claim, category) => {
     const operational = evaluateOperationalCategories(claim);
     const risk = evaluateMandateAndRisk(claim);
     if (category === "assessor_overdue") return operational.assessorOverdue;
     if (category === "investigator_overdue") return operational.investigatorOverdue;
     if (category === "broker_overdue") return operational.brokerOverdue;
-    if (category === "high_value_mandate_attention")
-      return risk.highValue || risk.mandate;
+    // High value is based on Outstanding only. The status-based "mandate" half of
+    // the old combined category is no longer reported.
+    if (category === "high_value") return risk.highValue;
     if (category === "legal_recovery") return operational.legalRecovery;
     if (category === "nfo_ombudsman")
       return operational.nfoOmbudsman || risk.nfoOrOmbudsman;
@@ -849,7 +885,7 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
       "assessor_overdue",
       "investigator_overdue",
       "broker_overdue",
-      "high_value_mandate_attention",
+      "high_value",
       "legal_recovery",
       "nfo_ombudsman",
       "fraud",
@@ -1155,9 +1191,11 @@ function ageingMetric(closingOpen, evidence) {
     Object.entries(bands).map(([band, ids]) => [band, ids.length]),
   );
   const claimIds = Object.values(bands).flat();
+  // "Over 60" means MORE than 60 calendar days since registration, which is
+  // exactly the 61-90 and 91+ bands (management decision 2026-10-05).
   const sixtyPlus = closingOpen
     .filter(
-      (claim) => claim.calendarAge !== null && Number(claim.calendarAge) >= 60,
+      (claim) => claim.calendarAge !== null && Number(claim.calendarAge) > 60,
     )
     .map((claim) => claim.id);
   return {
@@ -1170,6 +1208,7 @@ function ageingMetric(closingOpen, evidence) {
     sixtyPlus: metric("open_claims_60_plus", sixtyPlus.length, {
       precision: "snapshot_exact",
       claimIds: sixtyPlus,
+      definition: "open_claims_over_60_days",
       evidence,
     }),
     ninetyOnePlus: metric("open_claims_91_plus", bands["91+"].length, {
@@ -1262,6 +1301,14 @@ function movementMetrics(closingOpen, evidence) {
     else if (result.over14) over14.push(claim.id);
     else if (result.daysSinceMovement === null) unknown.push(claim.id);
   }
+  // No claim carries a movement date (the Cardinal extract has no Last Updated
+  // column): "no movement" cannot be measured, so it is unavailable, never 0.
+  if (closingOpen.length > 0 && unknown.length === closingOpen.length) {
+    return {
+      over14: unavailableMetric("no_movement_over_14", "movement_date_unavailable"),
+      over30: unavailableMetric("no_movement_over_30", "movement_date_unavailable"),
+    };
+  }
   const warnings = unknown.length ? ["movement_date_unavailable"] : [];
   return {
     over14: metric("no_movement_over_14", over14.length + over30.length, {
@@ -1289,6 +1336,7 @@ function readyAndAnomalyMetrics(closingOpen, evidence) {
   const readyIds = [];
   const byReason = {};
   const zeroEstimate = [];
+  const zeroEstimateByStatus = {};
   const unresolvedReady = [];
   const unresolvedZeroEstimate = [];
   for (const claim of closingOpen) {
@@ -1310,10 +1358,15 @@ function readyAndAnomalyMetrics(closingOpen, evidence) {
         byReason[ready.code].push(claim.id);
       }
     }
+    // Strict definition: payment-related status AND estimate = 0.
     const isZeroEstimate = claim.multiRow
       ? claim.parentMetricStates?.zeroEstimateAnomaly
-      : claimEvaluation(claim).zeroEstimateAnomaly;
-    if (isZeroEstimate === true) zeroEstimate.push(claim.id);
+      : isPaymentZeroEstimate(claim);
+    if (isZeroEstimate === true) {
+      zeroEstimate.push(claim.id);
+      const key = String(claim.status ?? "").trim().toLowerCase();
+      zeroEstimateByStatus[key] = (zeroEstimateByStatus[key] || 0) + 1;
+    }
   }
   const readyMetric = unresolvedReady.length
     ? unavailableMetric(
@@ -1352,6 +1405,11 @@ function readyAndAnomalyMetrics(closingOpen, evidence) {
         precision: "snapshot_exact",
         claimIds: zeroEstimate,
         evidence,
+        details: {
+          definition:
+            "Open claims whose status is payment-related AND whose estimate is exactly zero. A missing estimate is not zero.",
+          count_by_status: zeroEstimateByStatus,
+        },
       });
   return {
     ready: readyMetric,
@@ -1359,18 +1417,19 @@ function readyAndAnomalyMetrics(closingOpen, evidence) {
   };
 }
 
-function operationalHealthMetric(closingOpen, evidence) {
+function operationalHealthMetric(closingOpen, evidence, allClosingClaims = []) {
   const categories = {
     assessor_overdue: [],
     investigator_overdue: [],
     broker_overdue: [],
-    high_value_mandate_attention: [],
+    high_value: [],
     legal_recovery: [],
     nfo_ombudsman: [],
     fraud: [],
     repudiation_expired: [],
   };
   const unavailableCategories = [];
+  const highValueExcluded = [];
   for (const claim of closingOpen) {
     const operational = evaluateOperationalCategories(claim);
     const risk = evaluateMandateAndRisk(claim);
@@ -1387,14 +1446,11 @@ function operationalHealthMetric(closingOpen, evidence) {
       unavailableCategories.push("broker_overdue");
     else if (parent ? parent.broker_overdue : operational.brokerOverdue)
       categories.broker_overdue.push(claim.id);
-    if (parent?.high_value_mandate_attention === null)
-      unavailableCategories.push("high_value_mandate_attention");
-    else if (
-      parent
-        ? parent.high_value_mandate_attention
-        : risk.highValue || risk.mandate
-    )
-      categories.high_value_mandate_attention.push(claim.id);
+    // High value = Outstanding at or above the threshold. A multi-row claim whose
+    // sections straddle the threshold is excluded and disclosed, not guessed.
+    if (parent?.high_value === null) highValueExcluded.push(claim);
+    else if (parent ? parent.high_value : risk.highValue)
+      categories.high_value.push(claim.id);
     if (parent?.legal_recovery === null)
       unavailableCategories.push("legal_recovery");
     else if (parent ? parent.legal_recovery : operational.legalRecovery)
@@ -1410,10 +1466,24 @@ function operationalHealthMetric(closingOpen, evidence) {
     if (parent?.fraud === null) unavailableCategories.push("fraud");
     else if (parent ? parent.fraud : operational.fraud || risk.fraud)
       categories.fraud.push(claim.id);
-    if (parent?.repudiation_expired === null)
-      unavailableCategories.push("repudiation_expired");
-    else if (parent ? parent.repudiation_expired : operational.repudiationExpired)
-      categories.repudiation_expired.push(claim.id);
+  }
+  // Repudiation expiry needs the DATE a claim was repudiated. Without it the
+  // old registration-age stand-in is not used: the category is unavailable.
+  const repudiated = allClosingClaims.filter(
+    (claim) => String(claim?.status ?? "").trim().toLowerCase() === "repudiated",
+  );
+  const repudiationDated = repudiated.filter((claim) => claim.repudiationDate);
+  if (repudiated.length > 0 && repudiationDated.length === 0) {
+    unavailableCategories.push("repudiation_expired");
+  } else {
+    for (const claim of repudiationDated) {
+      const age = calendarDaysBetween(
+        claim.repudiationDate,
+        claim.snapshotEffectiveDate,
+      );
+      if (age !== null && age >= REPUDIATION_EXPIRY_DAYS)
+        categories.repudiation_expired.push(claim.id);
+    }
   }
   const unresolved = new Set(unavailableCategories);
   const value = Object.fromEntries(
@@ -1425,11 +1495,22 @@ function operationalHealthMetric(closingOpen, evidence) {
   return metric("operational_health", value, {
     precision: "snapshot_exact",
     claimIds: Object.values(categories).flat(),
-    warnings: unresolved.size ? ["operational_category_unavailable"] : [],
+    warnings: [
+      ...(unresolved.size ? ["operational_category_unavailable"] : []),
+      ...(highValueExcluded.length ? ["high_value_multi_row_excluded"] : []),
+    ],
     evidence,
     details: {
       claim_ids_by_category: categories,
       unavailable_categories: [...unresolved],
+      unavailable_reasons: unresolved.has("repudiation_expired")
+        ? { repudiation_expired: "repudiation_date_unavailable" }
+        : {},
+      high_value_basis: "outstanding",
+      high_value_threshold: MANDATE_THRESHOLD,
+      high_value_excluded_multi_row_claim_count: highValueExcluded.length,
+      high_value_excluded_multi_row_claim_numbers:
+        excludedParentNumbers(highValueExcluded),
     },
   });
 }
@@ -1442,45 +1523,41 @@ function financialMetrics(closingOpen, evidence) {
   ];
   const metrics = {};
   for (const [id, field, definition] of fields) {
-    const unresolved = closingOpen.filter(
+    // A multi-row claim whose rows disagree is NOT summed (management decision
+    // 2026-10-05: Cardinal's section semantics are unconfirmed). It no longer
+    // blocks the total for the unambiguous claims; it is excluded and disclosed.
+    const excluded = closingOpen.filter(
       (claim) =>
-        claim.multiRow &&
-        claim.financialResolution?.[field] === "unresolved",
+        claim.multiRow && claim.financialResolution?.[field] === "unresolved",
     );
-    if (unresolved.length > 0) {
-      metrics[id] = unavailableMetric(
-        id,
-        "financial_aggregation_unresolved",
-        [],
-        {
-          reason: "financial_aggregation_unresolved",
-          definition,
-          unresolved_parent_count: unresolved.length,
-          unresolved_claim_numbers: excludedParentNumbers(unresolved),
-        },
-      );
-      continue;
-    }
-    const known = closingOpen.filter(
+    const excludedIds = new Set(excluded.map((claim) => claim.id));
+    const counted = closingOpen.filter((claim) => !excludedIds.has(claim.id));
+    const known = counted.filter(
       (claim) =>
         claim[field] !== null &&
         claim[field] !== undefined &&
         Number.isFinite(Number(claim[field])),
     );
-    const warnings =
-      known.length < closingOpen.length ? ["financial_value_missing"] : [];
+    const warnings = [
+      ...(excluded.length ? ["financial_multi_row_excluded"] : []),
+      ...(known.length < counted.length ? ["financial_value_missing"] : []),
+    ];
     metrics[id] = metric(
       id,
       known.reduce((sum, claim) => sum + Number(claim[field]), 0),
       {
         precision: "snapshot_exact",
-        claimIds: closingOpen.map((claim) => claim.id),
+        claimIds: known.map((claim) => claim.id),
         warnings,
         definition,
         evidence,
         details: {
           known_value_claim_count: known.length,
           total_open_claim_count: closingOpen.length,
+          excluded_multi_row_claim_count: excluded.length,
+          excluded_multi_row_claim_numbers: excludedParentNumbers(excluded),
+          multi_row_policy:
+            "Multi-row claim amounts are not summed until Cardinal section semantics are confirmed.",
         },
       },
     );
@@ -1558,7 +1635,7 @@ function handlerMetricValue(claims, activeUsers, evidence, changes = []) {
       .filter((claim) => operational(claim).brokerOverdue)
       .map((claim) => claim.id);
     const sixty = open
-      .filter((claim) => Number(claim.calendarAge) >= 60)
+      .filter((claim) => Number(claim.calendarAge) > 60)
       .map((claim) => claim.id);
     const ninetyOne = open
       .filter((claim) => Number(claim.calendarAge) >= 91)
@@ -1937,13 +2014,17 @@ export function buildReportSnapshot({
   periodStart,
   timeZone = BUSINESS_TIME_ZONE,
   manifests = [],
-  snapshotsByExtract = new Map(),
+  snapshotsByExtract: storedSnapshotsByExtract = new Map(),
   changes = [],
   activeUsers = [],
   scope = { kind: "team" },
   previousSnapshot = null,
   configurationWarnings = [],
+  handlerRoster = null,
 } = {}) {
+  const snapshotsByExtract = applyReportingStatusClassification(
+    storedSnapshotsByExtract,
+  );
   const period = reportingPeriod(reportType, periodStart, timeZone);
   const authoritativeModel = authoritativeManifestModel(manifests, scope);
   const authoritativeManifests = authoritativeModel.authoritative;
@@ -2105,6 +2186,28 @@ export function buildReportSnapshot({
     { evidence_type: "observed_change", period: period.start.toISOString() },
     (claimId) => parentRefIndex.get(String(claimId)) ?? claimId,
   );
+  // Disappearance is NOT closure. Claims that were open in one extract and are
+  // absent from the next are reported on their own, never added to closures.
+  const leftExtract = new Set(
+    parentLifecycle
+      .filter(
+        (event) =>
+          event.type === "missing_from_extract" &&
+          event.previous_lifecycle_state === "open" &&
+          event.claim_ref,
+      )
+      .map((event) => String(event.claim_ref)),
+  );
+  metrics.claims_left_extract = lifecycleComparable
+    ? metric("claims_left_extract", leftExtract.size, {
+        precision: "observed_period",
+        claimIds: [...leftExtract],
+        evidence: { evidence_type: "observed_change", period: period.start.toISOString() },
+        details: {
+          note: "Open in one accepted extract and absent from the next. Disappearance is not closure.",
+        },
+      })
+    : unavailableMetric("claims_left_extract", "no_pre_period_baseline");
   metrics.claims_closed = closures.closed;
   metrics.claims_closed_exact = closures.exact;
   metrics.claims_closed_observed = closures.observed;
@@ -2133,6 +2236,7 @@ export function buildReportSnapshot({
   metrics.operational_health = operationalHealthMetric(
     closingOpen,
     closingEvidence,
+    state.closingRows,
   );
   Object.assign(metrics, financialMetrics(closingOpen, closingEvidence));
   metrics.assignment_activity = assignmentActivity(periodChanges, period, {
@@ -2157,6 +2261,47 @@ export function buildReportSnapshot({
       evidence: closingEvidence,
     },
   );
+  const scorecards = buildHandlerScorecards({
+    closingRows: state.closingRows,
+    period,
+    activeUsers,
+    roster: handlerRoster,
+    previousValue: previousSnapshot?.metrics?.handler_scorecards?.value ?? null,
+  });
+  const scorecardState = {
+    precision: closingSelection.manifest ? "snapshot_exact" : "unavailable",
+    availability: closingSelection.manifest ? "available" : "unavailable",
+    warnings: closingSelection.manifest
+      ? scorecards.warnings
+      : ["boundary_snapshot_unavailable"],
+    evidence: closingEvidence,
+  };
+  metrics.handler_scorecards = metric(
+    "handler_scorecards",
+    scorecards.value,
+    scorecardState,
+  );
+  // Each headline figure is also a numeric team metric whose population is
+  // tagged per handler card, so the web page can drill from a card number to
+  // its claims and the engine gives previous-period comparison for free.
+  for (const [id, key, total] of [
+    ["scorecard_gross_registered", "gross_registered", scorecards.value.totals.gross_registered],
+    ["scorecard_new_allocated", "new_allocated", scorecards.value.totals.new_allocated],
+    ["scorecard_over_60", "over_60", scorecards.value.totals.over_60],
+    [
+      "scorecard_cardinal_age_differs",
+      "cardinal_age_differs",
+      scorecards.value.cardinal_age_check.disagreements,
+    ],
+  ]) {
+    const byCard = scorecards.populations[key];
+    metrics[id] = metric(id, total, {
+      ...scorecardState,
+      warnings: [],
+      claimIds: Object.values(byCard).flat(),
+      details: { claim_ids_by_band: byCard },
+    });
+  }
 
   if (
     !closingSelection.manifest ||
@@ -2179,6 +2324,12 @@ export function buildReportSnapshot({
       "financial_estimate_total",
       "financial_paid_total",
       "handler_performance",
+      "handler_scorecards",
+      "scorecard_gross_registered",
+      "scorecard_new_allocated",
+      "scorecard_over_60",
+      "scorecard_cardinal_age_differs",
+      "claims_left_extract",
     ];
     for (const id of unavailableStateMetrics) {
       metrics[id] = unavailableMetric(id, "closing_snapshot_rows_unavailable");
@@ -2216,6 +2367,7 @@ export function buildReportSnapshot({
     report_type: reportType,
     report_schema_version: REPORT_SCHEMA_VERSION,
     metric_definition_version: REPORTING_METRIC_VERSION,
+    status_classification_version: REPORTING_STATUS_CLASSIFICATION_VERSION,
     claims_rule_version: CLAIMS_RULE_VERSION,
     quality_rule_version: REPORTING_QUALITY_VERSION,
     quality_configuration: qualityConfiguration(),
