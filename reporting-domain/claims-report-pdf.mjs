@@ -1,6 +1,6 @@
 const TIME_ZONE = "Africa/Johannesburg";
 
-export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v7";
+export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v8";
 export const PDF_RENDERER_VERSION = "cloudflare-browser-run-quick-action";
 
 const MONTHS = [
@@ -502,7 +502,7 @@ export function renderClaimsReportHtml(run = {}, workflow = {}) {
 
 export function renderClaimsReportPdfHeaderTemplate(run = {}, workflow = {}) {
   const { periodLabel } = buildClaimsReportPdfViewModel(run, workflow);
-  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:8px;letter-spacing:.08em;text-transform:uppercase;color:#617286;width:100%;padding:0 12mm;box-sizing:border-box"><table style="width:100%;border-collapse:collapse"><tr><td style="padding:0;text-align:left;color:#617286">SCOUT / CLAIMS MANAGEMENT</td><td style="padding:0;text-align:right;color:#617286">${escapeHtml(periodLabel)}</td></tr></table></div>`;
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:8px;line-height:10px;letter-spacing:.08em;text-transform:uppercase;color:#617286;width:100%;height:8mm;padding:2mm 12mm 0;box-sizing:border-box"><table style="width:100%;border-collapse:collapse"><tr><td style="padding:0;text-align:left;color:#617286">SCOUT / CLAIMS MANAGEMENT</td><td style="padding:0;text-align:right;color:#617286">${escapeHtml(periodLabel)}</td></tr></table></div>`;
 }
 
 export function renderClaimsReportPdfFooterTemplate() {
