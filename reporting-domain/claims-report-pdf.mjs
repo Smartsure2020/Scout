@@ -178,9 +178,18 @@ function metricValue(snapshot, id, formatter = formatInteger) {
   return { text: formatter(item.value), available: true, item };
 }
 
+// No up/down figure is ever shown beside a value that is itself unavailable, and
+// none when the previous period has nothing comparable.
 function comparisonText(snapshot, id, formatter = formatInteger) {
+  const metric = asObject(asObject(snapshot).metrics)[id];
+  if (metric && metric.availability === "unavailable")
+    return "Comparison unavailable";
   const comparison = asObject(asObject(snapshot).comparisons)[id];
-  const delta = Number(asObject(comparison).absolute_delta);
+  if (comparison?.direction === "unavailable") return "Comparison unavailable";
+  const raw = asObject(comparison).absolute_delta;
+  if (raw === null || raw === undefined || raw === "")
+    return "Comparison unavailable";
+  const delta = Number(raw);
   if (!Number.isFinite(delta)) return "Comparison unavailable";
   if (delta === 0) return "Unchanged vs previous period";
   const direction = delta > 0 ? "Up" : "Down";

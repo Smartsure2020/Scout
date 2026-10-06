@@ -296,6 +296,7 @@ export function formatMetric(metricValue, kind = "integer") {
 export function formatComparison(comparison, kind = "integer") {
   if (
     !comparison ||
+    comparison.direction === "unavailable" ||
     comparison.absolute_delta === null ||
     comparison.absolute_delta === undefined
   ) {

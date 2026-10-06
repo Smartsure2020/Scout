@@ -28,15 +28,14 @@ import {
 } from "./reporting-domain/history.mjs";
 import {
   buildReportSnapshot,
-  extractObservationInstant,
   previousReportingPeriod,
+  reportEvidencePlan,
   reportScopeKey,
   reportingPeriod,
   REPORTING_DOMAIN,
   REPORTING_METRIC_VERSION,
   REPORTING_QUALITY_VERSION,
   REPORT_SCHEMA_VERSION,
-  selectBoundaryExtract,
 } from "./reporting-domain/reporting-metrics.mjs";
 import {
   canArchiveReport,
@@ -1673,47 +1672,28 @@ async function loadReportEvidence(env, { reportType, periodStart, scope }) {
   const period = reportingPeriod(reportType, periodStart);
   const previous = previousReportingPeriod(reportType, periodStart);
   const manifests = await getAcceptedReportManifests(env);
-  const currentOpening = selectBoundaryExtract(manifests, period.start, {
+  // The previous-period comparison is the previous report as it would be
+  // generated for that period, so it loads its OWN extract set (boundaries and
+  // lifecycle chain). Loading only the current period's set left the previous
+  // period's baseline extract out, so its first in-period extract diffed against
+  // an empty baseline.
+  const plan = reportEvidencePlan(manifests, {
+    reportType,
+    periodStart,
     scope,
   });
-  const currentClosing = selectBoundaryExtract(manifests, period.end, {
-    scope,
-  });
-  const previousOpening = selectBoundaryExtract(manifests, previous.start, {
-    scope,
-  });
-  const previousClosing = selectBoundaryExtract(manifests, previous.end, {
-    scope,
-  });
-  const selectedIds = new Set(
-    [
-      currentOpening.manifest,
-      currentClosing.manifest,
-      previousOpening.manifest,
-      previousClosing.manifest,
-    ]
-      .filter(Boolean)
-      .map((manifest) => manifest.id),
-  );
-  for (const manifest of manifests) {
-    const instant = extractObservationInstant(manifest);
-    if (
-      instant &&
-      instant >= previous.start &&
-      instant <= period.end &&
-      manifest.source_metadata?.portfolio_scope ===
-        (scope.portfolio_scope ?? manifest.source_metadata?.portfolio_scope)
-    ) {
-      selectedIds.add(manifest.id);
-    }
-  }
   const entries = await Promise.all(
-    [...selectedIds].map(async (extractId) => [
-      extractId,
-      await getHistorySnapshots(env, extractId),
-    ]),
+    [...new Set([...plan.current, ...plan.previous])].map(
+      async (extractId) => [
+        extractId,
+        await getHistorySnapshots(env, extractId),
+      ],
+    ),
   );
-  const snapshotsByExtract = new Map(entries);
+  const loaded = new Map(entries);
+  const pick = (ids) => new Map([...ids].map((id) => [id, loaded.get(id)]));
+  const snapshotsByExtract = pick(plan.current);
+  const previousSnapshotsByExtract = pick(plan.previous);
   const changes = await getHistoryChangesForRange(
     env,
     previous.start,
@@ -1727,7 +1707,6 @@ async function loadReportEvidence(env, { reportType, periodStart, scope }) {
   ];
   const shared = {
     manifests,
-    snapshotsByExtract,
     changes,
     activeUsers: activeUsers.users,
     handlerRoster: reportingRoster.roster,
@@ -1737,11 +1716,13 @@ async function loadReportEvidence(env, { reportType, periodStart, scope }) {
   const previousReport = buildReportSnapshot({
     reportType,
     periodStart: previous.startLocalDate,
+    snapshotsByExtract: previousSnapshotsByExtract,
     ...shared,
   });
   const report = buildReportSnapshot({
     reportType,
     periodStart,
+    snapshotsByExtract,
     previousSnapshot: previousReport,
     ...shared,
   });

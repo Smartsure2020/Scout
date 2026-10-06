@@ -4,6 +4,7 @@ import {
   buildReportSnapshot,
   metricPopulationForSnapshot,
   previousReportingPeriod,
+  reportEvidencePlan,
   reportingPeriod,
   selectAuthoritativeManifests,
   selectBoundaryExtract,
@@ -1075,4 +1076,118 @@ test("report generation is deterministic for the same historical evidence", () =
   assert.deepEqual(first.metrics, second.metrics);
   assert.deepEqual(first.coverage, second.coverage);
   assert.deepEqual(first.claim_rows, second.claim_rows);
+});
+
+test("comparisons never diff an unavailable metric against a real previous value", () => {
+  const previousSnapshot = {
+    metrics: {
+      // Previous period HAD observed assignment changes ...
+      assignment_activity: { value: 4, availability: "available" },
+      // ... and this one was unavailable (a numeric placeholder, not a real 0).
+      closing_inventory: { value: 0, availability: "unavailable" },
+      opening_inventory: { value: 2, availability: "available" },
+    },
+  };
+  const data = week1Evidence();
+  data.changes = [];
+  const report = buildReportSnapshot({
+    reportType: "weekly",
+    periodStart: "2026-08-24",
+    ...data,
+    previousSnapshot,
+  });
+  // No change rows exist in this period, so the current value is unavailable.
+  assert.equal(report.metrics.assignment_activity.availability, "unavailable");
+  const assignment = report.comparisons.assignment_activity;
+  assert.equal(assignment.absolute_delta, null);
+  assert.equal(assignment.percentage_delta, null);
+  assert.equal(assignment.current, null);
+  assert.equal(assignment.direction, "unavailable");
+  assert.equal(assignment.unavailable_reason, "current_unavailable");
+
+  // Previous unavailable: no numeric comparison either.
+  const closing = report.comparisons.closing_inventory;
+  assert.equal(report.metrics.closing_inventory.availability, "available");
+  assert.equal(closing.previous, null);
+  assert.equal(closing.absolute_delta, null);
+  assert.equal(closing.direction, "unavailable");
+  assert.equal(closing.unavailable_reason, "previous_unavailable");
+
+  // Both available: the numeric comparison is unchanged.
+  const opening = report.comparisons.opening_inventory;
+  assert.equal(opening.previous, 2);
+  assert.equal(opening.absolute_delta, report.metrics.opening_inventory.value - 2);
+  assert.equal(opening.direction, "increase");
+  assert.equal(opening.unavailable_reason, undefined);
+});
+
+test("previous-period comparison loads its own baseline so a boundary-dated extract cannot empty it", () => {
+  // Friday close (baseline), a Monday extract dated EXACTLY on the period start
+  // (local midnight, so it is the boundary extract), then the week's other
+  // extracts, then the following week. Claim "L" leaves between Friday and Monday.
+  const fri = manifest("fri-25", "2026-09-25", 3);
+  const mon = manifest("mon-28", "2026-09-28", 2, { previousExtractId: fri.id });
+  const fri2 = manifest("fri-02", "2026-10-02", 3, { previousExtractId: mon.id });
+  const mon2 = manifest("mon-05", "2026-10-05", 3, { previousExtractId: fri2.id });
+  const manifests = [fri, mon, fri2, mon2];
+  const rows = (extract, ids, extra = {}) =>
+    ids.map((id) => snapshot(id, extract.id, { registeredDate: "2026-06-01", calendarAge: 100, ...extra }));
+  const snapshotsByExtract = new Map([
+    [fri.id, rows(fri, ["A", "B", "L"])],
+    [mon.id, rows(mon, ["A", "B"])],
+    [fri2.id, [...rows(fri2, ["A", "B"]), snapshot("N", fri2.id, { registeredDate: "2026-06-01", calendarAge: 100 })]],
+    [mon2.id, [...rows(mon2, ["A", "B", "N"])]],
+  ]);
+
+  const plan = reportEvidencePlan(manifests, { reportType: "weekly", periodStart: "2026-10-05" });
+  // The previous report (28 Sep - 2 Oct) needs the Friday 25 Sep baseline even
+  // though the Monday extract sits exactly on its start boundary.
+  assert.equal(plan.previous.has(fri.id), true, "previous baseline is loaded");
+  assert.equal(plan.previous.has(mon.id), true);
+  assert.equal(plan.previous.has(fri2.id), true);
+  // The current report still loads exactly what it always did.
+  assert.equal(plan.current.has(fri2.id), true);
+  assert.equal(plan.current.has(mon2.id), true);
+
+  const build = (ids) =>
+    buildReportSnapshot({
+      reportType: "weekly",
+      periodStart: "2026-09-28",
+      manifests,
+      snapshotsByExtract: new Map([...snapshotsByExtract].filter(([id]) => ids.has(id))),
+      activeUsers: users,
+    });
+  const withPlan = build(plan.previous);
+  const withEverything = build(new Set(snapshotsByExtract.keys()));
+  for (const id of ["new_claims_first_observed", "claims_left_extract", "claims_closed"]) {
+    assert.deepEqual(withPlan.metrics[id].value, withEverything.metrics[id].value, id);
+  }
+  // Mon -> Fri2 shows N first observed; Fri -> Mon shows L leaving.
+  assert.deepEqual(withPlan.metrics.new_claims_first_observed.claim_population.claim_ids, ["N"]);
+  assert.deepEqual(withPlan.metrics.claims_left_extract.claim_population.claim_ids, ["L"]);
+
+  // The old selection (boundaries + extracts observed since the previous period
+  // start) leaves the baseline out and reports the whole Monday extract as new.
+  const old = new Set(
+    [mon.id, fri2.id].concat(
+      selectBoundaryExtract(manifests, reportingPeriod("weekly", "2026-09-28").start).manifest.id,
+    ),
+  );
+  assert.equal(old.has(fri.id), false);
+  const broken = build(old);
+  assert.notDeepEqual(
+    broken.metrics.new_claims_first_observed.claim_population.claim_ids,
+    ["N"],
+  );
+});
+
+test("evidence plan for the current period is unchanged when no extract hides a baseline", () => {
+  const fri = manifest("fri-25", "2026-09-25", 3);
+  const fri2 = manifest("fri-02", "2026-10-02", 3, { previousExtractId: fri.id });
+  const mon2 = manifest("mon-05", "2026-10-05", 3, { previousExtractId: fri2.id });
+  const plan = reportEvidencePlan([fri, fri2, mon2], { reportType: "weekly", periodStart: "2026-10-05" });
+  // Same set the loader always chose: boundaries (previous start -> fri-25),
+  // previous end and the extracts observed since.
+  assert.deepEqual([...plan.current].sort(), [fri.id, fri2.id, mon2.id].sort());
+  assert.equal(plan.previous.has(fri.id), true);
 });

@@ -544,3 +544,12 @@ test("the briefing worker's Repudiated handling is untouched (source inspection)
   assert.doesNotMatch(terminal, /repudiated/i, "worker does not treat Repudiated as terminal");
   assert.match(worker, /status === "repudiated" && age > 270/, "270-day close-or-escalate flag still present");
 });
+
+test("the report loader gives the previous-period comparison its own extract set (source inspection)", () => {
+  const backend = readFileSync(new URL("../scout backend.js", import.meta.url), "utf8");
+  const loader = /async function loadReportEvidence[\s\S]*?\n}\n/.exec(backend)[0];
+  assert.match(loader, /reportEvidencePlan\(/, "loader uses the shared evidence plan");
+  // The previous report is built from the PREVIOUS set, the current report from the current set.
+  assert.match(loader, /previousReport = buildReportSnapshot\(\{[\s\S]*?snapshotsByExtract: previousSnapshotsByExtract/);
+  assert.match(loader, /const report = buildReportSnapshot\(\{[\s\S]*?snapshotsByExtract,[\s\S]*?previousSnapshot: previousReport/);
+});

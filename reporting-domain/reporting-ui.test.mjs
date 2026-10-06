@@ -453,3 +453,17 @@ test("report claim rows carry the parent identifier into workflow, including NUL
   assert.equal(ambiguous.state.workflowForm.claimId, "");
   assert.equal(ambiguous.state.workflowForm.claimNumber, "MULTI-1");
 });
+
+test("formatComparison never shows an up/down figure for an unavailable comparison", () => {
+  assert.equal(formatComparison(undefined), "Comparison unavailable");
+  assert.equal(
+    formatComparison({ absolute_delta: null, direction: "unavailable" }),
+    "Comparison unavailable",
+  );
+  // Even a stale numeric delta is ignored once the comparison says unavailable.
+  assert.equal(
+    formatComparison({ absolute_delta: -4, direction: "unavailable" }),
+    "Comparison unavailable",
+  );
+  assert.equal(formatComparison({ absolute_delta: 3, direction: "increase" }), "↑ 3 vs previous period");
+});

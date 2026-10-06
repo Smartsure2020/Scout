@@ -498,6 +498,53 @@ function authoritativeChainForPeriod(manifests, period, timeZone, scope) {
   return baseline ? [baseline, ...inPeriod] : inPeriod;
 }
 
+/**
+ * The extracts whose snapshot rows generating a report for this period loads:
+ * the four boundary extracts (this period and the previous one) plus every extract
+ * observed from the start of the previous period to the end of this one. This is
+ * the selection the report loader has always used for the CURRENT report.
+ */
+function evidenceExtractIdsForPeriod(manifests, reportType, periodStart, scope, timeZone) {
+  const period = reportingPeriod(reportType, periodStart, timeZone);
+  const previous = previousReportingPeriod(reportType, periodStart, timeZone);
+  const ids = new Set();
+  for (const boundary of [period.start, period.end, previous.start, previous.end]) {
+    const selected = selectBoundaryExtract(manifests, boundary, { timeZone, scope }).manifest;
+    if (selected) ids.add(selected.id);
+  }
+  for (const manifest of asArray(manifests)) {
+    if (!scopeMatches(manifest, scope)) continue;
+    const instant = manifestInstant(manifest, timeZone);
+    if (instant && instant >= previous.start && instant <= period.end) ids.add(manifest.id);
+  }
+  return ids;
+}
+
+/**
+ * Evidence plan for generating a report and its previous-period comparison.
+ *
+ * The previous-period comparison is the previous report as it WOULD be generated
+ * for that period, so it is given the extract set that generating it would use
+ * (its own boundaries and the extracts since ITS previous period), not the subset
+ * chosen for the current period. That subset reaches back only to the start of the
+ * previous period: the last extract before it - the baseline the lifecycle diff
+ * starts from - is left out whenever an extract sits exactly on that start
+ * boundary (a Monday source-dated at local midnight), so the first in-period
+ * extract diffed against an empty baseline and every claim in it was "first
+ * observed". The current report keeps exactly the set it always had, so its
+ * figures cannot change.
+ */
+export function reportEvidencePlan(
+  manifests,
+  { reportType, periodStart, scope = {}, timeZone = BUSINESS_TIME_ZONE } = {},
+) {
+  const previous = previousReportingPeriod(reportType, periodStart, timeZone);
+  return {
+    current: evidenceExtractIdsForPeriod(manifests, reportType, periodStart, scope, timeZone),
+    previous: evidenceExtractIdsForPeriod(manifests, reportType, previous.startLocalDate, scope, timeZone),
+  };
+}
+
 export function deriveParentLifecycleEvents(
   manifests,
   snapshotsByExtract,
@@ -1824,21 +1871,34 @@ function coverageAssessment({
   };
 }
 
+// A comparison is only meaningful when BOTH sides are available. An unavailable
+// metric can still carry a numeric placeholder (for example 0 when no change rows
+// exist to observe), and that placeholder must never be diffed against a real
+// previous value: "unavailable" is not zero.
 function comparisonForMetrics(currentMetrics, previousSnapshot) {
   const previousMetrics = asObject(previousSnapshot?.metrics);
   const comparison = {};
+  const isUnavailable = (metricValue) =>
+    metricValue?.availability === "unavailable";
   for (const [id, current] of Object.entries(currentMetrics)) {
     if (!current || typeof current.value !== "number") continue;
     const previous = previousMetrics[id];
+    const currentUnavailable = isUnavailable(current);
+    const previousUnavailable = isUnavailable(previous);
     const previousValue =
-      previous && typeof previous.value === "number" ? previous.value : null;
-    const delta = previousValue === null ? null : current.value - previousValue;
+      previous && typeof previous.value === "number" && !previousUnavailable
+        ? previous.value
+        : null;
+    const delta =
+      currentUnavailable || previousValue === null
+        ? null
+        : current.value - previousValue;
     comparison[id] = {
-      current: current.value,
+      current: currentUnavailable ? null : current.value,
       previous: previousValue,
       absolute_delta: delta,
       percentage_delta:
-        previousValue === null || previousValue === 0
+        delta === null || previousValue === 0
           ? null
           : delta / Math.abs(previousValue),
       direction:
@@ -1849,6 +1909,11 @@ function comparisonForMetrics(currentMetrics, previousSnapshot) {
             : delta > 0
               ? "increase"
               : "decrease",
+      ...(currentUnavailable
+        ? { unavailable_reason: "current_unavailable" }
+        : previousValue === null
+          ? { unavailable_reason: "previous_unavailable" }
+          : {}),
     };
   }
   return comparison;

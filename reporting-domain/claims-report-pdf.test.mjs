@@ -673,3 +673,45 @@ test("reports finalised before the split still show their combined High value / 
   assert.match(html, /High value \/ mandate attention/);
   assert.match(html, /Payment request with zero estimate/);
 });
+
+test("PDF never prints an up/down figure beside unavailable data or an unavailable previous value", () => {
+  const run = fixtureRun("weekly");
+  const snapshot = run.metrics_snapshot;
+  // Current value unavailable, but a stale numeric comparison exists.
+  snapshot.metrics.assignment_activity = {
+    value: 0,
+    availability: "unavailable",
+    precision: "unavailable",
+  };
+  snapshot.comparisons.assignment_activity = {
+    current: 0,
+    previous: 4,
+    absolute_delta: -4,
+    direction: "decrease",
+  };
+  // Previous unavailable: the comparison carries a null delta.
+  snapshot.comparisons.new_claims_registered = {
+    current: 7,
+    previous: null,
+    absolute_delta: null,
+    direction: "unavailable",
+    unavailable_reason: "previous_unavailable",
+  };
+  // Available on both sides keeps its real delta.
+  snapshot.comparisons.claims_closed = { absolute_delta: -3 };
+  const html = renderClaimsReportHtml(run, { available: true, attention_items: [], action_items: [] });
+  const card = (label) => {
+    const start = html.indexOf(`<div class="kpi-label">${label}</div>`);
+    assert.notEqual(start, -1, `card ${label} present`);
+    return html.slice(start, html.indexOf("</article>", start));
+  };
+  const assignment = card("Claims with assignment activity");
+  assert.match(assignment, /Data unavailable/);
+  assert.match(assignment, /Comparison unavailable/);
+  assert.doesNotMatch(assignment, /vs previous period/);
+  const registered = card("New claims registered");
+  assert.match(registered, /Comparison unavailable/);
+  assert.doesNotMatch(registered, /Unchanged vs previous period/);
+  assert.doesNotMatch(registered, /vs previous period/);
+  assert.match(card("Claims closed"), /Down 3 vs previous period/);
+});
