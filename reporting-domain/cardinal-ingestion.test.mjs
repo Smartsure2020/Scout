@@ -419,13 +419,10 @@ test("representative Cardinal fixture reconciles source to canonical to history 
   assert.equal(report.metrics.closing_inventory.value, 4);
   const ageing = report.metrics.ageing_distribution.value;
   assert.equal(Object.values(ageing).reduce((sum, value) => sum + value, 0), 4);
-  const handlers = report.metrics.handler_performance.value;
-  assert.equal(
-    handlers.handlers.reduce((sum, row) => sum + row.open_claims, 0) +
-      handlers.manager_held_other.count +
-      handlers.unassigned_unresolved.count,
-    4,
-  );
+  // Every open claim is held by exactly one scorecard (legacy handler_performance
+  // is no longer written).
+  assert.equal(report.metrics.handler_scorecards.value.totals.gross_registered, 4);
+  assert.equal("handler_performance" in report.metrics, false);
   const sla = report.metrics.sla_summary.value;
   assert.deepEqual(
     {

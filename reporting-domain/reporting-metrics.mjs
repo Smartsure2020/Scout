@@ -26,7 +26,6 @@ import {
   DEFAULT_MAX_ROW_COUNT_DROP_RATIO,
   HISTORY_SCHEMA_VERSION,
 } from "./history.mjs";
-import { resolveActiveScoutUsers } from "./roles.mjs";
 import { buildHandlerScorecards } from "./handler-scorecards.mjs";
 import {
   consensusValue,
@@ -1620,129 +1619,6 @@ function financialMetrics(closingOpen, evidence) {
   return metrics;
 }
 
-function handlerKey(user) {
-  return user?.id !== null && user?.id !== undefined
-    ? String(user.id)
-    : user?.email || null;
-}
-
-function handlerMetricValue(claims, activeUsers, evidence, changes = []) {
-  const users = resolveActiveScoutUsers(activeUsers).sort((left, right) =>
-    String(left.displayName || left.email || "").localeCompare(
-      String(right.displayName || right.email || ""),
-    ),
-  );
-  const handlers = users.filter((user) => user.role === "handler");
-  const usersByKey = new Map(users.map((user) => [handlerKey(user), user]));
-  const activityByUser = new Map();
-  for (const change of changes) {
-    if (change.change_type !== "handler_changed") continue;
-    const oldKey =
-      change.old_value?.user_id ??
-      change.old_value?.email ??
-      change.old_value?.handler;
-    const newKey =
-      change.new_value?.user_id ??
-      change.new_value?.email ??
-      change.new_value?.handler;
-    if (oldKey) {
-      const value = activityByUser.get(String(oldKey)) || { in: [], out: [] };
-      value.out.push(String(change.claim_id));
-      activityByUser.set(String(oldKey), value);
-    }
-    if (newKey) {
-      const value = activityByUser.get(String(newKey)) || { in: [], out: [] };
-      value.in.push(String(change.claim_id));
-      activityByUser.set(String(newKey), value);
-    }
-  }
-  const rows = handlers.map((handler) => {
-    const key = handlerKey(handler);
-    const owned = claims.filter(
-      (claim) => String(claim.resolvedScoutUserId ?? "") === String(key),
-    );
-    const open = owned.filter((claim) => claim.open && !claim.terminal);
-    const evaluated = open.map((claim) => ({
-      claim,
-      result: evaluateSla(claim, {
-        asOfDate: claim.snapshotEffectiveDate,
-        onUnsupported: "return",
-      }),
-    }));
-    const movement = movementMetrics(open, evidence);
-    const ready = readyAndAnomalyMetrics(open, evidence);
-    const operational = evaluateOperationalCategories;
-    const assessor = open
-      .filter((claim) => operational(claim).assessorOverdue)
-      .map((claim) => claim.id);
-    const investigator = open
-      .filter((claim) => operational(claim).investigatorOverdue)
-      .map((claim) => claim.id);
-    const broker = open
-      .filter((claim) => operational(claim).brokerOverdue)
-      .map((claim) => claim.id);
-    const sixty = open
-      .filter((claim) => Number(claim.calendarAge) > 60)
-      .map((claim) => claim.id);
-    const ninetyOne = open
-      .filter((claim) => Number(claim.calendarAge) >= 91)
-      .map((claim) => claim.id);
-    const breaches = evaluated
-      .filter(({ result }) => result.breached)
-      .map(({ claim }) => claim.id);
-    const activity = activityByUser.get(String(key)) || { in: [], out: [] };
-    return {
-      handler_id: handler.id ?? null,
-      handler_email: handler.email,
-      handler_name: handler.displayName || handler.email,
-      open_claims: open.length,
-      open_claim_ids: open.map((claim) => claim.id),
-      claims_60_plus: sixty.length,
-      claims_60_plus_ids: sixty,
-      claims_91_plus: ninetyOne.length,
-      claims_91_plus_ids: ninetyOne,
-      sla_breaches: breaches.length,
-      sla_breach_ids: breaches,
-      no_movement_over_14: movement.over14.value,
-      no_movement_over_14_ids: movement.over14.claim_population.claim_ids,
-      no_movement_over_30: movement.over30.value,
-      no_movement_over_30_ids: movement.over30.claim_population.claim_ids,
-      ready_to_close: ready.ready.value,
-      ready_to_close_ids: ready.ready.claim_population.claim_ids,
-      assessor_overdue: assessor.length,
-      assessor_overdue_ids: assessor,
-      investigator_overdue: investigator.length,
-      investigator_overdue_ids: investigator,
-      broker_overdue: broker.length,
-      broker_overdue_ids: broker,
-      reassignments_in: new Set(activity.in).size,
-      reassignments_in_ids: [...new Set(activity.in)],
-      reassignments_out: new Set(activity.out).size,
-      reassignments_out_ids: [...new Set(activity.out)],
-    };
-  });
-  const managerHeld = claims.filter((claim) => {
-    const user = usersByKey.get(String(claim.resolvedScoutUserId ?? ""));
-    return user && ["manager", "admin"].includes(user.role);
-  });
-  const unresolved = claims.filter((claim) => {
-    const user = usersByKey.get(String(claim.resolvedScoutUserId ?? ""));
-    return !user || user.role === "unknown";
-  });
-  return {
-    handlers: rows,
-    manager_held_other: {
-      count: managerHeld.length,
-      claim_ids: managerHeld.map((claim) => claim.id),
-    },
-    unassigned_unresolved: {
-      count: unresolved.length,
-      claim_ids: unresolved.map((claim) => claim.id),
-    },
-    active_handler_count: handlers.length,
-  };
-}
-
 function assignmentActivity(changes, period, evidence) {
   const reassignmentsIn = new Set();
   const reassignmentsOut = new Set();
@@ -2308,24 +2184,13 @@ export function buildReportSnapshot({
     evidence_type: "observed_change",
     period: period.start.toISOString(),
   });
-  metrics.handler_performance = metric(
-    "handler_performance",
-    handlerMetricValue(
-      closingOpen,
-      activeUsers,
-      closingEvidence,
-      periodChanges,
-    ),
-    {
-      precision: closingSelection.manifest ? "snapshot_exact" : "unavailable",
-      availability: closingSelection.manifest ? "available" : "unavailable",
-      claimIds: closingOpen.map((claim) => claim.id),
-      warnings: closingSelection.manifest
-        ? []
-        : ["boundary_snapshot_unavailable"],
-      evidence: closingEvidence,
-    },
-  );
+  // Handler reporting is the roster-driven handler_scorecards metric ONLY. The
+  // legacy `handler_performance` metric (every active SCOUT user with the handler
+  // role, claims matched by exact resolved user id) is never written to a v3
+  // snapshot: it listed underwriters as 0-claim handlers and, because a stored
+  // snapshot carries no resolved user id for a Cardinal name such as "Lucky
+  // Mokgomo", it reported Lucky as 0 with the whole book "unresolved". Stored v2
+  // snapshots keep their own copy and still render from it; nothing rebuilds them.
   const scorecards = buildHandlerScorecards({
     closingRows: state.closingRows,
     period,
@@ -2388,7 +2253,6 @@ export function buildReportSnapshot({
       "financial_open_outstanding",
       "financial_estimate_total",
       "financial_paid_total",
-      "handler_performance",
       "handler_scorecards",
       "scorecard_gross_registered",
       "scorecard_new_allocated",

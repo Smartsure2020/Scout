@@ -797,18 +797,29 @@ test("movement, Ready to Close, operational, financial, and dynamic handler metr
     report.metrics.payment_requested_events.availability,
     "unavailable",
   );
-  const handlers = report.metrics.handler_performance.value.handlers;
+  // Handler reporting is the scorecard model only; the legacy handler_performance
+  // metric is no longer written (see handler-performance-v3.test.mjs).
+  const scorecards = report.metrics.handler_scorecards.value;
   assert.deepEqual(
-    handlers.map((handler) => [handler.handler_id, handler.open_claims]),
+    scorecards.cards
+      .filter((card) => card.role === "handler")
+      .map((card) => [card.label, card.gross_registered]),
     [
-      ["handler-1", 1],
-      ["handler-2", 2],
+      ["Handler One", 1],
+      ["Handler Two", 2],
     ],
   );
-  assert.equal(
-    report.metrics.handler_performance.value.unassigned_unresolved.count,
-    1,
+  assert.deepEqual(
+    scorecards.cards
+      .filter((card) => card.role === "unrecognised")
+      .map((card) => [card.label, card.gross_registered]),
+    [["Unknown Person", 1]],
   );
+  assert.equal(
+    scorecards.totals.gross_registered,
+    report.metrics.closing_inventory.value,
+  );
+  assert.equal("handler_performance" in report.metrics, false);
 });
 
 test("first observed remains distinct when registration date is unavailable", () => {
@@ -865,7 +876,9 @@ test("assignment activity is observed and does not substitute current ownership"
     ["A"],
   );
   assert.equal(
-    report.metrics.handler_performance.value.handlers[0].open_claims,
+    report.metrics.handler_scorecards.value.cards.find(
+      (card) => card.label === "Handler One",
+    ).gross_registered,
     1,
   );
 });

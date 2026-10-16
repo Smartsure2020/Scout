@@ -133,13 +133,11 @@ test("three anonymized production-shaped parents retain safe report metrics", ()
   const ageing = report.metrics.ageing_distribution.value;
   assert.equal(Object.values(ageing).reduce((sum, value) => sum + value, 0), 4);
 
-  const handlers = report.metrics.handler_performance.value;
-  const handlerTotal = handlers.handlers.reduce(
-    (sum, item) => sum + item.open_claims,
-    handlers.manager_held_other.count + handlers.unassigned_unresolved.count,
-  );
-  assert.equal(handlerTotal, 4);
-  assert.equal(handlers.handlers[0].open_claims, 4);
+  // Handler reporting is the scorecard model (legacy handler_performance is no longer written).
+  const scorecards = report.metrics.handler_scorecards.value;
+  assert.equal(scorecards.totals.gross_registered, 4);
+  assert.equal(scorecards.cards.find((card) => card.role === "handler").gross_registered, 4);
+  assert.equal("handler_performance" in report.metrics, false);
 
   const sla = report.metrics.sla_summary.value;
   assert.equal(sla.total_evaluated, 4);

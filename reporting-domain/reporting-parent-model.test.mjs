@@ -190,17 +190,22 @@ test("safe parent fields keep SLA, handler, movement, and anomaly metrics availa
     "ready_to_close",
     "zero_estimate_payment_request",
     "operational_health",
-    "handler_performance",
+    "handler_scorecards",
   ]) assert.equal(snap.metrics[id].availability, "available", id);
   assert.equal(snap.metrics.assignment_activity.availability, "unavailable");
   assert.equal(snap.metrics.sla_summary.value.total_evaluated, 2);
-  assert.equal(snap.metrics.handler_performance.value.handlers[0].open_claims, 2);
+  // Every logical parent is counted once across the scorecards (the legacy
+  // handler_performance metric that used to carry this check is no longer written).
+  const scorecards = snap.metrics.handler_scorecards.value;
   assert.equal(
-    snap.metrics.handler_performance.value.handlers[0].open_claims +
-      snap.metrics.handler_performance.value.manager_held_other.count +
-      snap.metrics.handler_performance.value.unassigned_unresolved.count,
+    scorecards.cards.find((card) => card.role === "handler").gross_registered,
+    2,
+  );
+  assert.equal(
+    scorecards.totals.gross_registered,
     snap.metrics.closing_inventory.value,
   );
+  assert.equal("handler_performance" in snap.metrics, false);
 });
 
 test("report claim row uses parent identity and safe consensus financial values", () => {
