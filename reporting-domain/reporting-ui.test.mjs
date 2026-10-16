@@ -9,6 +9,7 @@ import {
   formatPercent,
   formatPeriodLabel,
   formatRand,
+  latestReportPeriodStart,
   metricState,
   normalizeReport,
   reportSnapshot,
@@ -466,4 +467,64 @@ test("formatComparison never shows an up/down figure for an unavailable comparis
     "Comparison unavailable",
   );
   assert.equal(formatComparison({ absolute_delta: 3, direction: "increase" }), "↑ 3 vs previous period");
+});
+
+test("report details expose frozen versions and the serving engine", () => {
+  const controller = new ReportsController({ document: reportDocument() });
+  const html = controller.renderReportDetails({
+    metric_definition_version: "claims-reporting-metrics-v3",
+    report_schema_version: "scout-report-v3",
+    serving_report_engine_version: "claims-report-engine-v3",
+    finalised_engine_version: "claims-report-engine-v3",
+  }, { metrics: {}, coverage: {} });
+  assert.match(html, /claims-reporting-metrics-v3/);
+  assert.match(html, /scout-report-v3/);
+  assert.match(html, /Serving report engine/);
+  assert.match(html, /Finalised by engine/);
+});
+
+test("latest report defaults use report periods, retain older history, and ignore future or archived runs", async () => {
+  const now = new Date("2026-10-16T10:00:00+02:00");
+  const reports = [
+    { id: "old-week", report_type: "weekly", status: "finalised", period_start_local_date: "2026-10-05" },
+    { id: "latest-week", report_type: "weekly", status: "finalised", period_start_local_date: "2026-10-12" },
+    { id: "future-week", report_type: "weekly", status: "draft", period_start_local_date: "2026-10-19" },
+    { id: "old-month", report_type: "monthly", status: "finalised", period_start_local_date: "2026-09-01" },
+    { id: "latest-month", report_type: "monthly", status: "draft", period_start_local_date: "2026-10-01" },
+    { id: "archived", report_type: "monthly", status: "archived", period_start_local_date: "2026-10-01" },
+  ];
+  assert.equal(latestReportPeriodStart(reports, "weekly", now), "2026-10-12");
+  assert.equal(latestReportPeriodStart(reports, "monthly", now), "2026-10-01");
+  assert.equal(latestReportPeriodStart([], "weekly", now), null);
+
+  const document = reportDocument();
+  const controller = new ReportsController({ document, getContext: () => ({ user: { role: "manager" } }), now: () => now });
+  const loaded = [];
+  controller.api = {
+    async listReports() { return { reports }; },
+    async getReport(id) {
+      loaded.push(id);
+      const run = reports.find((report) => report.id === id);
+      return { report: { ...run, metrics_snapshot: { metrics: {} } } };
+    },
+  };
+  await controller.loadReports();
+  assert.equal(controller.state.selected.id, "latest-week");
+  assert.equal(controller.state.periodStarts.weekly, "2026-10-12");
+  assert.equal(controller.state.periodStarts.monthly, "2026-10-01");
+  controller.state.activeTab = "monthly";
+  await controller.loadReports();
+  assert.equal(controller.state.selected.id, "latest-month");
+  controller.state.activeTab = "history";
+  const history = controller.renderHistory();
+  assert.match(history, /old-week/);
+  assert.match(history, /old-month/);
+  assert.doesNotMatch(history, /data-report-id="latest-week"/);
+  assert.doesNotMatch(history, /data-report-id="latest-month"/);
+  await controller.openReportWithOptions("old-week", { syncUrl: false, originTab: "history" });
+  assert.equal(controller.state.selected.id, "old-week");
+  assert.equal(controller.state.periodStarts.weekly, "2026-10-05");
+  assert.deepEqual(loaded, ["latest-week", "latest-month", "old-week"]);
+  await controller.openFromRoute("history", "latest-week");
+  assert.equal(controller.state.selected.id, "latest-week");
 });

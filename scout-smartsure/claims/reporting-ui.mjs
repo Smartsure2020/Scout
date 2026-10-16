@@ -718,6 +718,18 @@ function recordByPeriod(reports, reportType, periodStart) {
   );
 }
 
+export function latestReportPeriodStart(reports, reportType, now = new Date()) {
+  return (Array.isArray(reports) ? reports : [])
+    .filter((report) =>
+      report.report_type === reportType &&
+      ["draft", "finalised"].includes(report.status) &&
+      reportPeriodKey(report) &&
+      !isFutureReportPeriod(reportType, reportPeriodKey(report), now),
+    )
+    .map(reportPeriodKey)
+    .sort((a, b) => b.localeCompare(a))[0] || null;
+}
+
 function pdfFilename(run) {
   const type = run?.report_type === "monthly" ? "Monthly" : "Weekly";
   const date = String(reportPeriodKey(run) || "report").replace(/[^0-9-]/g, "");
@@ -745,14 +757,15 @@ function claimRowMatchesFilter(row, filter, metricId = "") {
 }
 
 export class ReportsController {
-  constructor({ document, getContext, rootId = "reports-content", syncUrlState } = {}) {
+  constructor({ document, getContext, rootId = "reports-content", syncUrlState, now = () => new Date() } = {}) {
     this.document = document;
     this.getContext = getContext;
     this.rootId = rootId;
     this.syncUrlState = syncUrlState || ((partial, options) => {
       globalThis.window?.syncReportsUrlState?.(partial, options);
     });
-    this.state = createReportState();
+    this.now = now;
+    this.state = createReportState(this.now());
     this.api = null;
     this.confirmResolver = null;
     this.confirmOriginFocus = null;
@@ -808,11 +821,7 @@ export class ReportsController {
       this.syncUrlState({ reportTab: this.state.activeTab, report: "" }, { replace: options.replace === true });
     }
     this.render();
-    if (this.state.activeTab === "history") {
-      if (!this.state.historyLoaded) this.loadReports();
-    } else {
-      this.loadPeriodReport(this.state.activeTab);
-    }
+    this.loadReports();
   }
 
   async loadReports() {
@@ -825,6 +834,11 @@ export class ReportsController {
       this.state.reports = Array.isArray(response?.reports)
         ? response.reports
         : [];
+      for (const type of ["weekly", "monthly"]) {
+        this.state.periodStarts[type] =
+          latestReportPeriodStart(this.state.reports, type, this.now()) ||
+          defaultReportPeriodStart(type, this.now());
+      }
       this.state.historyLoaded = true;
       this.state.error = null;
       if (this.state.activeTab !== "history")
@@ -1449,6 +1463,9 @@ export class ReportsController {
     try {
       const response = await this.api.getReport(id);
       this.state.selected = normalizeReport(response?.report).run;
+      const periodStart = reportPeriodKey(this.state.selected);
+      if (periodStart && ["weekly", "monthly"].includes(this.state.selected.report_type))
+        this.state.periodStarts[this.state.selected.report_type] = periodStart;
       this.state.reportOriginTab = originTab;
       this.state.activeTab = this.state.selected.report_type || "history";
       this.state.error = null;
@@ -1919,7 +1936,7 @@ export class ReportsController {
   renderReportDetails(run, snapshot) {
     const coverage = snapshot.coverage || asObject(run.coverage_metadata);
     const warnings = coverage.warnings || [];
-    return `<details class="report-details"><summary>Report details &amp; data quality</summary>${this.renderScorecardDefinitions(snapshot)}<div class="report-details-grid"><div><span>Opening extract</span><strong>${escapeHtml(snapshot.opening_extract_id || run.opening_extract_id || "Not available")}</strong></div><div><span>Closing extract</span><strong>${escapeHtml(snapshot.closing_extract_id || run.closing_extract_id || "Not available")}</strong></div><div><span>Accepted extracts in period</span><strong>${formatInteger(coverage.accepted_extract_count)}</strong></div><div><span>Warning-quality extracts</span><strong>${formatInteger(coverage.warning_quality_extract_count)}</strong></div><div><span>Historical capability start</span><strong>${escapeHtml(coverage.historical_capability_start_date || "Not available")}</strong></div><div><span>Metric definition</span><strong>${escapeHtml(run.metric_definition_version || snapshot.metric_definition_version || "Not available")}</strong></div><div><span>Claims rules</span><strong>${escapeHtml(run.claims_rule_version || snapshot.claims_rule_version || "Not available")}</strong></div><div><span>Quality rules</span><strong>${escapeHtml(run.quality_rule_version || snapshot.quality_rule_version || "Not available")}</strong></div></div><div class="report-warning-list">${warnings.length ? warnings.map((warning) => `<span>• ${escapeHtml(warningText(warning))}</span>`).join("") : "<span>No additional data-quality warnings.</span>"}</div></details>`;
+    return `<details class="report-details"><summary>Report details &amp; data quality</summary>${this.renderScorecardDefinitions(snapshot)}<div class="report-details-grid"><div><span>Opening extract</span><strong>${escapeHtml(snapshot.opening_extract_id || run.opening_extract_id || "Not available")}</strong></div><div><span>Closing extract</span><strong>${escapeHtml(snapshot.closing_extract_id || run.closing_extract_id || "Not available")}</strong></div><div><span>Accepted extracts in period</span><strong>${formatInteger(coverage.accepted_extract_count)}</strong></div><div><span>Warning-quality extracts</span><strong>${formatInteger(coverage.warning_quality_extract_count)}</strong></div><div><span>Historical capability start</span><strong>${escapeHtml(coverage.historical_capability_start_date || "Not available")}</strong></div><div><span>Metric definition</span><strong>${escapeHtml(run.metric_definition_version || snapshot.metric_definition_version || "Not available")}</strong></div><div><span>Report schema</span><strong>${escapeHtml(run.report_schema_version || snapshot.report_schema_version || "Not available")}</strong></div><div><span>Serving report engine</span><strong>${escapeHtml(run.serving_report_engine_version || "Not available")}</strong></div><div><span>Finalised by engine</span><strong>${escapeHtml(run.finalised_engine_version || "Not recorded")}</strong></div><div><span>Claims rules</span><strong>${escapeHtml(run.claims_rule_version || snapshot.claims_rule_version || "Not available")}</strong></div><div><span>Quality rules</span><strong>${escapeHtml(run.quality_rule_version || snapshot.quality_rule_version || "Not available")}</strong></div></div><div class="report-warning-list">${warnings.length ? warnings.map((warning) => `<span>• ${escapeHtml(warningText(warning))}</span>`).join("") : "<span>No additional data-quality warnings.</span>"}</div></details>`;
   }
 
   coverageCopy(status, snapshot) {
@@ -1950,18 +1967,23 @@ export class ReportsController {
     const status =
       this.document.querySelector("[data-history-filter='status']")?.value ||
       "all";
+    const current = {
+      weekly: latestReportPeriodStart(this.state.reports, "weekly", this.now()),
+      monthly: latestReportPeriodStart(this.state.reports, "monthly", this.now()),
+    };
     const reports = this.state.reports
       .filter(
         (report) =>
           (type === "all" || report.report_type === type) &&
-          (status === "all" || report.status === status),
+          (status === "all" || report.status === status) &&
+          (report.status === "archived" || reportPeriodKey(report) !== current[report.report_type]),
       )
       .sort((a, b) =>
         String(b.period_start || "").localeCompare(
           String(a.period_start || ""),
         ),
       );
-    return `<section class="report-history-shell"><div class="report-history-header"><div><div class="report-period-label">Report archive</div><h2>History</h2><p class="page-sub">Draft, finalised and archived Claims Reports.</p></div><div class="report-history-filters"><label>Type<select data-history-filter="type"><option value="all" ${type === "all" ? "selected" : ""}>All types</option><option value="weekly" ${type === "weekly" ? "selected" : ""}>Weekly</option><option value="monthly" ${type === "monthly" ? "selected" : ""}>Monthly</option></select></label><label>Status<select data-history-filter="status"><option value="all" ${status === "all" ? "selected" : ""}>All statuses</option><option value="draft" ${status === "draft" ? "selected" : ""}>Draft</option><option value="finalised" ${status === "finalised" ? "selected" : ""}>Finalised</option><option value="archived" ${status === "archived" ? "selected" : ""}>Archived</option></select></label></div></div><div class="report-history-table" role="table"><div class="report-history-row report-history-head" role="row"><span>Period</span><span>Type</span><span>Status</span><span>Coverage</span><span>Generated</span><span>Finalised</span><span>Generated by</span></div>${reports.length ? reports.map((report) => `<button class="report-history-row" role="row" data-report-action="open-report" data-report-id="${escapeHtml(report.id)}"><span>${escapeHtml(formatPeriodLabel(report))}</span><span>${escapeHtml(String(report.report_type || "").replace(/^./, (letter) => letter.toUpperCase()))}</span><span>${statusBadge(report.status)}</span><span>${coverageBadge(report.coverage_status, report.coverage_metadata?.warnings?.length || 0)}</span><span>${escapeHtml(this.formatDateTime(report.generated_at))}</span><span>${escapeHtml(this.formatDateTime(report.finalised_at))}</span><span>${escapeHtml(report.generated_by || "Not available")}</span></button>`).join("") : `<div class="report-empty-card compact"><h3>No reports yet</h3><p>Finalised and draft reports will appear here.</p></div>`}</div></section>`;
+    return `<section class="report-history-shell"><div class="report-history-header"><div><div class="report-period-label">Report archive</div><h2>History</h2><p class="page-sub">Earlier weekly and monthly reports, including archived snapshots.</p></div><div class="report-history-filters"><label>Type<select data-history-filter="type"><option value="all" ${type === "all" ? "selected" : ""}>All types</option><option value="weekly" ${type === "weekly" ? "selected" : ""}>Weekly</option><option value="monthly" ${type === "monthly" ? "selected" : ""}>Monthly</option></select></label><label>Status<select data-history-filter="status"><option value="all" ${status === "all" ? "selected" : ""}>All statuses</option><option value="draft" ${status === "draft" ? "selected" : ""}>Draft</option><option value="finalised" ${status === "finalised" ? "selected" : ""}>Finalised</option><option value="archived" ${status === "archived" ? "selected" : ""}>Archived</option></select></label></div></div><div class="report-history-table" role="table"><div class="report-history-row report-history-head" role="row"><span>Period</span><span>Type</span><span>Status</span><span>Coverage</span><span>Generated</span><span>Finalised</span><span>Generated by</span></div>${reports.length ? reports.map((report) => `<button class="report-history-row" role="row" data-report-action="open-report" data-report-id="${escapeHtml(report.id)}"><span>${escapeHtml(formatPeriodLabel(report))}</span><span>${escapeHtml(String(report.report_type || "").replace(/^./, (letter) => letter.toUpperCase()))}</span><span>${statusBadge(report.status)}</span><span>${coverageBadge(report.coverage_status, report.coverage_metadata?.warnings?.length || 0)}</span><span>${escapeHtml(this.formatDateTime(report.generated_at))}</span><span>${escapeHtml(this.formatDateTime(report.finalised_at))}</span><span>${escapeHtml(report.generated_by || "Not available")}</span></button>`).join("") : `<div class="report-empty-card compact"><h3>No earlier reports</h3><p>Older reports will appear here after a newer period is generated.</p></div>`}</div></section>`;
   }
 
   renderDrill() {

@@ -42,6 +42,9 @@ import {
   canFinaliseReport,
   canRegenerateReport,
   reportActionAllowed,
+  reportFinalisationCompatibility,
+  reportRegenerationCompatibility,
+  REPORT_ENGINE_VERSION,
 } from "./reporting-domain/report-lifecycle.mjs";
 import {
   PDF_RENDERER_VERSION,
@@ -1820,7 +1823,7 @@ function publicReportRun(run) {
     archived_by_user_id: _archivedByUserId,
     ...safe
   } = run;
-  return safe;
+  return { ...safe, serving_report_engine_version: REPORT_ENGINE_VERSION };
 }
 
 function publicHistoryManifest(manifest) {
@@ -3253,7 +3256,7 @@ export default {
           env,
           "/scout_report_runs?domain=eq." +
             encodeURIComponent(REPORTING_DOMAIN) +
-            "&select=id,domain,report_type,period_start,period_end,time_zone,status,scope,coverage_status,coverage_metadata,metric_definition_version,claims_rule_version,quality_rule_version,report_schema_version,opening_extract_id,closing_extract_id,generated_at,generated_by,regeneration_count,created_at,updated_at,finalised_at,finalised_by,archived_at,archived_by&order=period_start.desc",
+            "&select=id,domain,report_type,period_start,period_end,time_zone,status,scope,coverage_status,coverage_metadata,metric_definition_version,claims_rule_version,quality_rule_version,report_schema_version,finalised_engine_version,opening_extract_id,closing_extract_id,generated_at,generated_by,regeneration_count,created_at,updated_at,finalised_at,finalised_by,archived_at,archived_by&order=period_start.desc",
           true,
         );
         await audit(env, currentUser.email, currentUser.name, "list_reports", {
@@ -3290,6 +3293,14 @@ export default {
           );
         if (existing?.status === "archived")
           return err("Archived report cannot be regenerated", 409);
+        if (existing) {
+          const compatibility = reportRegenerationCompatibility(
+            existing,
+            { metric_definition_version: REPORTING_METRIC_VERSION, report_schema_version: REPORT_SCHEMA_VERSION },
+            body.allowCompatibleUpgrade === true,
+          );
+          if (!compatibility.allowed) return err(compatibility.message, 409);
+        }
         const { report } = await loadReportEvidence(env, {
           reportType,
           periodStart: body.periodStart,
@@ -3391,6 +3402,21 @@ export default {
         if (!existing) return err("Report not found", 404);
         if (!canRegenerateReport(existing.status))
           return err("Only draft reports may be regenerated", 409);
+        const requestBody = await request.text();
+        let options = {};
+        if (requestBody) {
+          try {
+            options = JSON.parse(requestBody);
+          } catch {
+            return err("Invalid regeneration options", 422);
+          }
+        }
+        const compatibility = reportRegenerationCompatibility(
+          existing,
+          { metric_definition_version: REPORTING_METRIC_VERSION, report_schema_version: REPORT_SCHEMA_VERSION },
+          options?.allowCompatibleUpgrade === true,
+        );
+        if (!compatibility.allowed) return err(compatibility.message, 409);
         const scope = reportScopeFromRequest(existing.scope);
         const { report } = await loadReportEvidence(env, {
           reportType: existing.report_type,
@@ -3445,6 +3471,11 @@ export default {
             report: await publicReportWithWorkflow(env, existing),
             idempotent: true,
           });
+        const compatibility = reportFinalisationCompatibility(existing, {
+          metric_definition_version: REPORTING_METRIC_VERSION,
+          report_schema_version: REPORT_SCHEMA_VERSION,
+        });
+        if (!compatibility.allowed) return err(compatibility.message, 409);
         const workflowSnapshot = await syncReportWorkflowSnapshots(
           env,
           reportId,
@@ -3459,6 +3490,7 @@ export default {
             finalised_at: now,
             finalised_by: currentUser.email,
             finalised_by_user_id: currentUser.id || null,
+            finalised_engine_version: REPORT_ENGINE_VERSION,
             updated_at: now,
           },
           true,
