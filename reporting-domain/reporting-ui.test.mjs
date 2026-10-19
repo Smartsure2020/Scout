@@ -247,6 +247,8 @@ test("reporting API uses bearer authentication and the Phase 3 routes", async ()
   await api.generateReport("weekly", "2026-08-17");
   await api.getReport("run-1");
   await api.regenerateReport("run-1");
+  await api.generateReport("weekly", "2026-08-17", { allowCompatibleUpgrade: true });
+  await api.regenerateReport("run-1", { allowCompatibleUpgrade: true });
   await api.finaliseReport("run-1");
   await api.archiveReport("run-1");
   await api.metricClaims("run-1", "no_movement_over_30");
@@ -257,11 +259,70 @@ test("reporting API uses bearer authentication and the Phase 3 routes", async ()
     "https://reports.example.workers.dev/reports/generate",
   );
   assert.equal(JSON.parse(calls[1].options.body).scope.kind, "team");
+  assert.equal(JSON.parse(calls[1].options.body).allowCompatibleUpgrade, false);
   assert.equal(calls[1].options.headers.Authorization, "Bearer test-token");
+  assert.equal(JSON.parse(calls[4].options.body).allowCompatibleUpgrade, true);
+  assert.equal(JSON.parse(calls[5].options.body).allowCompatibleUpgrade, true);
   assert.equal(
     calls.at(-1).url,
     "https://reports.example.workers.dev/reports/run-1/metrics/no_movement_over_30/claims",
   );
+});
+
+test("older drafts require confirmation before the UI sends an upgrade flag", async () => {
+  const draft = {
+    id: "older-draft",
+    report_type: "weekly",
+    period_start_local_date: "2026-10-12",
+    status: "draft",
+    metric_definition_version: "claims-reporting-metrics-v2",
+    report_schema_version: "scout-report-v2",
+    serving_report_engine_version: "claims-report-engine-v3",
+  };
+  const controller = new ReportsController({
+    document: reportDocument(),
+    getContext: () => ({ user: { role: "manager" } }),
+  });
+  controller.state.reports = [draft];
+  controller.state.selected = draft;
+  controller.state.activeTab = "weekly";
+  controller.state.periodStarts.weekly = "2026-10-12";
+  const requests = [];
+  const confirmations = [];
+  controller.api = {
+    generateReport: async (...args) => requests.push(["generate", ...args]),
+    regenerateReport: async (...args) => requests.push(["regenerate", ...args]),
+  };
+  controller.perform = async (_label, action) => action();
+  controller.confirm = async (action) => {
+    confirmations.push(action);
+    return true;
+  };
+
+  await controller.generate();
+  await controller.regenerate();
+  assert.deepEqual(confirmations, ["upgrade", "upgrade"]);
+  assert.equal(requests[0][3].allowCompatibleUpgrade, true);
+  assert.equal(requests[1][2].allowCompatibleUpgrade, true);
+
+  controller.confirm = async () => false;
+  await controller.generate();
+  assert.equal(requests.length, 2);
+
+  const currentDraft = {
+    ...draft,
+    metric_definition_version: "claims-reporting-metrics-v3",
+    report_schema_version: "scout-report-v3",
+  };
+  controller.state.selected = currentDraft;
+  controller.state.reports = [currentDraft];
+  controller.confirm = async (action) => {
+    confirmations.push(action);
+    return true;
+  };
+  await controller.regenerate();
+  assert.equal(confirmations.at(-1), "regenerate");
+  assert.equal(requests.at(-1)[2].allowCompatibleUpgrade, false);
 });
 
 test("reporting API downloads an official PDF as a blob without JSON parsing", async () => {

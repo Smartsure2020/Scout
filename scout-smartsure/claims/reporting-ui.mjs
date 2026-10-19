@@ -505,18 +505,22 @@ export function createReportingApi({
       request(`/reports/${encodeURIComponent(id)}/pdf`, {
         responseType: "blob",
       }),
-    generateReport: (reportType, periodStart) =>
+    generateReport: (reportType, periodStart, options = {}) =>
       request("/reports/generate", {
         method: "POST",
         body: JSON.stringify({
           reportType,
           periodStart,
           scope: { kind: "team" },
+          allowCompatibleUpgrade: options.allowCompatibleUpgrade === true,
         }),
       }),
-    regenerateReport: (id) =>
+    regenerateReport: (id, options = {}) =>
       request(`/reports/${encodeURIComponent(id)}/regenerate`, {
         method: "POST",
+        body: options.allowCompatibleUpgrade === true
+          ? JSON.stringify({ allowCompatibleUpgrade: true })
+          : undefined,
       }),
     finaliseReport: (id) =>
       request(`/reports/${encodeURIComponent(id)}/finalise`, {
@@ -715,6 +719,13 @@ function recordByPeriod(reports, reportType, periodStart) {
       reportPeriodKey(report) === periodStart,
   );
   return matches.find((report) => report.status !== "archived") || matches[0] || null;
+}
+
+function isUpgradeableDraft(run) {
+  return run?.status === "draft" &&
+    run.metric_definition_version === "claims-reporting-metrics-v2" &&
+    run.report_schema_version === "scout-report-v2" &&
+    run.serving_report_engine_version === "claims-report-engine-v3";
 }
 
 export function latestReportPeriodStart(reports, reportType, now = new Date()) {
@@ -932,8 +943,13 @@ export class ReportsController {
     const type = this.state.activeTab;
     if (!this.api || !["weekly", "monthly"].includes(type)) return;
     if (this.isSyntheticQa()) return this.blockSyntheticMutation();
+    const existing = recordByPeriod(this.state.reports, type, this.state.periodStarts[type]);
+    const upgrade = isUpgradeableDraft(existing);
+    if (upgrade && !(await this.confirm("upgrade"))) return;
     await this.perform("Generating report…", () =>
-      this.api.generateReport(type, this.state.periodStarts[type]),
+      this.api.generateReport(type, this.state.periodStarts[type], {
+        allowCompatibleUpgrade: upgrade,
+      }),
     );
   }
 
@@ -941,8 +957,11 @@ export class ReportsController {
     const id = this.state.selected?.id;
     if (!id) return;
     if (this.isSyntheticQa()) return this.blockSyntheticMutation();
-    if (!(await this.confirm("regenerate"))) return;
-    await this.perform("Regenerating…", () => this.api.regenerateReport(id));
+    const upgrade = isUpgradeableDraft(this.state.selected);
+    if (!(await this.confirm(upgrade ? "upgrade" : "regenerate"))) return;
+    await this.perform("Regenerating…", () => this.api.regenerateReport(id, {
+      allowCompatibleUpgrade: upgrade,
+    }));
   }
 
   async finalise() {
@@ -1000,7 +1019,7 @@ export class ReportsController {
 
   confirm(action) {
     const backdrop = this.document?.getElementById("report-confirm-backdrop");
-    if (!backdrop) return Promise.resolve(true);
+    if (!backdrop) return Promise.resolve(action !== "upgrade");
     const title = this.document.getElementById("report-confirm-title");
     const body = this.document.getElementById("report-confirm-body");
     const confirmButton = this.document.getElementById("report-confirm-submit");
@@ -1019,6 +1038,11 @@ export class ReportsController {
         "Regenerate this draft?",
         "This replaces the draft snapshot with the latest accepted historical evidence from the reporting service.",
         "Regenerate",
+      ],
+      upgrade: [
+        "Upgrade this draft to the current report engine?",
+        "This replaces the older draft snapshot using the current report rules and accepted historical evidence. The draft can be reviewed again before finalising.",
+        "Upgrade Draft",
       ],
     }[action];
     if (!copy) return Promise.resolve(false);
