@@ -28,26 +28,30 @@ import {
 } from "./reporting-domain/history.mjs";
 import {
   buildReportSnapshot,
-  extractObservationInstant,
   previousReportingPeriod,
+  reportEvidencePlan,
   reportScopeKey,
   reportingPeriod,
   REPORTING_DOMAIN,
   REPORTING_METRIC_VERSION,
   REPORTING_QUALITY_VERSION,
   REPORT_SCHEMA_VERSION,
-  selectBoundaryExtract,
 } from "./reporting-domain/reporting-metrics.mjs";
 import {
   canArchiveReport,
   canFinaliseReport,
   canRegenerateReport,
   reportActionAllowed,
+  reportFinalisationCompatibility,
+  reportRegenerationCompatibility,
+  REPORT_ENGINE_VERSION,
 } from "./reporting-domain/report-lifecycle.mjs";
 import {
   PDF_RENDERER_VERSION,
   PDF_TEMPLATE_VERSION,
   renderClaimsReportHtml,
+  renderClaimsReportPdfFooterTemplate,
+  renderClaimsReportPdfHeaderTemplate,
   reportPdfFilename,
 } from "./reporting-domain/claims-report-pdf.mjs";
 import {
@@ -74,6 +78,7 @@ import {
   persistHistoryEvidenceWithStore,
   HISTORY_BATCH_SIZE,
 } from "./reporting-domain/history-persistence.mjs";
+import { resolveScoutHandler } from "./reporting-domain/roles.mjs";
 import {
   corsHeaders,
   isApprovedPreviewRead,
@@ -299,6 +304,25 @@ async function updateHistoryManifest(env, id, patch) {
   );
 }
 
+// The reporting roster (who is an active handler, the claims manager, the claims
+// administrator or a former handler) is data in scout_settings, never names in
+// code. A missing row is normal (cards then derive from SCOUT user roles and the
+// report says so); a failed lookup is reported as its own warning.
+async function getReportingRoster(env) {
+  try {
+    const rows = await supabase(
+      env,
+      "/scout_settings?id=eq.reporting_roster&select=value&limit=1",
+      "GET",
+      null,
+      true,
+    );
+    return { roster: rows?.[0]?.value ?? null, unavailable: false };
+  } catch {
+    return { roster: null, unavailable: true };
+  }
+}
+
 async function getActiveHistoryUsers(env) {
   try {
     return {
@@ -466,6 +490,7 @@ export function historicalManifestRecord({
   correctionOfExtractId,
 }) {
   const sourceEffectiveAt = exactEffectiveAt(effectiveAt);
+  const effectiveDateBasis = sourceMetadata?.effective_date_basis || null;
   return {
     source_system: DEFAULT_SOURCE_SYSTEM,
     source_file_name: fileName || "cardinal-extract.xlsx",
@@ -477,7 +502,9 @@ export function historicalManifestRecord({
     effective_precision: sourceEffectiveAt
       ? "exact_timestamp"
       : extractDate
-        ? "source_date"
+        ? effectiveDateBasis === "upload_received_date"
+          ? "unknown"
+          : "source_date"
         : "unknown",
     received_at: receivedAt,
     uploaded_by_email: currentUser.email,
@@ -1648,72 +1675,57 @@ async function loadReportEvidence(env, { reportType, periodStart, scope }) {
   const period = reportingPeriod(reportType, periodStart);
   const previous = previousReportingPeriod(reportType, periodStart);
   const manifests = await getAcceptedReportManifests(env);
-  const currentOpening = selectBoundaryExtract(manifests, period.start, {
+  // The previous-period comparison is the previous report as it would be
+  // generated for that period, so it loads its OWN extract set (boundaries and
+  // lifecycle chain). Loading only the current period's set left the previous
+  // period's baseline extract out, so its first in-period extract diffed against
+  // an empty baseline.
+  const plan = reportEvidencePlan(manifests, {
+    reportType,
+    periodStart,
     scope,
   });
-  const currentClosing = selectBoundaryExtract(manifests, period.end, {
-    scope,
-  });
-  const previousOpening = selectBoundaryExtract(manifests, previous.start, {
-    scope,
-  });
-  const previousClosing = selectBoundaryExtract(manifests, previous.end, {
-    scope,
-  });
-  const selectedIds = new Set(
-    [
-      currentOpening.manifest,
-      currentClosing.manifest,
-      previousOpening.manifest,
-      previousClosing.manifest,
-    ]
-      .filter(Boolean)
-      .map((manifest) => manifest.id),
-  );
-  for (const manifest of manifests) {
-    const instant = extractObservationInstant(manifest);
-    if (
-      instant &&
-      instant >= previous.start &&
-      instant <= period.end &&
-      manifest.source_metadata?.portfolio_scope ===
-        (scope.portfolio_scope ?? manifest.source_metadata?.portfolio_scope)
-    ) {
-      selectedIds.add(manifest.id);
-    }
-  }
   const entries = await Promise.all(
-    [...selectedIds].map(async (extractId) => [
-      extractId,
-      await getHistorySnapshots(env, extractId),
-    ]),
+    [...new Set([...plan.current, ...plan.previous])].map(
+      async (extractId) => [
+        extractId,
+        await getHistorySnapshots(env, extractId),
+      ],
+    ),
   );
-  const snapshotsByExtract = new Map(entries);
+  const loaded = new Map(entries);
+  const pick = (ids) => new Map([...ids].map((id) => [id, loaded.get(id)]));
+  const snapshotsByExtract = pick(plan.current);
+  const previousSnapshotsByExtract = pick(plan.previous);
   const changes = await getHistoryChangesForRange(
     env,
     previous.start,
     period.end,
   );
   const activeUsers = await getActiveHistoryUsers(env);
-  const configurationWarnings = activeUsers.unavailable
-    ? ["user_lookup_unavailable"]
-    : [];
+  const reportingRoster = await getReportingRoster(env);
+  const configurationWarnings = [
+    ...(activeUsers.unavailable ? ["user_lookup_unavailable"] : []),
+    ...(reportingRoster.unavailable ? ["reporting_roster_unavailable"] : []),
+  ];
   const shared = {
     manifests,
-    snapshotsByExtract,
     changes,
     activeUsers: activeUsers.users,
+    handlerRoster: reportingRoster.roster,
     scope,
     configurationWarnings,
   };
   const previousReport = buildReportSnapshot({
     reportType,
     periodStart: previous.startLocalDate,
+    snapshotsByExtract: previousSnapshotsByExtract,
     ...shared,
   });
   const report = buildReportSnapshot({
     reportType,
     periodStart,
+    snapshotsByExtract,
     previousSnapshot: previousReport,
     ...shared,
   });
@@ -1811,7 +1823,7 @@ function publicReportRun(run) {
     archived_by_user_id: _archivedByUserId,
     ...safe
   } = run;
-  return safe;
+  return { ...safe, serving_report_engine_version: REPORT_ENGINE_VERSION };
 }
 
 function publicHistoryManifest(manifest) {
@@ -1859,6 +1871,79 @@ function maskClaim(claim, role) {
     };
   }
   return claim;
+}
+
+function nullableCurrentNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function nullableCurrentDate(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const text = String(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  // Excel's empty date (1899-12-31 / 1900-01-01) means "no date".
+  return Number(text.slice(0, 4)) <= 1900 ? null : text;
+}
+
+function nullableCurrentText(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  return text || null;
+}
+
+export function buildCurrentStateClaimRecord(
+  claim,
+  extractDate,
+  users = [],
+) {
+  const handlerSource =
+    claim?.handlerRaw ?? claim?.handler ?? claim?.handlerEmail ?? "";
+  const handlerResolution = resolveScoutHandler(users, handlerSource);
+  const resolvedHandler = handlerResolution.user;
+  return {
+    handlerResolution: handlerResolution.status,
+    handlerSource: String(handlerSource || "").trim(),
+    record: {
+      extract_date: extractDate,
+      claim_no: claim?.claimNo || "",
+      handler_email: resolvedHandler?.email || "",
+      handler_name:
+        resolvedHandler?.displayName || claim?.handler || handlerSource || "",
+      insured_name: claim?.insured || "",
+      insured_masked: maskName(claim?.insured || ""),
+      status: claim?.status || "",
+      age_days: nullableCurrentNumber(claim?.workingAge ?? claim?.age),
+      cardinal_age_days: nullableCurrentNumber(
+        claim?.cardinalAge ?? claim?.age,
+      ),
+      peril: claim?.peril || "",
+      peril_type: claim?.perilType || "",
+      insurer: claim?.insurer || "",
+      outstanding: nullableCurrentNumber(claim?.outstanding),
+      estimate: nullableCurrentNumber(claim?.estimate),
+      paid: nullableCurrentNumber(claim?.paid),
+      description: claim?.description || "",
+      dol: nullableCurrentDate(claim?.dolDate ?? claim?.dol),
+      registered_date: nullableCurrentDate(
+        claim?.registeredDate ?? claim?.registered,
+      ),
+      repudiation_date: nullableCurrentDate(claim?.repudiationDate),
+      last_updated: nullableCurrentDate(
+        claim?.lastUpdated ?? claim?.lastMovementDate,
+      ),
+      last_updated_source: nullableCurrentText(claim?.lastUpdatedSource),
+      settled_date: nullableCurrentDate(claim?.settledDate),
+      ingestion_quality_flags: Array.isArray(claim?.ingestionQualityFlags)
+        ? [...new Set(claim.ingestionQualityFlags)]
+        : [],
+      comments: claim?.comments || "",
+      priority_score: nullableCurrentNumber(claim?.priority?.score) ?? 0,
+      priority_flags: claim?.priority?.flags || [],
+      recommended_action: claim?.priority?.action || "",
+    },
+  };
 }
 
 // ── Microsoft token verification ─────────────────────────────
@@ -2502,28 +2587,19 @@ export default {
         // Insert new claims in batches of 200
         const batchSize = 200;
         for (let i = 0; i < claims.length; i += batchSize) {
-          const batch = claims.slice(i, i + batchSize).map((c) => {
-            const handlerEmail = resolveEmail(c.handler, handlerDirectory);
-            if (c.handler && !handlerEmail) unresolvedHandlers.add(c.handler);
-            return {
-              extract_date: date,
-              claim_no: c.claimNo || "",
-              handler_email: handlerEmail,
-              handler_name: c.handler || "",
-              insured_name: c.insured || "",
-              insured_masked: maskName(c.insured || ""),
-              status: c.status || "",
-              age_days: c.age || 0,
-              peril: c.peril || "",
-              peril_type: c.perilType || "",
-              insurer: c.insurer || "",
-              outstanding: c.outstanding || 0,
-              description: c.description || "",
-              comments: c.comments || "",
-              priority_score: c.priority?.score || 0,
-              priority_flags: c.priority?.flags || [],
-              recommended_action: c.priority?.action || "",
-            };
+          const batch = claims.slice(i, i + batchSize).map((claim) => {
+            const mapped = buildCurrentStateClaimRecord(
+              claim,
+              date,
+              handlerDirectory,
+            );
+            if (
+              mapped.handlerSource &&
+              ["unrecognised", "ambiguous"].includes(mapped.handlerResolution)
+            ) {
+              unresolvedHandlers.add(mapped.handlerSource);
+            }
+            return mapped.record;
           });
           await supabase(env, "/scout_claims", "POST", batch, true);
         }
@@ -3180,7 +3256,7 @@ export default {
           env,
           "/scout_report_runs?domain=eq." +
             encodeURIComponent(REPORTING_DOMAIN) +
-            "&select=id,domain,report_type,period_start,period_end,time_zone,status,scope,coverage_status,coverage_metadata,metric_definition_version,claims_rule_version,quality_rule_version,report_schema_version,opening_extract_id,closing_extract_id,generated_at,generated_by,regeneration_count,created_at,updated_at,finalised_at,finalised_by,archived_at,archived_by&order=period_start.desc",
+            "&select=id,domain,report_type,period_start,period_end,time_zone,status,scope,coverage_status,coverage_metadata,metric_definition_version,claims_rule_version,quality_rule_version,report_schema_version,finalised_engine_version,opening_extract_id,closing_extract_id,generated_at,generated_by,regeneration_count,created_at,updated_at,finalised_at,finalised_by,archived_at,archived_by&order=period_start.desc",
           true,
         );
         await audit(env, currentUser.email, currentUser.name, "list_reports", {
@@ -3217,6 +3293,14 @@ export default {
           );
         if (existing?.status === "archived")
           return err("Archived report cannot be regenerated", 409);
+        if (existing) {
+          const compatibility = reportRegenerationCompatibility(
+            existing,
+            { metric_definition_version: REPORTING_METRIC_VERSION, report_schema_version: REPORT_SCHEMA_VERSION },
+            body.allowCompatibleUpgrade === true,
+          );
+          if (!compatibility.allowed) return err(compatibility.message, 409);
+        }
         const { report } = await loadReportEvidence(env, {
           reportType,
           periodStart: body.periodStart,
@@ -3318,6 +3402,21 @@ export default {
         if (!existing) return err("Report not found", 404);
         if (!canRegenerateReport(existing.status))
           return err("Only draft reports may be regenerated", 409);
+        const requestBody = await request.text();
+        let options = {};
+        if (requestBody) {
+          try {
+            options = JSON.parse(requestBody);
+          } catch {
+            return err("Invalid regeneration options", 422);
+          }
+        }
+        const compatibility = reportRegenerationCompatibility(
+          existing,
+          { metric_definition_version: REPORTING_METRIC_VERSION, report_schema_version: REPORT_SCHEMA_VERSION },
+          options?.allowCompatibleUpgrade === true,
+        );
+        if (!compatibility.allowed) return err(compatibility.message, 409);
         const scope = reportScopeFromRequest(existing.scope);
         const { report } = await loadReportEvidence(env, {
           reportType: existing.report_type,
@@ -3372,6 +3471,11 @@ export default {
             report: await publicReportWithWorkflow(env, existing),
             idempotent: true,
           });
+        const compatibility = reportFinalisationCompatibility(existing, {
+          metric_definition_version: REPORTING_METRIC_VERSION,
+          report_schema_version: REPORT_SCHEMA_VERSION,
+        });
+        if (!compatibility.allowed) return err(compatibility.message, 409);
         const workflowSnapshot = await syncReportWorkflowSnapshots(
           env,
           reportId,
@@ -3386,6 +3490,7 @@ export default {
             finalised_at: now,
             finalised_by: currentUser.email,
             finalised_by_user_id: currentUser.id || null,
+            finalised_engine_version: REPORT_ENGINE_VERSION,
             updated_at: now,
           },
           true,
@@ -3467,10 +3572,27 @@ export default {
           },
         );
         const html = renderClaimsReportHtml(run, workflow);
+        const headerTemplate = renderClaimsReportPdfHeaderTemplate(
+          run,
+          workflow,
+        );
+        const footerTemplate = renderClaimsReportPdfFooterTemplate();
         const rendered = await env.BROWSER.quickAction("pdf", {
           html,
           pdfOptions: {
             printBackground: true,
+            format: "a4",
+            landscape: true,
+            preferCSSPageSize: true,
+            displayHeaderFooter: true,
+            headerTemplate,
+            footerTemplate,
+            margin: {
+              top: "14mm",
+              right: "12mm",
+              bottom: "15mm",
+              left: "12mm",
+            },
           },
         });
         if (!(rendered instanceof Response))
@@ -3485,17 +3607,25 @@ export default {
           );
         }
         const pdf = rendered;
-        const headers = new Headers(pdf.headers);
+        const pdfHeaders = new Headers(pdf.headers);
+        for (const key of [...pdfHeaders.keys()]) {
+          if (key.toLowerCase().startsWith("access-control-")) {
+            pdfHeaders.delete(key);
+          }
+        }
+        for (const [key, value] of Object.entries(headers)) {
+          pdfHeaders.set(key, value);
+        }
         const exportedAt = new Date().toISOString();
-        headers.set("Content-Type", "application/pdf");
-        headers.set(
+        pdfHeaders.set("Content-Type", "application/pdf");
+        pdfHeaders.set(
           "Content-Disposition",
           `attachment; filename="${reportPdfFilename(run)}"`,
         );
-        headers.set("Cache-Control", "no-store");
-        headers.set("X-Scout-Report-Exported-At", exportedAt);
-        headers.set("X-Scout-PDF-Template-Version", PDF_TEMPLATE_VERSION);
-        headers.set("X-Scout-PDF-Renderer-Version", PDF_RENDERER_VERSION);
+        pdfHeaders.set("Cache-Control", "no-store");
+        pdfHeaders.set("X-Scout-Report-Exported-At", exportedAt);
+        pdfHeaders.set("X-Scout-PDF-Template-Version", PDF_TEMPLATE_VERSION);
+        pdfHeaders.set("X-Scout-PDF-Renderer-Version", PDF_RENDERER_VERSION);
         await audit(
           env,
           currentUser.email,
@@ -3510,7 +3640,10 @@ export default {
             renderer_version: PDF_RENDERER_VERSION,
           },
         );
-        return new Response(pdf.body, { status: pdf.status, headers });
+        return new Response(pdf.body, {
+          status: pdf.status,
+          headers: pdfHeaders,
+        });
       } catch (e) {
         await audit(
           env,
@@ -3661,61 +3794,3 @@ export default {
     return err("Not found", 404);
   },
 };
-
-// ── Handler email resolution ─────────────────────────────────
-// Handler identity is sourced from the active Scout user directory. No
-// individual production names or email addresses are embedded in the Worker.
-function handlerIdentityKey(value) {
-  return String(value || "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "");
-}
-
-function handlerIdentityTokens(value) {
-  return String(value || "")
-    .normalize("NFKC")
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
-    .filter(Boolean)
-    .sort()
-    .join("|");
-}
-
-function handlerIdentityFirstToken(value) {
-  return (
-    String(value || "")
-      .normalize("NFKC")
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter(Boolean)[0] || ""
-  );
-}
-
-function resolveEmail(handlerName, users = []) {
-  const targetKey = handlerIdentityKey(handlerName);
-  const targetTokens = handlerIdentityTokens(handlerName);
-  if (!targetKey) return "";
-  const candidates = users.filter(
-    (user) => user?.active !== false && user?.email,
-  );
-  const exact = candidates.filter((user) =>
-    [user.display_name, user.email].some(
-      (value) => handlerIdentityKey(value) === targetKey,
-    ),
-  );
-  if (exact.length === 1) return String(exact[0].email).toLowerCase();
-
-  const reordered = candidates.filter(
-    (user) => handlerIdentityTokens(user.display_name) === targetTokens,
-  );
-  if (reordered.length === 1) return String(reordered[0].email).toLowerCase();
-
-  const firstToken = handlerIdentityFirstToken(handlerName);
-  const firstNameMatches = candidates.filter(
-    (user) => handlerIdentityFirstToken(user.display_name) === firstToken,
-  );
-  return firstNameMatches.length === 1
-    ? String(firstNameMatches[0].email).toLowerCase()
-    : "";
-}

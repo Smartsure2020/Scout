@@ -5,6 +5,9 @@ import {
   canFinaliseReport,
   canRegenerateReport,
   reportActionAllowed,
+  reportFinalisationCompatibility,
+  reportRegenerationCompatibility,
+  REPORT_ENGINE_VERSION,
   reportSnapshotMutable,
 } from "./report-lifecycle.mjs";
 
@@ -41,4 +44,51 @@ test("archived lifecycle cannot be regenerated or changed back", () => {
   assert.equal(canFinaliseReport("archived"), false);
   assert.equal(canArchiveReport("archived"), true);
   assert.equal(reportSnapshotMutable("archived"), false);
+});
+
+const v2 = {
+  metric_definition_version: "claims-reporting-metrics-v2",
+  report_schema_version: "scout-report-v2",
+};
+const v3 = {
+  metric_definition_version: "claims-reporting-metrics-v3",
+  report_schema_version: "scout-report-v3",
+};
+
+test("a v2 engine cannot regenerate a v3 draft, while same-version regeneration works", () => {
+  assert.equal(reportRegenerationCompatibility(v3, v2).allowed, false);
+  assert.match(
+    reportRegenerationCompatibility(v3, v2).message,
+    /newer or incompatible/,
+  );
+  assert.equal(reportRegenerationCompatibility(v3, v3).allowed, true);
+  assert.equal(reportRegenerationCompatibility(v2, v2).allowed, true);
+});
+
+test("v2 to v3 draft upgrade needs explicit permission and unknown pairs fail closed", () => {
+  assert.equal(reportRegenerationCompatibility(v2, v3).allowed, false);
+  assert.equal(reportRegenerationCompatibility(v2, v3, true).allowed, true);
+  assert.equal(
+    reportRegenerationCompatibility(
+      { ...v3, report_schema_version: "unknown" },
+      v3,
+      true,
+    ).allowed,
+    false,
+  );
+  assert.equal(
+    reportRegenerationCompatibility(
+      v3,
+      { ...v3, metric_definition_version: "unknown" },
+      true,
+    ).allowed,
+    false,
+  );
+});
+
+test("Finalise requires this serving engine's exact metric/schema pair", () => {
+  assert.equal(REPORT_ENGINE_VERSION, "claims-report-engine-v3");
+  assert.equal(reportFinalisationCompatibility(v3, v3).allowed, true);
+  assert.equal(reportFinalisationCompatibility(v2, v3).allowed, false);
+  assert.equal(reportFinalisationCompatibility(v3, v2).allowed, false);
 });

@@ -255,6 +255,20 @@ test("SLA states distinguish on-track, stale, critical, unknown, and unmapped", 
   );
 });
 
+test("SLA age is total claim working age from registration, not time since movement", () => {
+  const result = evaluateSla(
+    {
+      status: "Registered",
+      registeredDate: "2026-09-01",
+      movementDate: "2026-09-29",
+    },
+    { asOfDate: "2026-09-30" },
+  );
+  assert.ok(result.workingAge > 2);
+  assert.equal(result.state, "breached");
+  assert.equal(result.classification, "critical");
+});
+
 test("movement boundaries preserve exact greater-than semantics", () => {
   assert.equal(
     evaluateMovement({ status: "Registered", daysSinceMovement: 14 }).over14,
@@ -371,6 +385,28 @@ test("zero-estimate and value-conflict rules preserve current claims-page cases"
   });
   assert.equal(evaluation.valueConflicts.outstandingExceedsEstimateBy50, true);
   assert.equal(evaluation.valueConflicts.estimateWithoutOutstanding, false);
+});
+
+test("missing financial values do not become explicit zero-value exceptions", () => {
+  const missing = {
+    status: "Registered",
+    workingAge: 20,
+    estimate: null,
+    outstanding: null,
+    paid: null,
+  };
+  assert.equal(isZeroEstimateAnomaly(missing), false);
+  assert.equal(getReadyToCloseCandidate({
+    ...missing,
+    status: "Payment Requested",
+    workingAge: 35,
+  }), null);
+  assert.equal(
+    evaluatePriority(missing).flags.some((flag) =>
+      ["active_zero_estimate", "outstanding_without_estimate", "zero_value_claim"].includes(flag.code),
+    ),
+    false,
+  );
 });
 
 test("operational categories cover overdue parties, legal/recovery, NFO, fraud, and repudiation", () => {

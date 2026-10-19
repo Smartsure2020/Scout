@@ -297,6 +297,28 @@ const TERMINAL_STATUS_NAMES = [
   "Ex Gratia - Finalized",
   "Not Taken Up",
   "Knock for Knock Settled",
+  // Added 2026-10-05 after auditing every Claims Status string across the real Cardinal
+  // workbooks. Exact strings only (no "contains closed" matching): each states a final
+  // outcome. PARITY: "Settled - TP approach pending" was already terminal on the claims page.
+  "Settled - TP approach pending",
+  "Settled repudiated",
+  "Settled within excess",
+  "Settled no claim from client/claim withdrawn/NTU",
+  "Settled Full Recovery",
+  "Settled Duplicated",
+  "Settled partial recovery made",
+  "Settled File Closed",
+  "Settled no claim from client",
+  "Settled OD and TP claim paid",
+  "Settled – Partial Repudiation",
+  "Settled each party bears own costs",
+  "Settled TP claim repudiated",
+  "Settled no claim/no cover/no peril",
+  "Settled TP claim Paid",
+  "Settled OD paid TP claim repudiated",
+  "Settled No TP claim made",
+  "Settled – Ex Gratia",
+  "Closed - Notification Only",
 ];
 
 export const TERMINAL_STATUSES = Object.freeze(
@@ -309,6 +331,41 @@ export function getStatusRule(status) {
 
 export function isTerminalStatus(status) {
   return TERMINAL_STATUSES.has(normalizeStatus(status));
+}
+
+// Reporting-only classification (management decision 2026-10-05): "Repudiated"
+// is a closure for the weekly / monthly report. The claims page and briefings
+// deliberately keep it on the worklist (270-day close-or-escalate reminders),
+// so this does NOT change isTerminalStatus. Other repudiation workflow statuses
+// (for example "Repudiated - Awaiting Closure") remain open.
+export const REPORTING_TERMINAL_STATUS_OVERRIDES = Object.freeze(
+  new Set(["repudiated"]),
+);
+
+export function isReportingTerminalStatus(status) {
+  const normalized = normalizeStatus(status);
+  return (
+    TERMINAL_STATUSES.has(normalized) ||
+    REPORTING_TERMINAL_STATUS_OVERRIDES.has(normalized)
+  );
+}
+
+export function isPaymentRelatedStatus(status) {
+  return getStatusRule(status)?.category === "payment";
+}
+
+/**
+ * "Payment status with zero estimate": the claim is open, its status is
+ * payment-related (canonical status category "payment") AND its estimate is
+ * known and exactly zero. A missing estimate is not a zero estimate.
+ */
+export function isPaymentZeroEstimate(claim) {
+  if (isTerminalStatus(claim?.status)) return false;
+  if (!isPaymentRelatedStatus(claim?.status)) return false;
+  const estimate = claim?.estimate;
+  if (estimate === null || estimate === undefined || estimate === "") return false;
+  const number = Number(estimate);
+  return Number.isFinite(number) && number === 0;
 }
 
 export function isOpenStatus(status) {
@@ -332,6 +389,7 @@ export function getStatusEvaluation(status) {
 }
 
 function finiteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -482,7 +540,7 @@ export function getReadyToCloseCandidate(claim) {
   if (isTerminalStatus(claim?.status) && !status.startsWith("settled"))
     return null;
   const age = finiteNumber(claim?.workingAge ?? claim?.age) ?? 0;
-  const estimate = finiteNumber(claim?.estimate) ?? 0;
+  const estimate = finiteNumber(claim?.estimate);
   const recoveryPending = hasRecoveryPending(claim);
   if (status === "repudiated - awaiting closure" && age > 7) {
     return {
@@ -556,9 +614,9 @@ export function getReadyToCloseCandidate(claim) {
 export function isZeroEstimateAnomaly(claim) {
   if (isTerminalStatus(claim?.status)) return false;
   const rule = getStatusRule(claim?.status);
-  const estimate = finiteNumber(claim?.estimate) ?? 0;
-  const outstanding = finiteNumber(claim?.outstanding) ?? 0;
-  const paid = finiteNumber(claim?.paid) ?? 0;
+  const estimate = finiteNumber(claim?.estimate);
+  const outstanding = finiteNumber(claim?.outstanding);
+  const paid = finiteNumber(claim?.paid);
   if (estimate !== 0) return false;
   if (outstanding > 0) return true;
   if (!rule) return outstanding === 0 && paid === 0;
@@ -569,8 +627,8 @@ export function isZeroEstimateAnomaly(claim) {
 }
 
 export function evaluateValueConflicts(claim) {
-  const estimate = finiteNumber(claim?.estimate) ?? 0;
-  const outstanding = finiteNumber(claim?.outstanding) ?? 0;
+  const estimate = finiteNumber(claim?.estimate);
+  const outstanding = finiteNumber(claim?.outstanding);
   return {
     estimateWithoutOutstanding: estimate > 0 && outstanding === 0,
     outstandingExceedsEstimateBy50:
@@ -633,7 +691,7 @@ export function evaluateMandateAndRisk(claim) {
       risk: false,
     };
   const normalized = status.normalizedStatus;
-  const outstanding = finiteNumber(claim?.outstanding) ?? 0;
+  const outstanding = finiteNumber(claim?.outstanding);
   const highValue = outstanding >= MANDATE_THRESHOLD;
   const mandate =
     status.category === "mandate" ||
@@ -672,8 +730,8 @@ export function evaluatePriority(claim) {
   const rule = getStatusRule(claim?.status);
   const age = finiteNumber(claim?.workingAge ?? claim?.age) ?? 0;
   const movementDays = finiteNumber(claim?.daysSinceMovement);
-  const estimate = finiteNumber(claim?.estimate) ?? 0;
-  const outstanding = finiteNumber(claim?.outstanding) ?? 0;
+  const estimate = finiteNumber(claim?.estimate);
+  const outstanding = finiteNumber(claim?.outstanding);
   const flags = [];
   let score = 0;
   let tier1 = 0;

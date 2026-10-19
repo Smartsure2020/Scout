@@ -83,6 +83,15 @@ test("consensusValue distinguishes agree / partial / disagree / all_missing", ()
   assert.equal(allMissing.value, null);
 });
 
+test("consensusValue treats spreadsheet floating-point residue as zero", () => {
+  const result = consensusValue(
+    [{ outstanding: -2.3283064365386963e-10 }, { outstanding: 0 }],
+    "outstanding",
+  );
+  assert.equal(result.status, "agree");
+  assert.equal(result.value, -2.3283064365386963e-10);
+});
+
 test("detectParentIdentityConflict: missing vs populated is incomplete, not conflict", () => {
   const rows = [
     row({ insured: "ABC Ltd" }),

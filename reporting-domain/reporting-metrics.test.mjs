@@ -4,6 +4,7 @@ import {
   buildReportSnapshot,
   metricPopulationForSnapshot,
   previousReportingPeriod,
+  reportEvidencePlan,
   reportingPeriod,
   selectAuthoritativeManifests,
   selectBoundaryExtract,
@@ -247,6 +248,16 @@ test("weekly period is Monday inclusive through Saturday exclusive", () => {
   assert.equal(period.endLocalDateExclusive, "2026-08-29");
   assert.equal(period.start.toISOString(), "2026-08-23T22:00:00.000Z");
   assert.equal(period.end.toISOString(), "2026-08-28T22:00:00.000Z");
+});
+
+test("persisted UTC period starts round-trip through the business timezone", () => {
+  const period = reportingPeriod("weekly", "2026-09-27T22:00:00.000Z");
+  assert.equal(period.startLocalDate, "2026-09-28");
+  assert.equal(period.endLocalDateExclusive, "2026-10-03");
+  assert.equal(
+    previousReportingPeriod("weekly", "2026-09-27T22:00:00.000Z").startLocalDate,
+    "2026-09-21",
+  );
 });
 
 test("monthly period uses local calendar boundaries and month length", () => {
@@ -697,18 +708,23 @@ test("ageing distribution reconciles to closing open inventory", () => {
   assert.equal(report.metrics.open_claims_91_plus.value, 1);
 });
 
-test("60 plus includes the exact 60-day boundary without changing ageing bands", () => {
-  const data = week1Evidence();
-  const closingRows = data.snapshotsByExtract.get("extract-closing");
-  closingRows.find((row) => row.claim_id === "C").calendar_age = 60;
-  const report = buildReportSnapshot({
-    reportType: "weekly",
-    periodStart: "2026-08-24",
-    ...data,
-  });
-  assert.equal(report.metrics.open_claims_60_plus.value, 1);
-  assert.equal(report.metrics.ageing_distribution.value["31-60"], 1);
-  assert.equal(report.metrics.ageing_distribution.value["91+"], 0);
+test("Over 60 is strictly more than 60 days and matches the 61-90 and 91+ bands", () => {
+  const build = (age) => {
+    const data = week1Evidence();
+    data.snapshotsByExtract
+      .get("extract-closing")
+      .find((row) => row.claim_id === "C").calendar_age = age;
+    return buildReportSnapshot({ reportType: "weekly", periodStart: "2026-08-24", ...data });
+  };
+  const sixty = build(60);
+  assert.equal(sixty.metrics.open_claims_60_plus.value, 0, "exactly 60 days is not over 60");
+  assert.equal(sixty.metrics.ageing_distribution.value["31-60"], 1);
+  const sixtyOne = build(61);
+  assert.equal(sixtyOne.metrics.open_claims_60_plus.value, 1, "61 days is over 60");
+  assert.equal(sixtyOne.metrics.ageing_distribution.value["61-90"], 1);
+  assert.equal(sixtyOne.metrics.ageing_distribution.value["91+"], 0);
+  const bands = sixtyOne.metrics.ageing_distribution.value;
+  assert.equal(sixtyOne.metrics.open_claims_60_plus.value, bands["61-90"] + bands["91+"]);
 });
 
 test("SLA excludes unmapped statuses from the denominator and handles breaches", () => {
@@ -781,18 +797,29 @@ test("movement, Ready to Close, operational, financial, and dynamic handler metr
     report.metrics.payment_requested_events.availability,
     "unavailable",
   );
-  const handlers = report.metrics.handler_performance.value.handlers;
+  // Handler reporting is the scorecard model only; the legacy handler_performance
+  // metric is no longer written (see handler-performance-v3.test.mjs).
+  const scorecards = report.metrics.handler_scorecards.value;
   assert.deepEqual(
-    handlers.map((handler) => [handler.handler_id, handler.open_claims]),
+    scorecards.cards
+      .filter((card) => card.role === "handler")
+      .map((card) => [card.label, card.gross_registered]),
     [
-      ["handler-1", 1],
-      ["handler-2", 2],
+      ["Handler One", 1],
+      ["Handler Two", 2],
     ],
   );
-  assert.equal(
-    report.metrics.handler_performance.value.unassigned_unresolved.count,
-    1,
+  assert.deepEqual(
+    scorecards.cards
+      .filter((card) => card.role === "unrecognised")
+      .map((card) => [card.label, card.gross_registered]),
+    [["Unknown Person", 1]],
   );
+  assert.equal(
+    scorecards.totals.gross_registered,
+    report.metrics.closing_inventory.value,
+  );
+  assert.equal("handler_performance" in report.metrics, false);
 });
 
 test("first observed remains distinct when registration date is unavailable", () => {
@@ -849,7 +876,9 @@ test("assignment activity is observed and does not substitute current ownership"
     ["A"],
   );
   assert.equal(
-    report.metrics.handler_performance.value.handlers[0].open_claims,
+    report.metrics.handler_scorecards.value.cards.find(
+      (card) => card.label === "Handler One",
+    ).gross_registered,
     1,
   );
 });
@@ -1060,4 +1089,118 @@ test("report generation is deterministic for the same historical evidence", () =
   assert.deepEqual(first.metrics, second.metrics);
   assert.deepEqual(first.coverage, second.coverage);
   assert.deepEqual(first.claim_rows, second.claim_rows);
+});
+
+test("comparisons never diff an unavailable metric against a real previous value", () => {
+  const previousSnapshot = {
+    metrics: {
+      // Previous period HAD observed assignment changes ...
+      assignment_activity: { value: 4, availability: "available" },
+      // ... and this one was unavailable (a numeric placeholder, not a real 0).
+      closing_inventory: { value: 0, availability: "unavailable" },
+      opening_inventory: { value: 2, availability: "available" },
+    },
+  };
+  const data = week1Evidence();
+  data.changes = [];
+  const report = buildReportSnapshot({
+    reportType: "weekly",
+    periodStart: "2026-08-24",
+    ...data,
+    previousSnapshot,
+  });
+  // No change rows exist in this period, so the current value is unavailable.
+  assert.equal(report.metrics.assignment_activity.availability, "unavailable");
+  const assignment = report.comparisons.assignment_activity;
+  assert.equal(assignment.absolute_delta, null);
+  assert.equal(assignment.percentage_delta, null);
+  assert.equal(assignment.current, null);
+  assert.equal(assignment.direction, "unavailable");
+  assert.equal(assignment.unavailable_reason, "current_unavailable");
+
+  // Previous unavailable: no numeric comparison either.
+  const closing = report.comparisons.closing_inventory;
+  assert.equal(report.metrics.closing_inventory.availability, "available");
+  assert.equal(closing.previous, null);
+  assert.equal(closing.absolute_delta, null);
+  assert.equal(closing.direction, "unavailable");
+  assert.equal(closing.unavailable_reason, "previous_unavailable");
+
+  // Both available: the numeric comparison is unchanged.
+  const opening = report.comparisons.opening_inventory;
+  assert.equal(opening.previous, 2);
+  assert.equal(opening.absolute_delta, report.metrics.opening_inventory.value - 2);
+  assert.equal(opening.direction, "increase");
+  assert.equal(opening.unavailable_reason, undefined);
+});
+
+test("previous-period comparison loads its own baseline so a boundary-dated extract cannot empty it", () => {
+  // Friday close (baseline), a Monday extract dated EXACTLY on the period start
+  // (local midnight, so it is the boundary extract), then the week's other
+  // extracts, then the following week. Claim "L" leaves between Friday and Monday.
+  const fri = manifest("fri-25", "2026-09-25", 3);
+  const mon = manifest("mon-28", "2026-09-28", 2, { previousExtractId: fri.id });
+  const fri2 = manifest("fri-02", "2026-10-02", 3, { previousExtractId: mon.id });
+  const mon2 = manifest("mon-05", "2026-10-05", 3, { previousExtractId: fri2.id });
+  const manifests = [fri, mon, fri2, mon2];
+  const rows = (extract, ids, extra = {}) =>
+    ids.map((id) => snapshot(id, extract.id, { registeredDate: "2026-06-01", calendarAge: 100, ...extra }));
+  const snapshotsByExtract = new Map([
+    [fri.id, rows(fri, ["A", "B", "L"])],
+    [mon.id, rows(mon, ["A", "B"])],
+    [fri2.id, [...rows(fri2, ["A", "B"]), snapshot("N", fri2.id, { registeredDate: "2026-06-01", calendarAge: 100 })]],
+    [mon2.id, [...rows(mon2, ["A", "B", "N"])]],
+  ]);
+
+  const plan = reportEvidencePlan(manifests, { reportType: "weekly", periodStart: "2026-10-05" });
+  // The previous report (28 Sep - 2 Oct) needs the Friday 25 Sep baseline even
+  // though the Monday extract sits exactly on its start boundary.
+  assert.equal(plan.previous.has(fri.id), true, "previous baseline is loaded");
+  assert.equal(plan.previous.has(mon.id), true);
+  assert.equal(plan.previous.has(fri2.id), true);
+  // The current report still loads exactly what it always did.
+  assert.equal(plan.current.has(fri2.id), true);
+  assert.equal(plan.current.has(mon2.id), true);
+
+  const build = (ids) =>
+    buildReportSnapshot({
+      reportType: "weekly",
+      periodStart: "2026-09-28",
+      manifests,
+      snapshotsByExtract: new Map([...snapshotsByExtract].filter(([id]) => ids.has(id))),
+      activeUsers: users,
+    });
+  const withPlan = build(plan.previous);
+  const withEverything = build(new Set(snapshotsByExtract.keys()));
+  for (const id of ["new_claims_first_observed", "claims_left_extract", "claims_closed"]) {
+    assert.deepEqual(withPlan.metrics[id].value, withEverything.metrics[id].value, id);
+  }
+  // Mon -> Fri2 shows N first observed; Fri -> Mon shows L leaving.
+  assert.deepEqual(withPlan.metrics.new_claims_first_observed.claim_population.claim_ids, ["N"]);
+  assert.deepEqual(withPlan.metrics.claims_left_extract.claim_population.claim_ids, ["L"]);
+
+  // The old selection (boundaries + extracts observed since the previous period
+  // start) leaves the baseline out and reports the whole Monday extract as new.
+  const old = new Set(
+    [mon.id, fri2.id].concat(
+      selectBoundaryExtract(manifests, reportingPeriod("weekly", "2026-09-28").start).manifest.id,
+    ),
+  );
+  assert.equal(old.has(fri.id), false);
+  const broken = build(old);
+  assert.notDeepEqual(
+    broken.metrics.new_claims_first_observed.claim_population.claim_ids,
+    ["N"],
+  );
+});
+
+test("evidence plan for the current period is unchanged when no extract hides a baseline", () => {
+  const fri = manifest("fri-25", "2026-09-25", 3);
+  const fri2 = manifest("fri-02", "2026-10-02", 3, { previousExtractId: fri.id });
+  const mon2 = manifest("mon-05", "2026-10-05", 3, { previousExtractId: fri2.id });
+  const plan = reportEvidencePlan([fri, fri2, mon2], { reportType: "weekly", periodStart: "2026-10-05" });
+  // Same set the loader always chose: boundaries (previous start -> fri-25),
+  // previous end and the extracts observed since.
+  assert.deepEqual([...plan.current].sort(), [fri.id, fri2.id, mon2.id].sort());
+  assert.equal(plan.previous.has(fri.id), true);
 });

@@ -9,11 +9,13 @@ import {
   formatPercent,
   formatPeriodLabel,
   formatRand,
+  latestReportPeriodStart,
   metricState,
   normalizeReport,
   reportSnapshot,
   ReportsController,
   shiftReportPeriod,
+  unavailableMetricText,
 } from "../scout-smartsure/claims/reporting-ui.mjs";
 
 function reportDocument() {
@@ -100,6 +102,58 @@ test("zero remains zero while unavailable remains an unavailable state", () => {
   });
   assert.equal(metricState(snapshot, "unavailable_metric").available, false);
   assert.equal(metricState(snapshot, "unavailable_metric").value, null);
+});
+
+test("financial ambiguity is explained on unavailable report metrics", () => {
+  assert.equal(
+    unavailableMetricText({
+      details: {
+        reason: "financial_aggregation_unresolved",
+        unresolved_parent_count: 2,
+      },
+    }),
+    "Unavailable — 2 multi-row claims contain conflicting section-level values.",
+  );
+});
+
+test("on-screen SLA breakdown exposes all six required populations", () => {
+  const controller = new ReportsController({ document: reportDocument() });
+  const html = controller.renderSla({
+    metrics: {
+      sla_compliance: {
+        value: 0.75,
+        availability: "available",
+        precision: "snapshot_exact",
+      },
+      sla_breaches: {
+        value: 1,
+        availability: "available",
+        precision: "snapshot_exact",
+      },
+      sla_summary: {
+        value: {
+          compliant: 3,
+          breached: 1,
+          unmapped: 2,
+          unknown: 4,
+          total_evaluated: 10,
+          denominator: 4,
+        },
+        availability: "available",
+        precision: "snapshot_exact",
+      },
+    },
+  });
+  for (const label of [
+    "Compliant claims",
+    "Breached claims",
+    "Unmapped statuses",
+    "Age/SLA unavailable",
+    "Total open claims",
+    "SLA denominator",
+  ]) assert.ok(html.includes(label), `missing ${label}`);
+  for (const value of ["3", "1", "2", "4", "10", "4"])
+    assert.ok(html.includes(value), `missing SLA value ${value}`);
 });
 
 test("management formatting is restrained", () => {
@@ -193,6 +247,8 @@ test("reporting API uses bearer authentication and the Phase 3 routes", async ()
   await api.generateReport("weekly", "2026-08-17");
   await api.getReport("run-1");
   await api.regenerateReport("run-1");
+  await api.generateReport("weekly", "2026-08-17", { allowCompatibleUpgrade: true });
+  await api.regenerateReport("run-1", { allowCompatibleUpgrade: true });
   await api.finaliseReport("run-1");
   await api.archiveReport("run-1");
   await api.metricClaims("run-1", "no_movement_over_30");
@@ -203,11 +259,70 @@ test("reporting API uses bearer authentication and the Phase 3 routes", async ()
     "https://reports.example.workers.dev/reports/generate",
   );
   assert.equal(JSON.parse(calls[1].options.body).scope.kind, "team");
+  assert.equal(JSON.parse(calls[1].options.body).allowCompatibleUpgrade, false);
   assert.equal(calls[1].options.headers.Authorization, "Bearer test-token");
+  assert.equal(JSON.parse(calls[4].options.body).allowCompatibleUpgrade, true);
+  assert.equal(JSON.parse(calls[5].options.body).allowCompatibleUpgrade, true);
   assert.equal(
     calls.at(-1).url,
     "https://reports.example.workers.dev/reports/run-1/metrics/no_movement_over_30/claims",
   );
+});
+
+test("older drafts require confirmation before the UI sends an upgrade flag", async () => {
+  const draft = {
+    id: "older-draft",
+    report_type: "weekly",
+    period_start_local_date: "2026-10-12",
+    status: "draft",
+    metric_definition_version: "claims-reporting-metrics-v2",
+    report_schema_version: "scout-report-v2",
+    serving_report_engine_version: "claims-report-engine-v3",
+  };
+  const controller = new ReportsController({
+    document: reportDocument(),
+    getContext: () => ({ user: { role: "manager" } }),
+  });
+  controller.state.reports = [draft];
+  controller.state.selected = draft;
+  controller.state.activeTab = "weekly";
+  controller.state.periodStarts.weekly = "2026-10-12";
+  const requests = [];
+  const confirmations = [];
+  controller.api = {
+    generateReport: async (...args) => requests.push(["generate", ...args]),
+    regenerateReport: async (...args) => requests.push(["regenerate", ...args]),
+  };
+  controller.perform = async (_label, action) => action();
+  controller.confirm = async (action) => {
+    confirmations.push(action);
+    return true;
+  };
+
+  await controller.generate();
+  await controller.regenerate();
+  assert.deepEqual(confirmations, ["upgrade", "upgrade"]);
+  assert.equal(requests[0][3].allowCompatibleUpgrade, true);
+  assert.equal(requests[1][2].allowCompatibleUpgrade, true);
+
+  controller.confirm = async () => false;
+  await controller.generate();
+  assert.equal(requests.length, 2);
+
+  const currentDraft = {
+    ...draft,
+    metric_definition_version: "claims-reporting-metrics-v3",
+    report_schema_version: "scout-report-v3",
+  };
+  controller.state.selected = currentDraft;
+  controller.state.reports = [currentDraft];
+  controller.confirm = async (action) => {
+    confirmations.push(action);
+    return true;
+  };
+  await controller.regenerate();
+  assert.equal(confirmations.at(-1), "regenerate");
+  assert.equal(requests.at(-1)[2].allowCompatibleUpgrade, false);
 });
 
 test("reporting API downloads an official PDF as a blob without JSON parsing", async () => {
@@ -399,4 +514,82 @@ test("report claim rows carry the parent identifier into workflow, including NUL
   });
   assert.equal(ambiguous.state.workflowForm.claimId, "");
   assert.equal(ambiguous.state.workflowForm.claimNumber, "MULTI-1");
+});
+
+test("formatComparison never shows an up/down figure for an unavailable comparison", () => {
+  assert.equal(formatComparison(undefined), "Comparison unavailable");
+  assert.equal(
+    formatComparison({ absolute_delta: null, direction: "unavailable" }),
+    "Comparison unavailable",
+  );
+  // Even a stale numeric delta is ignored once the comparison says unavailable.
+  assert.equal(
+    formatComparison({ absolute_delta: -4, direction: "unavailable" }),
+    "Comparison unavailable",
+  );
+  assert.equal(formatComparison({ absolute_delta: 3, direction: "increase" }), "↑ 3 vs previous period");
+});
+
+test("report details expose frozen versions and the serving engine", () => {
+  const controller = new ReportsController({ document: reportDocument() });
+  const html = controller.renderReportDetails({
+    metric_definition_version: "claims-reporting-metrics-v3",
+    report_schema_version: "scout-report-v3",
+    serving_report_engine_version: "claims-report-engine-v3",
+    finalised_engine_version: "claims-report-engine-v3",
+  }, { metrics: {}, coverage: {} });
+  assert.match(html, /claims-reporting-metrics-v3/);
+  assert.match(html, /scout-report-v3/);
+  assert.match(html, /Serving report engine/);
+  assert.match(html, /Finalised by engine/);
+});
+
+test("latest report defaults use report periods, retain older history, and ignore future or archived runs", async () => {
+  const now = new Date("2026-10-16T10:00:00+02:00");
+  const reports = [
+    { id: "old-week", report_type: "weekly", status: "finalised", period_start_local_date: "2026-10-05" },
+    { id: "archived-current-week", report_type: "weekly", status: "archived", period_start_local_date: "2026-10-12" },
+    { id: "latest-week", report_type: "weekly", status: "finalised", period_start_local_date: "2026-10-12" },
+    { id: "same-week-other-scope", report_type: "weekly", status: "finalised", period_start_local_date: "2026-10-12" },
+    { id: "future-week", report_type: "weekly", status: "draft", period_start_local_date: "2026-10-19" },
+    { id: "old-month", report_type: "monthly", status: "finalised", period_start_local_date: "2026-09-01" },
+    { id: "latest-month", report_type: "monthly", status: "draft", period_start_local_date: "2026-10-01" },
+    { id: "archived", report_type: "monthly", status: "archived", period_start_local_date: "2026-10-01" },
+  ];
+  assert.equal(latestReportPeriodStart(reports, "weekly", now), "2026-10-12");
+  assert.equal(latestReportPeriodStart(reports, "monthly", now), "2026-10-01");
+  assert.equal(latestReportPeriodStart([], "weekly", now), null);
+
+  const document = reportDocument();
+  const controller = new ReportsController({ document, getContext: () => ({ user: { role: "manager" } }), now: () => now });
+  const loaded = [];
+  controller.api = {
+    async listReports() { return { reports }; },
+    async getReport(id) {
+      loaded.push(id);
+      const run = reports.find((report) => report.id === id);
+      return { report: { ...run, metrics_snapshot: { metrics: {} } } };
+    },
+  };
+  await controller.loadReports();
+  assert.equal(controller.state.selected.id, "latest-week");
+  assert.equal(controller.state.periodStarts.weekly, "2026-10-12");
+  assert.equal(controller.state.periodStarts.monthly, "2026-10-01");
+  controller.state.activeTab = "monthly";
+  await controller.loadReports();
+  assert.equal(controller.state.selected.id, "latest-month");
+  controller.state.activeTab = "history";
+  const history = controller.renderHistory();
+  assert.match(history, /old-week/);
+  assert.match(history, /old-month/);
+  assert.match(history, /data-report-id="archived-current-week"/);
+  assert.match(history, /data-report-id="same-week-other-scope"/);
+  assert.doesNotMatch(history, /data-report-id="latest-week"/);
+  assert.doesNotMatch(history, /data-report-id="latest-month"/);
+  await controller.openReportWithOptions("old-week", { syncUrl: false, originTab: "history" });
+  assert.equal(controller.state.selected.id, "old-week");
+  assert.equal(controller.state.periodStarts.weekly, "2026-10-05");
+  assert.deepEqual(loaded, ["latest-week", "latest-month", "old-week"]);
+  await controller.openFromRoute("history", "latest-week");
+  assert.equal(controller.state.selected.id, "latest-week");
 });

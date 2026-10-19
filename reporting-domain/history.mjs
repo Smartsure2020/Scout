@@ -398,14 +398,14 @@ export function sourceChecksumPayload(claims) {
 }
 
 const DATE_FIELDS = [
-  ["registered_date", ["registeredDate", "claim_registered", "registered_at"]],
+  ["registered_date", ["registeredDate", "registered", "claim_registered", "registered_at"]],
   ["dol_date", ["dolDate", "dol", "date_of_loss"]],
-  ["movement_date", ["movementDate", "lastMovementDate", "last_updated"]],
+  ["movement_date", ["movementDate", "lastMovementDate", "lastUpdated", "last_updated"]],
   ["repudiation_date", ["repudiationDate", "repudiation_date"]],
 ];
 
 const NUMERIC_FIELDS = [
-  ["outstanding", ["outstanding", "nett_claim"]],
+  ["outstanding", ["outstanding"]],
   ["estimate", ["estimate", "original_estimate"]],
   ["paid", ["paid"]],
   ["mandate", ["mandate"]],
@@ -430,22 +430,27 @@ function normalizedClaimNumber(value) {
 function parseDate(value, field, qualityFlags) {
   if (!hasValue(value)) return null;
   try {
-    return toDateOnly(value);
+    const date = toDateOnly(value);
+    // Excel's empty date (1899-12-31 / 1900-01-01) means "no date".
+    return date && Number(String(date).slice(0, 4)) <= 1900 ? null : date;
   } catch {
     qualityFlags.push(`invalid_date:${field}`);
     return null;
   }
 }
 
+// Money is held to the cent: floating-point residue such as 1.2E-10 is zero.
+const roundResidue = (number) => (Math.abs(number) < 0.005 ? 0 : number);
+
 function parseNumber(value, field, qualityFlags) {
   if (!hasValue(value)) return null;
   if (typeof value === "number") {
-    if (Number.isFinite(value)) return value;
+    if (Number.isFinite(value)) return roundResidue(value);
     qualityFlags.push(`numeric_parse_failure:${field}`);
     return null;
   }
   const parsed = Number(String(value).replace(/[Rr,\s]/g, ""));
-  if (Number.isFinite(parsed)) return parsed;
+  if (Number.isFinite(parsed)) return roundResidue(parsed);
   qualityFlags.push(`numeric_parse_failure:${field}`);
   return null;
 }
@@ -465,6 +470,7 @@ function sourceEvidence(source) {
     "status",
     "claims_status",
     "handler",
+    "handlerRaw",
     "handler_name",
     "handlerEmail",
     "handler_email",
@@ -479,6 +485,7 @@ function sourceEvidence(source) {
     "description_of_loss",
     "comments",
     "registeredDate",
+    "registered",
     "claim_registered",
     "dolDate",
     "dol",
@@ -488,12 +495,24 @@ function sourceEvidence(source) {
     "last_updated",
     "repudiationDate",
     "repudiation_date",
+    "settledDate",
+    "settled_date",
+    "settled",
     "outstanding",
+    "nettClaim",
     "nett_claim",
     "estimate",
     "original_estimate",
     "paid",
     "mandate",
+    "sumInsured",
+    "sum_insured",
+    "repudiateAmount",
+    "claimValue",
+    // Cardinal's own Age, kept so reports can QA it against the registration age.
+    "age",
+    "cardinalAge",
+    "ingestionQualityFlags",
     "sourceEventAt",
     "event_at",
   ];
@@ -520,13 +539,16 @@ function normalizedSourceHandler(source) {
   return firstValue(source, [
     "handlerEmail",
     "handler_email",
+    "handlerRaw",
     "handler",
     "handler_name",
   ]);
 }
 
 function buildSnapshot(source, index, context) {
-  const qualityFlags = [];
+  const qualityFlags = Array.isArray(source?.ingestionQualityFlags)
+    ? source.ingestionQualityFlags.map(String)
+    : [];
   const sourceClaimNumber = firstValue(source, [
     "claimNo",
     "claim_no",
