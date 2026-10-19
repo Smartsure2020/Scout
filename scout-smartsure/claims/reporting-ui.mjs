@@ -709,13 +709,12 @@ function errorMessage(error) {
 }
 
 function recordByPeriod(reports, reportType, periodStart) {
-  return (
-    reports.find(
-      (report) =>
-        report.report_type === reportType &&
-        reportPeriodKey(report) === periodStart,
-    ) || null
+  const matches = reports.filter(
+    (report) =>
+      report.report_type === reportType &&
+      reportPeriodKey(report) === periodStart,
   );
+  return matches.find((report) => report.status !== "archived") || matches[0] || null;
 }
 
 export function latestReportPeriodStart(reports, reportType, now = new Date()) {
@@ -1967,16 +1966,25 @@ export class ReportsController {
     const status =
       this.document.querySelector("[data-history-filter='status']")?.value ||
       "all";
-    const current = {
-      weekly: latestReportPeriodStart(this.state.reports, "weekly", this.now()),
-      monthly: latestReportPeriodStart(this.state.reports, "monthly", this.now()),
-    };
+    const current = {};
+    for (const reportType of ["weekly", "monthly"]) {
+      const latestPeriod = latestReportPeriodStart(
+        this.state.reports,
+        reportType,
+        this.now(),
+      );
+      current[reportType] = recordByPeriod(
+        this.state.reports,
+        reportType,
+        latestPeriod,
+      )?.id;
+    }
     const reports = this.state.reports
       .filter(
         (report) =>
           (type === "all" || report.report_type === type) &&
           (status === "all" || report.status === status) &&
-          (report.status === "archived" || reportPeriodKey(report) !== current[report.report_type]),
+          report.id !== current[report.report_type],
       )
       .sort((a, b) =>
         String(b.period_start || "").localeCompare(

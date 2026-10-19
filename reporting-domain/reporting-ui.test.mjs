@@ -487,7 +487,9 @@ test("latest report defaults use report periods, retain older history, and ignor
   const now = new Date("2026-10-16T10:00:00+02:00");
   const reports = [
     { id: "old-week", report_type: "weekly", status: "finalised", period_start_local_date: "2026-10-05" },
+    { id: "archived-current-week", report_type: "weekly", status: "archived", period_start_local_date: "2026-10-12" },
     { id: "latest-week", report_type: "weekly", status: "finalised", period_start_local_date: "2026-10-12" },
+    { id: "same-week-other-scope", report_type: "weekly", status: "finalised", period_start_local_date: "2026-10-12" },
     { id: "future-week", report_type: "weekly", status: "draft", period_start_local_date: "2026-10-19" },
     { id: "old-month", report_type: "monthly", status: "finalised", period_start_local_date: "2026-09-01" },
     { id: "latest-month", report_type: "monthly", status: "draft", period_start_local_date: "2026-10-01" },
@@ -519,6 +521,8 @@ test("latest report defaults use report periods, retain older history, and ignor
   const history = controller.renderHistory();
   assert.match(history, /old-week/);
   assert.match(history, /old-month/);
+  assert.match(history, /data-report-id="archived-current-week"/);
+  assert.match(history, /data-report-id="same-week-other-scope"/);
   assert.doesNotMatch(history, /data-report-id="latest-week"/);
   assert.doesNotMatch(history, /data-report-id="latest-month"/);
   await controller.openReportWithOptions("old-week", { syncUrl: false, originTab: "history" });
