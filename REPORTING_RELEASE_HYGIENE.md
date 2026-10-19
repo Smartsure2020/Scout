@@ -2,7 +2,9 @@
 
 ## Version guard release order
 
-The report generation trigger migration is required because an already deployed v2 Worker cannot be changed retroactively. Apply `20261016120000_report_engine_generation_guard.sql` before serving the updated backend: the backend report list selects its new `finalised_engine_version` column. The migration changes no existing rows. Once applied, a rollback to the old v2 Worker can still read and export frozen reports, but attempts to overwrite or finalise a v3 draft fail at the database boundary. The current backend returns a clear 409 for incompatible drafts. Verify the migration in a non-production database before the controlled release; this pass does not apply it.
+The report generation trigger migration is required because an already deployed v2 Worker cannot be changed retroactively. Apply `20261016120000_report_engine_generation_guard.sql` before serving the updated backend: the backend report list selects its new `finalised_engine_version` column. The migration changes no existing rows. Once applied, a rollback to the old v2 Worker can still read and export frozen reports, but attempts to overwrite or finalise a v3 draft fail at the database boundary. The current backend returns a clear 409 for incompatible drafts. This pass has not applied the migration to production.
+
+The migration applied cleanly to an isolated local PostgreSQL 18 cluster on 16 October 2026 and to a disposable PostgreSQL 17.11 Docker container on 19 October 2026, after the existing report history and report-run foundations. The repeatable `supabase/tests/report_engine_generation_guard.sql` rehearsal passed on both: v3-to-v2 overwrite blocked, same-version write persisted, known v2-to-v3 upgrade persisted, incompatible v3 finalisation blocked, compatible finalisation succeeded, and a finalised v2 row remained readable. Each fixture transaction rolled back; the PostgreSQL 17 container had zero test rows afterward. Production runs PostgreSQL 17, so check its migration history and schema before the controlled production migration.
 
 ## Deferred work register
 
