@@ -9,10 +9,13 @@ import {
   formatPercent,
   formatPeriodLabel,
   formatRand,
+  isReportPeriodInProgress,
   latestReportPeriodStart,
   metricState,
   normalizeReport,
+  reportPeriodStartForDate,
   reportSnapshot,
+  resolveReportLifecycle,
   ReportsController,
   shiftReportPeriod,
   unavailableMetricText,
@@ -400,6 +403,8 @@ test("frontend state has separate weekly, monthly and history contexts", () => {
   assert.equal(state.reportOriginTab, null);
   assert.equal(state.periodStarts.weekly, "2026-08-17");
   assert.equal(state.periodStarts.monthly, "2026-08-01");
+  assert.equal(state.primaryPeriodStarts.weekly, "2026-08-17");
+  assert.equal(state.primaryPeriodStarts.monthly, "2026-08-01");
   assert.deepEqual(state.reports, []);
   assert.equal(state.historyLoaded, false);
 });
@@ -592,4 +597,315 @@ test("latest report defaults use report periods, retain older history, and ignor
   assert.deepEqual(loaded, ["latest-week", "latest-month", "old-week"]);
   await controller.openFromRoute("history", "latest-week");
   assert.equal(controller.state.selected.id, "latest-week");
+});
+
+const lifecycleNow = new Date("2026-10-20T10:00:00+02:00");
+const lifecycleFreshness = {
+  state: "warning",
+  label: "Loaded with warnings",
+  extractDate: "2026-10-20",
+  extractDateLabel: "20 Oct 2026",
+  warningCount: 355,
+};
+
+function lifecycleReport({
+  id,
+  reportType = "weekly",
+  status = "finalised",
+  periodStart = "2026-10-12",
+  coverage = "complete",
+} = {}) {
+  const start = new Date(`${periodStart}T00:00:00Z`);
+  const periodEnd = reportType === "weekly"
+    ? new Date(start.setUTCDate(start.getUTCDate() + 5)).toISOString().slice(0, 10)
+    : "2026-11-01";
+  return {
+    id,
+    report_type: reportType,
+    status,
+    period_start_local_date: periodStart,
+    period_end_local_date: periodEnd,
+    period_start: `${periodStart}T00:00:00.000Z`,
+    coverage_status: coverage,
+    coverage_metadata: { warnings: [] },
+    generated_at: "2026-10-20T08:00:00.000Z",
+    finalised_at: status === "finalised" ? "2026-10-20T09:00:00.000Z" : null,
+    generated_by: "manager@example.com",
+  };
+}
+
+function lifecycleDetail(run) {
+  return {
+    ...run,
+    metrics_snapshot: {
+      report_type: run.report_type,
+      period_start_local_date: run.period_start_local_date,
+      period_end_local_date: run.period_end_local_date,
+      coverage_status: run.coverage_status,
+      coverage: { warnings: [] },
+      metrics: {},
+    },
+  };
+}
+
+test("accepted extract resolves Weekly to its exact in-progress period without falling back to the latest report", async () => {
+  const oldFinalised = lifecycleReport({ id: "week-12-finalised" });
+  const olderFinalised = lifecycleReport({
+    id: "week-05-finalised",
+    periodStart: "2026-10-05",
+  });
+  const reports = [oldFinalised, olderFinalised];
+  const lifecycle = resolveReportLifecycle({
+    reports,
+    reportType: "weekly",
+    freshness: lifecycleFreshness,
+    now: lifecycleNow,
+  });
+  assert.equal(reportPeriodStartForDate("weekly", "2026-10-20"), "2026-10-19");
+  assert.equal(lifecycle.periodStart, "2026-10-19");
+  assert.equal(lifecycle.state, "not_generated");
+  assert.equal(lifecycle.report, null);
+  assert.equal(lifecycle.inProgress, true);
+
+  const document = reportDocument();
+  const controller = new ReportsController({
+    document,
+    getContext: () => ({
+      user: { role: "manager" },
+      freshness: lifecycleFreshness,
+    }),
+    now: () => lifecycleNow,
+  });
+  controller.api = {
+    async listReports() { return { reports }; },
+    async getReport() { throw new Error("an older report must not be selected"); },
+  };
+  await controller.loadReports();
+
+  assert.equal(controller.state.periodStarts.weekly, "2026-10-19");
+  assert.equal(controller.state.selected, null);
+  assert.match(document.root.innerHTML, /19–23 Oct 2026/);
+  assert.match(document.root.innerHTML, /In progress/);
+  assert.match(document.root.innerHTML, /No report generated yet/);
+  assert.match(document.root.innerHTML, /Generate Weekly Report/);
+  assert.match(document.root.innerHTML, /Latest accepted extract: 20 Oct 2026/);
+
+  controller.state.activeTab = "history";
+  const history = controller.renderHistory();
+  assert.match(history, /data-report-id="week-12-finalised"/);
+  assert.match(history, /data-report-id="week-05-finalised"/);
+});
+
+test("an exact-period Weekly draft is selected with Draft, Regenerate Draft and permitted Finalise actions", async () => {
+  const draft = lifecycleReport({
+    id: "week-19-draft",
+    status: "draft",
+    periodStart: "2026-10-19",
+  });
+  const controller = new ReportsController({
+    document: reportDocument(),
+    getContext: () => ({
+      user: { role: "manager" },
+      freshness: lifecycleFreshness,
+    }),
+    now: () => lifecycleNow,
+  });
+  controller.api = {
+    async listReports() { return { reports: [draft] }; },
+    async getReport() { return { report: lifecycleDetail(draft) }; },
+  };
+  await controller.loadReports();
+  const html = controller.document.root.innerHTML;
+
+  assert.equal(controller.state.selected.id, draft.id);
+  assert.match(html, />Draft</);
+  assert.match(html, /Regenerate Draft/);
+  assert.match(html, /data-report-action="finalise"/);
+  assert.match(html, /in-progress Draft and is not yet authoritative/);
+  assert.doesNotMatch(html, /Generate Weekly Report/);
+});
+
+test("an exact-period finalised report exposes only immutable snapshot actions", async () => {
+  const finalised = lifecycleReport({
+    id: "week-19-finalised",
+    periodStart: "2026-10-19",
+  });
+  const original = structuredClone(finalised);
+  const controller = new ReportsController({
+    document: reportDocument(),
+    getContext: () => ({
+      user: { role: "admin" },
+      freshness: lifecycleFreshness,
+    }),
+    now: () => lifecycleNow,
+  });
+  let mutationCalls = 0;
+  controller.api = {
+    async listReports() { return { reports: [finalised] }; },
+    async getReport() { return { report: lifecycleDetail(finalised) }; },
+    async generateReport() { mutationCalls += 1; },
+    async regenerateReport() { mutationCalls += 1; },
+  };
+  await controller.loadReports();
+  const html = controller.document.root.innerHTML;
+
+  assert.match(html, />Finalised</);
+  assert.match(html, /Export PDF/);
+  assert.match(html, /data-report-action="archive"/);
+  assert.doesNotMatch(html, /Regenerate Draft|data-report-action="generate"/);
+  await controller.generate();
+  await controller.regenerate();
+  assert.equal(mutationCalls, 0);
+  assert.deepEqual(finalised, original);
+});
+
+test("the shared resolver keeps Monthly on the accepted extract month", async () => {
+  const monthly = lifecycleReport({
+    id: "october-draft",
+    reportType: "monthly",
+    status: "draft",
+    periodStart: "2026-10-01",
+  });
+  const controller = new ReportsController({
+    document: reportDocument(),
+    getContext: () => ({
+      user: { role: "manager" },
+      freshness: lifecycleFreshness,
+    }),
+    now: () => lifecycleNow,
+  });
+  controller.state.activeTab = "monthly";
+  controller.api = {
+    async listReports() { return { reports: [monthly] }; },
+    async getReport() { return { report: lifecycleDetail(monthly) }; },
+  };
+  await controller.loadReports();
+
+  assert.equal(controller.state.periodStarts.monthly, "2026-10-01");
+  assert.equal(controller.state.selected.id, monthly.id);
+  assert.match(controller.document.root.innerHTML, /October 2026/);
+  assert.match(controller.document.root.innerHTML, /Regenerate Draft/);
+});
+
+test("generation success opens the newly created exact-period draft", async () => {
+  const oldFinalised = lifecycleReport({ id: "week-12-finalised" });
+  const draft = lifecycleReport({
+    id: "week-19-draft",
+    status: "draft",
+    periodStart: "2026-10-19",
+  });
+  const controller = new ReportsController({
+    document: reportDocument(),
+    getContext: () => ({
+      user: { role: "manager" },
+      freshness: lifecycleFreshness,
+    }),
+    now: () => lifecycleNow,
+  });
+  controller.state.reports = [oldFinalised];
+  controller.state.periodStarts.weekly = "2026-10-19";
+  controller.state.primaryPeriodStarts.weekly = "2026-10-19";
+  const generated = [];
+  controller.api = {
+    async generateReport(type, periodStart) {
+      generated.push({ type, periodStart });
+      return { report: draft };
+    },
+    async getReport(id) {
+      assert.equal(id, draft.id);
+      return { report: lifecycleDetail(draft) };
+    },
+  };
+
+  await controller.generate();
+  assert.deepEqual(generated, [{ type: "weekly", periodStart: "2026-10-19" }]);
+  assert.equal(controller.state.selected.id, draft.id);
+  assert.equal(controller.state.selected.status, "draft");
+  assert.match(controller.document.root.innerHTML, /Regenerate Draft/);
+});
+
+test("generation failure keeps the no-report state, visible error and usable History", async () => {
+  const oldFinalised = lifecycleReport({ id: "week-12-finalised" });
+  const controller = new ReportsController({
+    document: reportDocument(),
+    getContext: () => ({
+      user: { role: "manager" },
+      freshness: lifecycleFreshness,
+    }),
+    now: () => lifecycleNow,
+  });
+  controller.state.reports = [oldFinalised];
+  controller.state.periodStarts.weekly = "2026-10-19";
+  controller.state.primaryPeriodStarts.weekly = "2026-10-19";
+  controller.api = {
+    async generateReport() {
+      throw Object.assign(new Error("Generation unavailable"), {
+        code: "REQUEST_FAILED",
+      });
+    },
+  };
+
+  await controller.generate();
+  assert.equal(controller.state.selected, null);
+  assert.equal(controller.state.reports.length, 1);
+  assert.match(
+    controller.document.root.innerHTML,
+    /report action could not be completed\. No report was changed/,
+  );
+  assert.match(controller.document.root.innerHTML, /No report generated yet/);
+  assert.match(controller.document.root.innerHTML, /Generate Weekly Report/);
+  assert.match(controller.renderHistory(), /data-report-id="week-12-finalised"/);
+});
+
+test("repeated generation clicks create only one in-flight request", async () => {
+  const draft = lifecycleReport({
+    id: "week-19-draft",
+    status: "draft",
+    periodStart: "2026-10-19",
+  });
+  const controller = new ReportsController({
+    document: reportDocument(),
+    getContext: () => ({
+      user: { role: "manager" },
+      freshness: lifecycleFreshness,
+    }),
+    now: () => lifecycleNow,
+  });
+  controller.state.periodStarts.weekly = "2026-10-19";
+  controller.state.primaryPeriodStarts.weekly = "2026-10-19";
+  let release;
+  let generateCalls = 0;
+  controller.api = {
+    generateReport() {
+      generateCalls += 1;
+      return new Promise((resolve) => {
+        release = () => resolve({ report: draft });
+      });
+    },
+    async getReport() { return { report: lifecycleDetail(draft) }; },
+  };
+
+  const first = controller.generate();
+  const second = controller.generate();
+  assert.equal(generateCalls, 1);
+  assert.equal(controller.state.loading, true);
+  assert.match(controller.document.root.innerHTML, /data-report-action="generate" disabled/);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(controller.state.selected.id, draft.id);
+});
+
+test("weekly in-progress status ends after the Friday reporting boundary", () => {
+  assert.equal(
+    isReportPeriodInProgress("weekly", "2026-10-19", lifecycleNow),
+    true,
+  );
+  assert.equal(
+    isReportPeriodInProgress(
+      "weekly",
+      "2026-10-19",
+      new Date("2026-10-24T10:00:00+02:00"),
+    ),
+    false,
+  );
 });
