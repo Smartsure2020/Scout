@@ -2651,6 +2651,7 @@ export function buildReportSnapshot({
       "brokerage_distribution",
       "high_value_claim_detail",
       "zero_estimate_closure_review",
+      "zero_estimate_reserve_review",
       "financial_open_outstanding",
       "financial_estimate_total",
       "financial_paid_total",

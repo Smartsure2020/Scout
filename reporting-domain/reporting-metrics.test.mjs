@@ -1058,7 +1058,25 @@ test("insufficient history never fabricates zero state metrics", () => {
   assert.equal(report.metrics.opening_inventory.value, null);
   assert.equal(report.metrics.closing_inventory.value, null);
   assert.equal(report.metrics.financial_open_outstanding.value, null);
+  assert.equal(report.metrics.zero_estimate_reserve_review.availability, "unavailable");
+  assert.equal(report.metrics.zero_estimate_reserve_review.value, null);
+  assert.ok(report.metrics.zero_estimate_reserve_review.coverage_warnings.includes("closing_snapshot_rows_unavailable"));
   assert.ok(report.coverage.warnings.includes("no_closing_snapshot"));
+});
+
+test("zero-estimate reserve review is unavailable when a closing manifest has no loaded rows", () => {
+  const closing = manifest("closing-no-rows", "2026-08-22", 1);
+  const report = buildReportSnapshot({
+    reportType: "weekly",
+    periodStart: "2026-08-17",
+    manifests: [closing],
+    snapshotsByExtract: new Map(),
+    changes: [],
+    activeUsers: users,
+  });
+  assert.equal(report.metrics.zero_estimate_reserve_review.availability, "unavailable");
+  assert.equal(report.metrics.zero_estimate_reserve_review.value, null);
+  assert.ok(report.metrics.zero_estimate_reserve_review.coverage_warnings.includes("closing_snapshot_rows_unavailable"));
 });
 
 test("report claim populations are preserved for future drill-through", () => {

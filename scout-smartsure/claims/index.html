@@ -8708,7 +8708,7 @@ function handleFileUpload(file) {
       if (!ingestion) throw new Error("Cardinal ingestion contract did not load");
       let hasMovementColumn = false;
       const uploadWarnings = [];
-      const fileColumns = json.length ? Object.keys(json[0]) : (XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || []);
+      const fileColumns = XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || [];
       const brokerCaptured = fileColumns.some((column) => String(column).trim().toLowerCase() === "broker");
       if (!brokerCaptured) uploadWarnings.push("Broker column not found; brokerage distribution will be unavailable for this extract");
       if (json.length > 0) {
