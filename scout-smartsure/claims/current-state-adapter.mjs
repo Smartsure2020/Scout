@@ -65,6 +65,9 @@ export function currentStateRowToClaim(row = {}) {
     peril: String(row.peril || ""),
     perilType: String(row.peril_type || ""),
     insurer: String(row.insurer || ""),
+    broker: row.broker === null || row.broker === undefined || String(row.broker).trim() === ""
+      ? null
+      : String(row.broker).trim(),
     comments: String(row.comments || ""),
     ingestionQualityFlags: qualityFlags(row.ingestion_quality_flags),
   };

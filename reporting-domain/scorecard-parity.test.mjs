@@ -308,7 +308,7 @@ test("the Reports page and the PDF label the renamed operational metrics the sam
   assert.match(ui, /Payment Status \/ Estimate Zero/);
   assert.doesNotMatch(ui, /High value \/ mandate attention/);
   assert.match(plain(pdf), /High value \(outstanding\)/);
-  assert.match(plain(pdf), /Payment status with zero estimate/);
+  assert.match(plain(pdf), /Zero-estimate claims requiring review/);
   // An older report carries the combined key and keeps its original label on the page.
   const legacy = structuredClone(snapshot);
   legacy.metrics.operational_health.value = {

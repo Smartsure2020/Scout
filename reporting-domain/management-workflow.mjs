@@ -206,6 +206,36 @@ export function workflowSnapshot(item, type, reportId, options = {}) {
   };
 }
 
+// These allowlists mirror the membership-table columns in
+// 20260825141850_management_attention_action_plan.sql. Keep DB writes explicit:
+// claim context is enrichment, not permission to add arbitrary PostgREST keys.
+export const REPORT_ATTENTION_ITEM_COLUMNS = Object.freeze([
+  "report_run_id", "attention_item_id", "claim_id", "claim_number_snapshot",
+  "title_snapshot", "management_note_snapshot", "category_snapshot",
+  "priority_snapshot", "owner_user_id_snapshot", "owner_display_snapshot",
+  "handler_snapshot", "claim_status_snapshot", "insurer_snapshot",
+  "next_action_snapshot", "due_date_snapshot", "status_snapshot",
+  "resolution_note_snapshot", "display_order", "carried_forward_from_report_id",
+]);
+
+export const REPORT_ACTION_ITEM_COLUMNS = Object.freeze([
+  "report_run_id", "action_id", "attention_item_id_snapshot", "claim_id",
+  "claim_number_snapshot", "action_snapshot", "category_snapshot",
+  "owner_user_id_snapshot", "owner_display_snapshot", "handler_snapshot",
+  "claim_status_snapshot", "insurer_snapshot", "due_date_snapshot",
+  "status_snapshot", "resolution_note_snapshot", "display_order",
+  "carried_forward_from_report_id",
+]);
+
+export function workflowMembershipPayload(snapshot, type) {
+  const columns = type === "attention"
+    ? REPORT_ATTENTION_ITEM_COLUMNS
+    : REPORT_ACTION_ITEM_COLUMNS;
+  return Object.fromEntries(columns
+    .filter((column) => Object.hasOwn(snapshot || {}, column))
+    .map((column) => [column, snapshot[column]]));
+}
+
 export function normaliseWorkflowRecord(record, type) {
   if (!record) return null;
   const attention = type === "attention";

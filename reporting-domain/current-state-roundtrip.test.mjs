@@ -27,6 +27,7 @@ const rows = [
     "Claim Handler": "Handler One",
     Age: "12",
     Insurer: "Example Insurer",
+    Broker: "  HRS  ",
     "Claim Registered": "15/09/2026",
     DOL: "14/09/2026",
     "Original Estimate": "R 25,000.50",
@@ -199,6 +200,7 @@ const operationalFields = [
   "paid",
   "peril",
   "insurer",
+  "broker",
   "comments",
   "ingestionQualityFlags",
 ];

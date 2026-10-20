@@ -72,6 +72,10 @@ export function normalizeClaim(source = {}) {
     calendarAge: numberOrNull(source.calendarAge),
     daysSinceMovement: numberOrNull(source.daysSinceMovement),
     possibleDuplicate: Boolean(source.possibleDuplicate),
+    broker:
+      source.broker === null || source.broker === undefined || String(source.broker).trim() === ""
+        ? null
+        : String(source.broker).trim(),
     description: source.description ?? source.description_of_loss ?? null,
     comments: source.comments ?? null,
     provenance: {

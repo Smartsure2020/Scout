@@ -434,7 +434,7 @@ test("the report engine publishes handler_scorecards that tie to closing invento
     activeUsers: [],
     handlerRoster: roster,
   });
-  assert.equal(report.metric_definition_version, "claims-reporting-metrics-v3");
+  assert.equal(report.metric_definition_version, "claims-reporting-metrics-v4");
   const scorecards = report.metrics.handler_scorecards;
   assert.equal(scorecards.availability, "available");
   assert.equal(

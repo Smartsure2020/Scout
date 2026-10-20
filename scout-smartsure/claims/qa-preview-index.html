@@ -8811,7 +8811,13 @@ function handleFileUpload(file) {
       pruneAcks(processed);
       renderAll();
       // Save to backend for persistence
-      const backendResult = await saveExtractToBackend(processed, file.name, historyResult.entry);
+      const brokerCaptured = fileColumns.some((column) => String(column).trim().toLowerCase() === "broker");
+      const brokerPopulatedCount = processed.filter((claim) => String(claim.broker ?? "").trim() !== "").length;
+      const backendResult = await saveExtractToBackend(processed, file.name, historyResult.entry, {
+        broker_column_present: brokerCaptured,
+        broker_capture_status: brokerCaptured ? "captured" : "not_captured",
+        broker_populated_row_count: brokerPopulatedCount,
+      });
       if (backendResult.ok) {
         status.textContent = `Upload completed and server history saved (${backendResult.data.claimsStored || claims.length} claims).`;
       } else if (backendResult.data?.history?.status === "partial_failure") {
@@ -9269,7 +9275,7 @@ async function loadClaimsFromBackend() {
 }
 
 // SAVE EXTRACT TO BACKEND
-async function saveExtractToBackend(processedClaims, fileName, extractMeta = null) {
+async function saveExtractToBackend(processedClaims, fileName, extractMeta = null, brokerCapture = {}) {
   if (QA_FIXTURE_MODE) {
     return { ok: false, data: null, error: new Error("Disabled in synthetic QA preview") };
   }
@@ -9291,6 +9297,11 @@ async function saveExtractToBackend(processedClaims, fileName, extractMeta = nul
         fileName,
         extractDate,
         extractId,
+        sourceMetadata: {
+          broker_column_present: brokerCapture.broker_column_present === true,
+          broker_capture_status: brokerCapture.broker_capture_status || "not_captured",
+          broker_populated_row_count: Number(brokerCapture.broker_populated_row_count || 0),
+        },
         dataQuality: latestDataQualityReport || buildDataQualityReport(processedClaims),
         claimSnapshot: processedClaims.map(c => ({
           claimNo: c.claimNo,

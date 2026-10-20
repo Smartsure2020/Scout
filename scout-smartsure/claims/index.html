@@ -8708,8 +8708,10 @@ function handleFileUpload(file) {
       if (!ingestion) throw new Error("Cardinal ingestion contract did not load");
       let hasMovementColumn = false;
       const uploadWarnings = [];
+      const fileColumns = json.length ? Object.keys(json[0]) : (XLSX.utils.sheet_to_json(ws, { header: 1 })[0] || []);
+      const brokerCaptured = fileColumns.some((column) => String(column).trim().toLowerCase() === "broker");
+      if (!brokerCaptured) uploadWarnings.push("Broker column not found; brokerage distribution will be unavailable for this extract");
       if (json.length > 0) {
-        const fileColumns = Object.keys(json[0]);
         const validation = ingestion.validateCardinalColumns(fileColumns);
         hasMovementColumn = validation.hasMovementColumn;
         if (validation.missingGroups.length > 0) {
@@ -8756,9 +8758,14 @@ function handleFileUpload(file) {
       pruneAcks(processed);
       renderAll();
       // Save to backend for persistence
-      const backendResult = await saveExtractToBackend(processed, file.name, historyResult.entry);
+      const brokerPopulatedCount = processed.filter((claim) => String(claim.broker ?? "").trim() !== "").length;
+      const backendResult = await saveExtractToBackend(processed, file.name, historyResult.entry, {
+        broker_column_present: brokerCaptured,
+        broker_capture_status: brokerCaptured ? "captured" : "not_captured",
+        broker_populated_row_count: brokerPopulatedCount,
+      });
       if (backendResult.ok) {
-        status.textContent = `Upload completed and server history saved (${backendResult.data.claimsStored || claims.length} claims).`;
+        status.textContent = `Upload completed and server history saved (${backendResult.data.claimsStored || claims.length} claims).${uploadWarnings.length ? ` Warning: ${uploadWarnings.join("; ")}.` : ""}`;
       } else if (backendResult.data?.history?.status === "partial_failure") {
         status.textContent = "Upload not completed: server history is recorded as a retryable failure and current claims were not changed. Retry the same source.";
       } else {
@@ -9151,7 +9158,7 @@ async function loadClaimsFromBackend() {
 }
 
 // SAVE EXTRACT TO BACKEND
-async function saveExtractToBackend(processedClaims, fileName, extractMeta = null) {
+async function saveExtractToBackend(processedClaims, fileName, extractMeta = null, brokerCapture = {}) {
   if (!currentUser || !["manager","admin"].includes(currentUser.role)) {
     return { ok: false, data: null, error: new Error("Only managers and admins can upload extracts") };
   }
@@ -9173,6 +9180,7 @@ async function saveExtractToBackend(processedClaims, fileName, extractMeta = nul
         sourceMetadata: {
           effective_date_basis: "upload_received_date",
           source_file_type: String(fileName || "").split(".").pop()?.toLowerCase() || null,
+          ...brokerCapture,
         },
         dataQuality: latestDataQualityReport || buildDataQualityReport(processedClaims),
         claimSnapshot: processedClaims.map(c => ({

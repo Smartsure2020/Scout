@@ -17,6 +17,7 @@ import {
   evaluateOperationalCategories,
   evaluateSla,
   getReadyToCloseCandidate,
+  hasRecoveryPending,
   isPaymentZeroEstimate,
   isReportingTerminalStatus,
   MANDATE_THRESHOLD,
@@ -34,8 +35,8 @@ import {
   parentIdentityKey,
 } from "./claim-parent.mjs";
 
-export const REPORTING_METRIC_VERSION = "claims-reporting-metrics-v3";
-export const REPORT_SCHEMA_VERSION = "scout-report-v3";
+export const REPORTING_METRIC_VERSION = "claims-reporting-metrics-v4";
+export const REPORT_SCHEMA_VERSION = "scout-report-v4";
 export const REPORTING_QUALITY_VERSION = "scout-reporting-quality-v2";
 export const REPORTING_STATUS_CLASSIFICATION_VERSION =
   "reporting-status-classification-v1";
@@ -702,6 +703,7 @@ function mapSnapshotToClaim(snapshot, manifest, timeZone) {
     open: Boolean(snapshot?.open),
     statusNormalized: snapshot?.status_normalized ?? null,
     insurer: snapshot?.insurer ?? null,
+    broker: snapshot?.broker ?? null,
     peril: snapshot?.peril ?? null,
     perilType: snapshot?.peril_type ?? null,
     insured: snapshot?.insured ?? null,
@@ -848,6 +850,14 @@ function consensusScalar(parent, field) {
   return status === "disagree" || status === "all_missing" ? null : value;
 }
 
+function exactTextConsensus(parent, field) {
+  const values = [...new Set(parent.rows
+    .map((row) => row?.[field])
+    .filter((value) => value !== null && value !== undefined && String(value).trim() !== "")
+    .map((value) => String(value).trim()))];
+  return values.length === 1 ? values[0] : null;
+}
+
 /**
  * Project one logical parent claim into the claim shape the metric functions
  * consume. A single-row parent maps exactly as the pre-MS2 row did (same id,
@@ -865,6 +875,7 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
     claim.multiRow = false;
     claim.identityQuality = parent.identity_quality;
     claim.parentQualityFlags = parent.quality_flags;
+    claim.financialSections = parent.rows.map((row) => ({ outstanding: knownFiniteNumber(row.outstanding), estimate: knownFiniteNumber(row.estimate) }));
     return claim;
   }
   const asOfDate = manifestReferenceDate(manifest, timeZone);
@@ -992,12 +1003,14 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
     resolvedScoutUserId,
     handlerResolution: handlerResolution || "unassigned",
     insurer: consensusScalar(parent, "insurer"),
+    broker: exactTextConsensus(parent, "broker"),
     insured: consensusScalar(parent, "insured"),
     dataQualityFlags: parent.quality_flags,
     snapshotExtractId: manifest?.id ?? null,
     snapshotEffectiveDate: asOfDate,
     rowCount: parent.row_count,
     multiRow: true,
+    financialSections: parent.rows.map((row) => ({ outstanding: knownFiniteNumber(row.outstanding), estimate: knownFiniteNumber(row.estimate) })),
     identityQuality: parent.identity_quality,
     parentQualityFlags: parent.quality_flags,
     parentMetricStates: {
@@ -1561,6 +1574,368 @@ function operationalHealthMetric(closingOpen, evidence, allClosingClaims = []) {
   });
 }
 
+const UNKNOWN_PORTFOLIO_VALUE = "Unknown / Unmapped";
+
+function compareCodePointText(left, right) {
+  const a = [...String(left)];
+  const b = [...String(right)];
+  for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+    const difference = a[index].codePointAt(0) - b[index].codePointAt(0);
+    if (difference) return difference;
+  }
+  return a.length - b.length;
+}
+
+function knownFiniteNumber(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function portfolioPercentages(entries, total) {
+  if (!total) return entries.map((entry) => ({ ...entry, percentage_basis_points: 0 }));
+  const working = entries.map((entry, index) => {
+    const exact = (entry.open_claims * 10000) / total;
+    const floor = Math.floor(exact);
+    return { entry, index, floor, remainder: exact - floor };
+  });
+  let pointsLeft = 10000 - working.reduce((sum, item) => sum + item.floor, 0);
+  const allocationOrder = [...working].sort(
+    (left, right) =>
+      right.remainder - left.remainder ||
+      compareCodePointText(left.entry.name, right.entry.name) ||
+      left.index - right.index,
+  );
+  for (let index = 0; index < allocationOrder.length && pointsLeft > 0; index += 1) {
+    allocationOrder[index].floor += 1;
+    pointsLeft -= 1;
+  }
+  return working.map((item) => ({
+    ...item.entry,
+    percentage_basis_points: item.floor,
+  }));
+}
+
+function amountCents(value) {
+  const number = knownFiniteNumber(value);
+  if (number === null) return null;
+  const cents = Math.round(number * 100);
+  return Number.isSafeInteger(cents) ? cents : null;
+}
+
+function reportingBrokerGroup(claim) {
+  if (String(claim.sourceClaimNumber || "").startsWith("REN0002")) return "Renault";
+  const broker = claim.broker === null || claim.broker === undefined ? "" : String(claim.broker).trim();
+  return broker || null;
+}
+
+function insurerDistributionMetric(closingOpen, evidence) {
+  const grouped = new Map();
+  for (const claim of closingOpen) {
+    const insurerSource = String(claim.insurer ?? "");
+    const insurer = insurerSource.trim()
+      ? insurerSource
+      : UNKNOWN_PORTFOLIO_VALUE;
+    const key = insurer === UNKNOWN_PORTFOLIO_VALUE ? "synthetic:unknown" : `source:${insurer}`;
+    const entry = grouped.get(key) || {
+      name: insurer,
+      bucket_type: insurer === UNKNOWN_PORTFOLIO_VALUE ? "unknown" : "source_value",
+      open_claims: 0,
+      outstanding_exposure: 0,
+      known_outstanding_claims: 0,
+      excluded_outstanding_claims: 0,
+    };
+    entry.open_claims += 1;
+    const unresolved =
+      claim.multiRow && claim.financialResolution?.outstanding === "unresolved";
+    const outstanding = unresolved ? null : knownFiniteNumber(claim.outstanding);
+    if (outstanding === null) entry.excluded_outstanding_claims += 1;
+    else {
+      const cents = amountCents(outstanding);
+      entry.outstanding_exposure_cents = (entry.outstanding_exposure_cents || 0) + (cents ?? 0);
+      entry.known_outstanding_claims += 1;
+    }
+    grouped.set(key, entry);
+  }
+  const sorted = [...grouped.values()].sort(
+    (left, right) =>
+      right.open_claims - left.open_claims || compareCodePointText(left.name, right.name),
+  );
+  const rows = portfolioPercentages(sorted.map((row) => ({ ...row, outstanding_exposure: (row.outstanding_exposure_cents || 0) / 100 })), closingOpen.length);
+  return metric(
+    "insurer_distribution",
+    {
+      rows,
+      total_open_claims: closingOpen.length,
+      percentage_basis_points_total: rows.reduce(
+        (sum, row) => sum + row.percentage_basis_points,
+        0,
+      ),
+      unknown_open_claims:
+      rows.find((row) => row.bucket_type === "unknown")?.open_claims || 0,
+      outstanding_exposure_total: rows.reduce(
+        (sum, row) => sum + (row.outstanding_exposure_cents || 0),
+        0,
+      ) / 100,
+    },
+    {
+      precision: "snapshot_exact",
+      claimIds: closingOpen.map((claim) => claim.id),
+      warnings: rows.some((row) => row.excluded_outstanding_claims > 0)
+        ? ["insurer_outstanding_exposure_incomplete"]
+        : [],
+      definition:
+        "Exact insurer values for the accepted closing open-claim population; missing or unresolved insurer is shown as Unknown / Unmapped. Percentages are apportioned in basis points and reconcile to 100.00%.",
+      evidence,
+      details: {
+        source_field: "insurer",
+        population: "accepted_closing_open_claims",
+        period_semantics: "closing_boundary_state",
+        missing_data_behavior: "Unknown / Unmapped",
+        multi_row_behavior:
+          "Insurer uses parent consensus; disagreement or all-missing is Unknown / Unmapped. Outstanding is included only when the parent amount is safely resolved.",
+        alias_behavior: "exact_canonical_values_only",
+      },
+    },
+  );
+}
+
+function brokerageDistributionMetric(closingOpen, registeredIds, evidence) {
+  const grouped = new Map();
+  for (const claim of closingOpen) {
+    const broker = reportingBrokerGroup(claim);
+    const unknown = broker === null;
+    const bucketType = unknown ? "unknown" : (broker === "Renault" && String(claim.sourceClaimNumber || "").startsWith("REN0002") ? "renault_prefix" : "source_value");
+    const key = unknown ? "synthetic:unknown" : `${bucketType}:${broker}`;
+    const entry = grouped.get(key) || {
+      name: unknown ? UNKNOWN_PORTFOLIO_VALUE : broker,
+      bucket_type: bucketType,
+      source_value: bucketType === "source_value" ? broker : null,
+      open_claims: 0,
+      new_this_period: 0,
+      over_60_days: 0,
+      known_outstanding_exposure: 0,
+      known_outstanding_claim_count: 0,
+      excluded_financial_claim_count: 0,
+    };
+    entry.open_claims += 1;
+    if (registeredIds.has(String(claim.id))) entry.new_this_period += 1;
+    if (claim.calendarAge !== null && Number(claim.calendarAge) > 60) entry.over_60_days += 1;
+    const unresolved = claim.multiRow && claim.financialResolution?.outstanding === "unresolved";
+    const outstanding = unresolved ? null : knownFiniteNumber(claim.outstanding);
+    if (outstanding === null) entry.excluded_financial_claim_count += 1;
+    else {
+      const cents = amountCents(outstanding);
+      entry.known_outstanding_exposure_cents = (entry.known_outstanding_exposure_cents || 0) + (cents ?? 0);
+      entry.known_outstanding_claim_count += 1;
+    }
+    grouped.set(key, entry);
+  }
+  const sorted = [...grouped.values()].sort(
+    (left, right) => right.open_claims - left.open_claims || compareCodePointText(left.name, right.name) || compareCodePointText(left.bucket_type, right.bucket_type),
+  );
+  const rows = portfolioPercentages(sorted.map((row) => ({ ...row, known_outstanding_exposure: (row.known_outstanding_exposure_cents || 0) / 100 })), closingOpen.length).map((row) => ({
+    ...row,
+    percentage_of_open: row.percentage_basis_points / 100,
+  }));
+  return metric("brokerage_distribution", {
+    rows,
+    total_open_claims: closingOpen.length,
+    percentage_basis_points_total: rows.reduce((sum, row) => sum + row.percentage_basis_points, 0),
+    unknown_open_claims: rows.find((row) => row.bucket_type === "unknown")?.open_claims || 0,
+    known_outstanding_exposure_total: rows.reduce((sum, row) => sum + (row.known_outstanding_exposure_cents || 0), 0) / 100,
+    excluded_financial_claim_count: rows.reduce((sum, row) => sum + row.excluded_financial_claim_count, 0),
+  }, {
+    precision: "snapshot_exact",
+    claimIds: closingOpen.map((claim) => claim.id),
+    warnings: rows.some((row) => row.excluded_financial_claim_count > 0)
+      ? ["broker_outstanding_exposure_incomplete"]
+      : [],
+    definition: "For management reporting, claim numbers beginning REN0002 are grouped as Renault; every other populated Broker remains an exact trimmed value and blank Broker is Unknown / Unmapped. This is a deterministic claim-prefix mapping, not fuzzy normalization.",
+    evidence,
+    details: {
+      source_field: "broker",
+      reporting_group_rule: "claim_number_prefix_REN0002_to_Renault_else_exact_trimmed_broker",
+      population: "accepted_closing_open_claims",
+      period_semantics: "closing_boundary_state",
+      missing_data_behavior: "Unknown / Unmapped",
+      multi_row_behavior: "Broker uses exact trimmed parent consensus; conflicting values are Unknown / Unmapped. Financials are counted only when safely resolved.",
+      over_60_rule: "calendar_age_greater_than_60",
+      new_this_period_rule: "existing_registered_period_claim_population",
+      alias_behavior: "exact_cardinal_values_trim_surrounding_whitespace_only",
+      source_evidence_retained: true,
+      collision_warnings: brokerCollisionWarnings(sorted),
+      top_n_cutoff_tie: sorted.filter((row) => row.bucket_type !== "unknown").length > 10 && sorted.filter((row) => row.bucket_type !== "unknown")[9]?.open_claims === sorted.filter((row) => row.bucket_type !== "unknown")[10]?.open_claims
+        ? { claim_count: sorted.filter((row) => row.bucket_type !== "unknown")[9].open_claims, values_beyond_cutoff: sorted.filter((row) => row.bucket_type !== "unknown" && row.open_claims === sorted.filter((entry) => entry.bucket_type !== "unknown")[9].open_claims).length - sorted.filter((row) => row.bucket_type !== "unknown").slice(0, 10).filter((row) => row.open_claims === sorted.filter((entry) => entry.bucket_type !== "unknown")[9].open_claims).length }
+        : null,
+    },
+  });
+}
+
+function brokerCollisionWarnings(rows) {
+  const exact = rows.filter((row) => row.bucket_type === "source_value").map((row) => row.source_value);
+  const warnings = [];
+  for (let i = 0; i < exact.length; i += 1) for (let j = i + 1; j < exact.length; j += 1) {
+    const left = exact[i], right = exact[j];
+    const caseCollision = left.toLowerCase() === right.toLowerCase();
+    const whitespaceCollision = left.replace(/\s+/g, " ").trim().toLowerCase() === right.replace(/\s+/g, " ").trim().toLowerCase();
+    if ((caseCollision || whitespaceCollision) && left !== right) warnings.push({ values: [left, right], kind: caseCollision ? "case_insensitive" : "whitespace_fold", message: "Exact source values remain separate; no consolidation is applied." });
+  }
+  return warnings;
+}
+
+function managementClaimDetail(claim, reasonFlagged = null) {
+  return {
+    claim_number: claim.sourceClaimNumber ?? null,
+    insured: claim.insured ?? null,
+    insurer: claim.insurer ?? null,
+    brokerage:
+      claim.broker === null || claim.broker === undefined || String(claim.broker).trim() === ""
+        ? null
+        : String(claim.broker).trim(),
+    brokerage_group: reportingBrokerGroup(claim),
+    handler: claim.handlerSource ?? null,
+    status: claim.status ?? null,
+    estimate: knownFiniteNumber(claim.estimate),
+    outstanding: knownFiniteNumber(claim.outstanding),
+    paid: knownFiniteNumber(claim.paid),
+    registered_date: claim.registeredDate ?? null,
+    new_this_period: Boolean(claim.newThisPeriod),
+    last_known_activity: claim.movementDate ?? null,
+    ...(reasonFlagged ? { reason_flagged: reasonFlagged } : {}),
+  };
+}
+
+function highValueClaimDetailMetric(closingOpen, registeredIds, evidence) {
+  const included = [];
+  const excluded = [];
+  for (const claim of closingOpen) {
+    const parentState = claim.multiRow
+      ? claim.parentMetricStates?.operational?.high_value
+      : undefined;
+    if (parentState === null) {
+      excluded.push(claim);
+      continue;
+    }
+    const highValue = claim.multiRow
+      ? parentState === true
+      : evaluateMandateAndRisk(claim).highValue;
+    if (highValue) included.push({ ...claim, newThisPeriod: registeredIds.has(String(claim.id)) });
+  }
+  const openClaims = included.map((claim) => managementClaimDetail(claim));
+  const newThisPeriod = included
+    .filter((claim) => claim.newThisPeriod)
+    .map((claim) => managementClaimDetail(claim));
+  return metric(
+    "high_value_claim_detail",
+    {
+      threshold: MANDATE_THRESHOLD,
+      basis: "outstanding",
+      open_claims: openClaims,
+      new_this_period: newThisPeriod,
+      excluded_multi_row_claim_numbers: excludedParentNumbers(excluded),
+      excluded_multi_row_claims: excluded.map((claim) => ({
+        claim_number: claim.sourceClaimNumber ?? null,
+        insured: claim.insured ?? null,
+        handler: claim.handlerSource ?? null,
+        brokerage: claim.broker ?? null,
+        brokerage_group: reportingBrokerGroup(claim),
+        section_amounts: (claim.financialSections || []).map((section, index) => ({ section: index + 1, outstanding: section.outstanding })),
+        largest_section: Math.max(0, ...(claim.financialSections || []).map((section) => section.outstanding ?? 0)),
+        reason: "Sections straddle threshold / additive semantics unresolved",
+      })),
+    },
+    {
+      precision: "snapshot_exact",
+      claimIds: included.map((claim) => claim.id),
+      warnings: excluded.length ? ["high_value_multi_row_excluded"] : [],
+      definition:
+        "Currently open claims with known Outstanding greater than or equal to R100,000; new-this-period is the subset registered under the existing report-period registration rule.",
+      evidence,
+      details: {
+        source_field: "outstanding",
+        population: "accepted_closing_open_claims",
+        period_semantics: "closing_boundary_state_with_existing_registration_subset",
+        missing_data_behavior: "missing_outstanding_excluded",
+        multi_row_behavior:
+          "Included only when every source row resolves to the same high-value classification; ambiguous parents are excluded and disclosed.",
+        brokerage_behavior: "exact_cardinal_broker_value_trim_surrounding_whitespace_only",
+      },
+    },
+  );
+}
+
+function zeroEstimateClosureReviewMetric(closingOpen, evidence) {
+  const included = [];
+  const excludedMultiRow = [];
+  for (const claim of closingOpen) {
+    if (
+      claim.multiRow &&
+      (claim.financialResolution?.estimate === "unresolved" ||
+        claim.parentMetricStates?.readyToClose === null ||
+        claim.parentMetricStates?.zeroEstimateAnomaly === null)
+    ) {
+      excludedMultiRow.push(claim);
+      continue;
+    }
+    if (knownFiniteNumber(claim.estimate) !== 0) continue;
+    const ready = getReadyToCloseCandidate(claim);
+    const outstanding = knownFiniteNumber(claim.outstanding);
+    const readyState = outstanding === 0 || (claim.multiRow
+      ? claim.parentMetricStates?.readyToClose === true
+      : Boolean(ready));
+    const paymentZeroOnly = isPaymentZeroEstimate(claim) && outstanding !== 0;
+    if (!readyState || paymentZeroOnly || hasRecoveryPending(claim)) continue;
+    const reason = outstanding === 0 ? "outstanding_zero" : (ready?.code || "existing_ready_to_close_rule");
+    included.push({ claim, reason });
+  }
+  return metric(
+    "zero_estimate_closure_review",
+    included.map(({ claim, reason }) => managementClaimDetail(claim, reason)),
+    {
+      precision: "snapshot_exact",
+      claimIds: included.map(({ claim }) => claim.id),
+      warnings: excludedMultiRow.length
+        ? ["zero_estimate_closure_review_multi_row_excluded"]
+        : [],
+      definition:
+        "Currently open claims with a known zero estimate and deterministic ready-to-close evidence. A payment-related status plus zero estimate alone is not closure evidence.",
+      evidence,
+      details: {
+        source_fields: ["status_normalized", "estimate", "outstanding", "paid"],
+        population: "accepted_closing_open_claims",
+        period_semantics: "closing_boundary_state",
+        missing_data_behavior: "missing_estimate_excluded",
+        multi_row_behavior:
+          "Included only when estimate and review classification resolve consistently across the parent rows; ambiguous parents are excluded and disclosed.",
+        excluded_multi_row_claim_numbers:
+          excludedParentNumbers(excludedMultiRow),
+        mutation_behavior: "report_only_no_claim_state_mutation",
+      },
+    },
+  );
+}
+
+function zeroEstimateReserveReviewMetric(closingOpen, evidence) {
+  const selected = closingOpen.filter((claim) => {
+    if (knownFiniteNumber(claim.estimate) !== 0) return false;
+    if (claim.multiRow && (claim.financialResolution?.estimate === "unresolved" || claim.parentMetricStates?.readyToClose === null)) return false;
+    const ready = knownFiniteNumber(claim.outstanding) === 0 || (claim.multiRow
+      ? claim.parentMetricStates?.readyToClose === true
+      : Boolean(getReadyToCloseCandidate(claim)));
+    const paymentZeroOnly = isPaymentZeroEstimate(claim) && knownFiniteNumber(claim.outstanding) !== 0;
+    return !ready || paymentZeroOnly || hasRecoveryPending(claim);
+  });
+  const included = selected.map((claim) => managementClaimDetail(claim, "estimate_or_reserve_review"));
+  return metric("zero_estimate_reserve_review", included, {
+    precision: "snapshot_exact",
+    claimIds: selected.map((claim) => claim.id),
+    definition: "Open zero-estimate claims without deterministic closure evidence; retained for estimate/reserve review, never inferred closed from payment status alone.",
+    evidence,
+    details: { mutation_behavior: "report_only_no_claim_state_mutation", closure_inference: "not_from_payment_status_or_zero_estimate_alone" },
+  });
+}
+
 function financialMetrics(closingOpen, evidence) {
   const fields = [
     ["financial_open_outstanding", "outstanding", "open_outstanding_exposure"],
@@ -1578,19 +1953,14 @@ function financialMetrics(closingOpen, evidence) {
     );
     const excludedIds = new Set(excluded.map((claim) => claim.id));
     const counted = closingOpen.filter((claim) => !excludedIds.has(claim.id));
-    const known = counted.filter(
-      (claim) =>
-        claim[field] !== null &&
-        claim[field] !== undefined &&
-        Number.isFinite(Number(claim[field])),
-    );
+    const known = counted.filter((claim) => amountCents(claim[field]) !== null);
     const warnings = [
       ...(excluded.length ? ["financial_multi_row_excluded"] : []),
       ...(known.length < counted.length ? ["financial_value_missing"] : []),
     ];
     metrics[id] = metric(
       id,
-      known.reduce((sum, claim) => sum + Number(claim[field]), 0),
+      known.reduce((sum, claim) => sum + amountCents(claim[field]), 0) / 100,
       {
         precision: "snapshot_exact",
         claimIds: known.map((claim) => claim.id),
@@ -1896,6 +2266,14 @@ function buildReportClaimRows(
         claim?.statusNormalized ?? null,
       ),
       insurer_snapshot: scalar("insurer", claim?.insurer ?? null),
+      broker_snapshot: isMultiRow
+        ? (parentClaim?.broker ?? null)
+        : (singleRow?.broker === null || singleRow?.broker === undefined || String(singleRow?.broker).trim() === ""
+            ? null
+            : String(singleRow.broker).trim()),
+      broker_reporting_group_snapshot: reportingBrokerGroup(
+        isMultiRow ? parentClaim : { ...singleRow, sourceClaimNumber: parent?.source_claim_number ?? null, broker: singleRow?.broker },
+      ),
       peril_snapshot: isMultiRow ? null : (singleRow?.peril ?? null),
       registered_date_snapshot: scalar(
         "registered_date",
@@ -2179,6 +2557,25 @@ export function buildReportSnapshot({
     closingEvidence,
     state.closingRows,
   );
+  metrics.insurer_distribution = insurerDistributionMetric(
+    closingOpen,
+    closingEvidence,
+  );
+  const brokerCaptured = closingSelection.manifest?.source_metadata?.broker_column_present === true ||
+    closingSelection.manifest?.source_metadata?.broker_capture_status === "captured";
+  metrics.brokerage_distribution = closingSelection.manifest && brokerCaptured
+    ? brokerageDistributionMetric(closingOpen, registeredIds, closingEvidence)
+    : unavailableMetric("brokerage_distribution", closingSelection.manifest ? "broker_not_captured" : "boundary_snapshot_unavailable", closingSelection.manifest ? ["broker_column_missing"] : []);
+  metrics.high_value_claim_detail = highValueClaimDetailMetric(
+    closingOpen,
+    registeredIds,
+    closingEvidence,
+  );
+  metrics.zero_estimate_closure_review = zeroEstimateClosureReviewMetric(
+    closingOpen,
+    closingEvidence,
+  );
+  metrics.zero_estimate_reserve_review = zeroEstimateReserveReviewMetric(closingOpen, closingEvidence);
   Object.assign(metrics, financialMetrics(closingOpen, closingEvidence));
   metrics.assignment_activity = assignmentActivity(periodChanges, period, {
     evidence_type: "observed_change",
@@ -2250,6 +2647,10 @@ export function buildReportSnapshot({
       "ready_to_close",
       "zero_estimate_payment_request",
       "operational_health",
+      "insurer_distribution",
+      "brokerage_distribution",
+      "high_value_claim_detail",
+      "zero_estimate_closure_review",
       "financial_open_outstanding",
       "financial_estimate_total",
       "financial_paid_total",
@@ -2308,6 +2709,31 @@ export function buildReportSnapshot({
     scope,
     coverage_status: coverage.status,
     coverage,
+    management_reporting: {
+      version: "claims-management-report-v1",
+      frozen_at_generation: true,
+      pdf_reads_snapshot_only: true,
+      portfolio_distribution: {
+        insurer_source_field: "insurer",
+        brokerage_source_field: "broker",
+        brokerage_value_rule: "REN0002 claim prefix groups as Renault; otherwise exact trimmed Cardinal Broker value; blank is Unknown / Unmapped",
+        brokerage_normalization: "approved_claim_prefix_mapping_only",
+        brokerage_capture_status: brokerCaptured ? "captured" : "not_captured",
+        broker_populated_row_count: closingSelection.manifest?.source_metadata?.broker_populated_row_count ?? null,
+        brokerage_pdf_rule: "top_10_by_open_claim_count_ties_alphabetical_then_other_unknown_always_explicit",
+      },
+      high_value: {
+        source_field: "outstanding",
+        threshold: MANDATE_THRESHOLD,
+        comparison: "greater_than_or_equal",
+      },
+      zero_estimate_closure_review: {
+        estimate_comparison: "known_exactly_zero",
+        automatic_closure: false,
+        closure_candidate_requires: "outstanding_zero_or_existing_ready_to_close_rule",
+      },
+      broker_grouping_rule: "Claims whose claim number begins REN0002 are grouped as Renault; Scout retains the original Cardinal Broker value for source evidence and drill-down.",
+    },
     opening_extract_id: openingSelection.manifest?.id ?? null,
     closing_extract_id: closingSelection.manifest?.id ?? null,
     metrics,

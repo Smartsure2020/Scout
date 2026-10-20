@@ -15,6 +15,10 @@ const migration = fs.readFileSync(
   ),
   "utf8",
 );
+const migrationV4 = fs.readFileSync(
+  path.join(root, "supabase/migrations/20261020072523_report_engine_v4_generation_guard.sql"),
+  "utf8",
+);
 
 test("both draft write routes reject incompatible generations before evidence or persistence", () => {
   const generate = backend.slice(
@@ -91,4 +95,12 @@ test("database guard blocks old code from downgrading or finalising a v3 draft w
     migration,
     /\bupdate\s+public\.|\bdelete\s+from\b|\binsert\s+into\b/i,
   );
+});
+
+test("v4 database guard preserves v3 and rejects older Worker rewrites of v4 drafts", () => {
+  assert.match(migrationV4, /claims-reporting-metrics-v4', 'scout-report-v4'/);
+  assert.match(migrationV4, /new\.finalised_engine_version is distinct from 'claims-report-engine-v4'/);
+  assert.match(migrationV4, /v4 draft cannot be overwritten by an older or unknown report engine/);
+  assert.match(migrationV4, /claims-reporting-metrics-v3', 'scout-report-v3'/);
+  assert.doesNotMatch(migrationV4, /\bupdate\s+public\.|\bdelete\s+from\b|\binsert\s+into\b/i);
 });
