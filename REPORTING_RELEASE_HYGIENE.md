@@ -16,7 +16,31 @@ These items are deliberately outside the current reporting hygiene pass.
 | Incomplete historical extract artefacts                              | Investigate the incomplete 6 October lineage and stuck upload; preserve source and accepted extract evidence.                                         |
 | Incorrect finalised 5–9 October report                               | Implement the audited supersession mechanism below before creating a corrected replacement. Do not edit the existing report.                          |
 | Visual and UX audit                                                  | Review Reports, Overview, Claims and Exceptions in a separate pass.                                                                                   |
-| Management reporting enhancements                                    | Consider insurer distribution, brokerage distribution, high-value claim details and zero-estimate closure candidates in a separate reporting release. |
+| Management reporting enhancements                                    | Implemented on `feat/reporting-management-enhancements`; see [REPORTING_MANAGEMENT_ENHANCEMENTS.md](REPORTING_MANAGEMENT_ENHANCEMENTS.md) for semantics and rollout. |
+
+## Management reporting rollout order
+
+1. Apply `20261019120000_cardinal_broker_source.sql`,
+   `20261020063354_broker_reporting_group_snapshot.sql`, and
+   `20261020072523_report_engine_v4_generation_guard.sql` in the controlled
+   release window, after the existing workflow-table schema migration.
+2. Probe `scout_claims.broker`, `scout_history_snapshots.broker`,
+   `scout_report_run_claims.broker_snapshot`, and
+   `scout_report_run_claims.broker_reporting_group_snapshot`.
+3. Deploy the Worker.
+4. Deploy the frontend.
+5. Upload the next Cardinal extract.
+6. Verify Broker capture status and populated count.
+7. Regenerate the draft.
+8. Complete real-volume PDF acceptance.
+9. Finalise.
+
+Do not apply migrations during code validation. Reports whose closing extract
+predates Worker/Broker capture will not gain Broker automatically; old history
+is not backfilled. Since adding `broker:null` changes claims-json-payload
+checksums, a same-date re-upload across the deployment boundary may be treated
+as a correction rather than a duplicate. Check correction lineage before
+retrying.
 
 ## Design only: audited supersession of a finalised report
 

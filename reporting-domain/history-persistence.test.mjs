@@ -35,6 +35,7 @@ function snapshot({
   matchable = true,
   status = "registered",
   terminal = false,
+  broker = null,
 } = {}) {
   return {
     claim_id: null,
@@ -63,6 +64,7 @@ function snapshot({
     paid: 0,
     mandate: 0,
     insurer: "Test Insurer",
+    broker,
     peril: "Fire",
     peril_type: "Property",
     insured: "Test Insured",
@@ -179,7 +181,7 @@ test("history persistence writes identities, immutable snapshots, changes, and a
   const current = manifest("extract-1", { comparable_to_previous: false });
   const normalized = {
     snapshots: [
-      snapshot({ row: "row-0", claim: "C-1" }),
+      snapshot({ row: "row-0", claim: "C-1", broker: "HRS" }),
       snapshot({
         row: "row-1",
         claim: "C-2",
@@ -203,6 +205,7 @@ test("history persistence writes identities, immutable snapshots, changes, and a
   const persisted = [...store.snapshots.values()][0];
   assert.equal("_raw_source" in persisted, false);
   assert.equal(persisted.extract_id, "extract-1");
+  assert.equal(persisted.broker, "HRS");
 });
 
 test("correction persistence uses the resolved prior-period baseline", async () => {

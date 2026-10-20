@@ -2,7 +2,7 @@ import { identityKey } from "./roles.mjs";
 
 const TIME_ZONE = "Africa/Johannesburg";
 
-export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v9";
+export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v12";
 export const PDF_RENDERER_VERSION = "cloudflare-browser-run-quick-action";
 
 const MONTHS = [
@@ -156,6 +156,11 @@ function formatPercent(value) {
   if (value === null || value === undefined || value === "") return "-";
   const number = Number(value);
   return Number.isFinite(number) ? `${(number * 100).toFixed(1)}%` : "-";
+}
+
+function formatBasisPointPercent(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${(number / 100).toFixed(2)}%` : "-";
 }
 
 function metricValue(snapshot, id, formatter = formatInteger) {
@@ -314,6 +319,21 @@ export function buildClaimsReportPdfViewModel(run = {}, workflow = {}) {
   const slaValue = asObject(
     metrics.sla_summary?.value || metrics.sla_summary?.details,
   );
+  const managementReporting = asObject(snapshot.management_reporting);
+  const insurerDistribution = metricAvailable(metrics.insurer_distribution)
+    ? asObject(metrics.insurer_distribution.value)
+    : null;
+  const highValueDetail = metricAvailable(metrics.high_value_claim_detail)
+    ? asObject(metrics.high_value_claim_detail.value)
+    : null;
+  const zeroEstimateClosureReview = metricAvailable(
+    metrics.zero_estimate_closure_review,
+  )
+    ? asArray(metrics.zero_estimate_closure_review.value)
+    : [];
+  const zeroEstimateReserveReview = metricAvailable(metrics.zero_estimate_reserve_review)
+    ? asArray(metrics.zero_estimate_reserve_review.value)
+    : [];
   return {
     reportType: source.report_type || snapshot.report_type || "weekly",
     periodLabel: periodLabel(source, snapshot),
@@ -350,6 +370,16 @@ export function buildClaimsReportPdfViewModel(run = {}, workflow = {}) {
     attentionItems,
     actionItems,
     workflowAvailable: workflow.available !== false,
+    managementLayout:
+      managementReporting.version === "claims-management-report-v1",
+    managementReporting,
+    insurerDistribution,
+    brokerageDistribution: metricAvailable(metrics.brokerage_distribution)
+      ? asObject(metrics.brokerage_distribution.value)
+      : null,
+    highValueDetail,
+    zeroEstimateClosureReview,
+    zeroEstimateReserveReview,
   };
 }
 
@@ -444,6 +474,9 @@ function renderOtherHolders(cards) {
 }
 
 function renderScorecards(view) {
+  if (!view.scorecards) {
+    return `<section class="report-section scorecards-section"><div class="section-kicker">Claims performance</div><h2>Claims Performance</h2><p class="section-intro">${escapeHtml(view.periodLabel)}. Frozen closing-population summary; handler scorecards are unavailable for this snapshot.</p><div class="kpi-grid compact-grid">${metricCard(view, "closing_inventory")}${metricCard(view, "new_claims_registered")}${metricCard(view, "open_claims_60_plus")}${metricCard(view, "claims_closed")}</div></section>`;
+  }
   const scorecards = view.scorecards;
   const cards = asArray(scorecards.cards);
   const primary = cards.filter((card) => PRIMARY_SCORECARD_ROLES.has(card.role));
@@ -644,6 +677,217 @@ function renderActions(view) {
   return `<section class="report-section"><div class="section-kicker">Action plan</div><h2>Recommendations &amp; Action Plan</h2><p class="section-intro">Actions linked to this report, shown exactly as frozen at finalisation.</p><table class="management-table action-table">${tableHeader(ACTION_HEADERS)}<tbody>${rows || emptyRow(6)}</tbody></table></section>`;
 }
 
+const PORTFOLIO_COLORS = [
+  "#23658b",
+  "#168b85",
+  "#b8781c",
+  "#7c5aa6",
+  "#a63d3d",
+  "#5c7a29",
+  "#617286",
+  "#bd6b33",
+];
+
+function insurerDonut(rows) {
+  if (!rows.length) return "";
+  let cursor = 0;
+  const segments = rows.map((row, index) => {
+    const start = cursor / 100;
+    cursor += Number(row.percentage_basis_points || 0);
+    const end = cursor / 100;
+    return `${PORTFOLIO_COLORS[index % PORTFOLIO_COLORS.length]} ${start}% ${end}%`;
+  });
+  return `<div class="donut-wrap"><div class="donut" role="img" aria-label="Insurer distribution of open claims" style="background:conic-gradient(${segments.join(",")})"><div class="donut-hole"><strong>${escapeHtml(formatInteger(rows.reduce((sum, row) => sum + Number(row.open_claims || 0), 0)))}</strong><span>open claims</span></div></div></div>`;
+}
+
+function renderInsurerDistribution(view) {
+  const distribution = view.insurerDistribution;
+  if (!distribution) {
+    return `<div class="portfolio-block"><h3>Insurer distribution</h3><p class="group-empty">Insurer distribution is unavailable in this frozen snapshot.</p></div>`;
+  }
+  const rows = asArray(distribution.rows);
+  const tableRows = rows
+    .map(
+      (row, index) =>
+        `<tr><th scope="row"><span class="legend-dot" style="background:${PORTFOLIO_COLORS[index % PORTFOLIO_COLORS.length]}"></span>${escapeHtml(row.name)}</th><td class="numeric">${escapeHtml(formatInteger(row.open_claims))}</td><td class="numeric">${escapeHtml(formatBasisPointPercent(row.percentage_basis_points))}</td><td class="numeric">${escapeHtml(formatCurrency(row.outstanding_exposure))}${Number(row.excluded_outstanding_claims || 0) > 0 ? `<small>${escapeHtml(plural(row.excluded_outstanding_claims, "claim excluded", "claims excluded"))}</small>` : ""}</td></tr>`,
+    )
+    .join("");
+  return `<div class="portfolio-block insurer-block"><h3>Open claims by insurer</h3><div class="portfolio-grid">${insurerDonut(rows)}<table class="management-table portfolio-table">${tableHeader(["Insurer", "Open claims", "% of open", "Known outstanding"])}<tbody>${tableRows || emptyRow(4)}</tbody><tfoot><tr><th scope="row">Total</th><td class="numeric">${escapeHtml(formatInteger(distribution.total_open_claims))}</td><td class="numeric">${escapeHtml(formatBasisPointPercent(distribution.percentage_basis_points_total))}</td><td class="numeric">${escapeHtml(formatCurrency(distribution.outstanding_exposure_total))}</td></tr></tfoot></table></div><p class="method-note">Exact canonical insurer values from the accepted closing open-claim population. Missing or unresolved values are shown as Unknown / Unmapped. Exposure excludes only unresolved or missing amounts and reconciles to the frozen financial total.</p></div>`;
+}
+
+function renderBrokerageDistribution(view) {
+  const brokerage = view.brokerageDistribution;
+  if (brokerage) {
+    const distributionRows = asArray(brokerage.rows);
+    const knownRows = distributionRows.filter((row) => row.bucket_type !== "unknown");
+    const top = knownRows.slice(0, 10);
+    const topNames = new Set(top.map((row) => `${row.bucket_type}:${row.name}`));
+    const unknown = distributionRows.find((row) => row.bucket_type === "unknown");
+    const visible = [...top];
+    if (unknown) visible.push(unknown);
+    const otherRows = knownRows.filter((row) => !topNames.has(`${row.bucket_type}:${row.name}`));
+    if (otherRows.length) {
+      visible.push({
+        name: `Other (${otherRows.filter((row) => row.bucket_type === "source_value").length} values)`,
+        bucket_type: "other",
+        open_claims: otherRows.reduce((sum, row) => sum + Number(row.open_claims || 0), 0),
+        percentage_basis_points: 0,
+        new_this_period: otherRows.reduce((sum, row) => sum + Number(row.new_this_period || 0), 0),
+        over_60_days: otherRows.reduce((sum, row) => sum + Number(row.over_60_days || 0), 0),
+        known_outstanding_exposure: otherRows.reduce((sum, row) => sum + Number(row.known_outstanding_exposure || 0), 0),
+        excluded_financial_claim_count: otherRows.reduce((sum, row) => sum + Number(row.excluded_financial_claim_count || 0), 0),
+      });
+    }
+    let remaining = 10000;
+    const allocations = visible.map((row) => {
+      const exact = brokerage.total_open_claims ? row.open_claims * 10000 / brokerage.total_open_claims : 0;
+      const floor = Math.floor(exact);
+      remaining -= floor;
+      return { row, floor, remainder: exact - floor };
+    });
+    const compareCodePointText = (left, right) => {
+      const a = [...String(left)], b = [...String(right)];
+      for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+        const difference = a[index].codePointAt(0) - b[index].codePointAt(0);
+        if (difference) return difference;
+      }
+      return a.length - b.length;
+    };
+    for (const allocation of [...allocations].sort((a, b) => b.remainder - a.remainder || compareCodePointText(a.row.name, b.row.name)).slice(0, Math.max(0, remaining))) allocation.floor += 1;
+    for (const allocation of allocations) allocation.row.percentage_basis_points = allocation.floor;
+    const displayName = (row) => row.bucket_type === "source_value" && ["Other", "Unknown / Unmapped", "Renault"].includes(row.name)
+      ? `${row.name} (source Broker value)` : row.name;
+    const body = visible
+      .map(
+        (row) =>
+          `<tr><th scope="row">${escapeHtml(displayName(row))}</th><td class="numeric">${escapeHtml(formatInteger(row.open_claims))}</td><td class="numeric">${escapeHtml(formatBasisPointPercent(row.percentage_basis_points))}</td><td class="numeric">${escapeHtml(formatInteger(row.new_this_period))}</td><td class="numeric">${escapeHtml(formatInteger(row.over_60_days))}</td><td class="numeric">${escapeHtml(formatCurrency(row.known_outstanding_exposure))}${Number(row.excluded_financial_claim_count || 0) ? `<small>${escapeHtml(plural(row.excluded_financial_claim_count, "claim excluded", "claims excluded"))}</small>` : ""}</td></tr>`,
+      )
+      .join("");
+    const brokerageDetails = asObject(metric(view.snapshot, "brokerage_distribution")?.details);
+    const cutoffTie = asObject(brokerageDetails.top_n_cutoff_tie);
+    const collisions = asArray(brokerageDetails.collision_warnings);
+    return `<div class="portfolio-block brokerage-block"><h3>Broker / Brokerage Distribution</h3><table class="management-table brokerage-table">${tableHeader(["Broker / Brokerage", "Open claims", "% of open", "New this period", "Over 60 days", "Known outstanding"])}<tbody>${body || emptyRow(6)}</tbody><tfoot><tr><th scope="row">Total</th><td class="numeric">${escapeHtml(formatInteger(brokerage.total_open_claims))}</td><td class="numeric">100.00%</td><td class="numeric">${escapeHtml(formatInteger(distributionRows.reduce((sum, row) => sum + Number(row.new_this_period || 0), 0)) )}</td><td class="numeric">${escapeHtml(formatInteger(distributionRows.reduce((sum, row) => sum + Number(row.over_60_days || 0), 0)) )}</td><td class="numeric">${escapeHtml(formatCurrency(brokerage.known_outstanding_exposure_total))}</td></tr></tfoot></table><p class="method-note">REN0002 claims are grouped as Renault; other populated values remain exact trimmed Cardinal Broker values. Top 10 non-blank groups are ranked by claim count; Unknown / Unmapped is separate and remaining values are grouped as Other for display only. ${otherRows.length ? `Other represents ${otherRows.length} exact reporting values. ` : ""}${cutoffTie.claim_count ? `The Top 10 cutoff splits a tie at ${cutoffTie.claim_count} claims. ` : ""}The frozen snapshot retains the full distribution.</p>${collisions.length ? `<p class="method-note">Informational value collision: ${collisions.map((warning) => warning.values.join(" / ")).join("; ")}. Exact source values remain separate; no consolidation is applied.</p>` : ""}</div>`;
+  }
+  const unavailableMetricValue = metric(view.snapshot, "brokerage_distribution");
+  const unavailableReason = asObject(unavailableMetricValue?.details).reason || asArray(unavailableMetricValue?.coverage_warnings)[0];
+  const unavailableText = unavailableReason === "broker_not_captured"
+    ? "Broker was not captured in this source extract."
+    : "Broker / Brokerage distribution is unavailable in this frozen snapshot.";
+  return `<div class="portfolio-block"><h3>Broker / Brokerage Distribution</h3><p class="group-empty">${escapeHtml(unavailableText)}</p></div>`;
+}
+
+function renderPortfolioDistribution(view) {
+  return `<section class="report-section management-page portfolio-page"><div class="section-kicker">Portfolio distribution</div><h2>Where is concentration or risk?</h2><p class="section-intro">Open-claim concentration at the accepted closing boundary, rendered only from the frozen report snapshot.</p>${renderInsurerDistribution(view)}${renderBrokerageDistribution(view)}</section>`;
+}
+
+function managementDetailTable(rows, { emptyText = "No claims in this frozen subset." } = {}) {
+  const body = asArray(rows)
+    .map(
+      (row) =>
+        `<tr><th scope="row">${escapeHtml(row.claim_number || "Not available")}</th><td>${escapeHtml(row.insured || "Not available")}</td><td>${escapeHtml(row.insurer || "Unknown / Unmapped")}</td><td>${escapeHtml(row.brokerage_group || row.brokerage || "Unknown / Unmapped")}</td><td>${escapeHtml(row.handler || "Unassigned")}</td><td>${escapeHtml(row.status || "Not available")}</td><td class="numeric">${escapeHtml(formatCurrency(row.estimate))}</td><td class="numeric">${escapeHtml(formatCurrency(row.outstanding))}</td><td>${escapeHtml(row.registered_date ? dateLabel(row.registered_date) : "Not available")}</td><td>${row.new_this_period ? "Yes" : "No"}</td></tr>`,
+    )
+    .join("");
+  return `<table class="management-table claim-detail-table">${tableHeader(["Claim", "Insured", "Insurer", "Broker / Brokerage", "Handler", "Status", "Original estimate (own damage)", "Outstanding", "Registered", "NEW THIS PERIOD"])}<tbody>${body || emptyRow(10, emptyText)}</tbody></table>`;
+}
+
+function highValueSummaryTable(rows) {
+  const body = asArray(rows).map((row) =>
+    `<tr><th scope="row">${escapeHtml(row.claim_number || "Not available")}</th><td>${escapeHtml(row.insured || "Not available")}</td><td>${escapeHtml(row.brokerage_group || row.brokerage || "Unknown / Unmapped")}</td><td>${escapeHtml(row.handler || "Unassigned")}</td><td class="numeric">${escapeHtml(formatCurrency(row.estimate))}</td><td class="numeric">${escapeHtml(formatCurrency(row.outstanding))}</td><td>${escapeHtml(row.registered_date ? dateLabel(row.registered_date) : "Not available")}</td></tr>`,
+  ).join("");
+  return `<table class="management-table high-value-summary-table">${tableHeader(["Claim", "Insured", "Broker / Brokerage", "Handler", "Original estimate (own damage)", "Outstanding", "Registered"])}<tbody>${body || emptyRow(7)}</tbody></table>`;
+}
+
+function zeroEstimateReserveTable(rows) {
+  const body = asArray(rows).map((row) =>
+    `<tr><th scope="row">${escapeHtml(row.claim_number || "Not available")}</th><td>${escapeHtml(row.insured || "Not available")}</td><td>${escapeHtml(row.brokerage_group || row.brokerage || "Unknown / Unmapped")}</td><td>${escapeHtml(row.handler || "Unassigned")}</td><td>${escapeHtml(row.status || "Not available")}</td><td class="numeric">${escapeHtml(formatCurrency(row.estimate))}</td><td class="numeric">${escapeHtml(formatCurrency(row.outstanding))}</td></tr>`,
+  ).join("");
+  return `<table class="management-table zero-estimate-review-table">${tableHeader(["Claim", "Insured", "Broker / Brokerage", "Handler", "Status", "Original estimate (own damage)", "Outstanding"])}<tbody>${body || emptyRow(7)}</tbody></table>`;
+}
+
+function renderHighValueDetail(view) {
+  const detail = view.highValueDetail;
+  if (!detail)
+    return `<div class="exception-block"><h3>High-value claims</h3><p class="group-empty">High-value claim detail is unavailable in this frozen snapshot.</p></div>`;
+  const excluded = asArray(detail.excluded_multi_row_claim_numbers);
+  const unresolved = asArray(detail.excluded_multi_row_claims);
+  const unresolvedRows = unresolved.map((row) => `<tr><th>${escapeHtml(row.claim_number || "Not available")}</th><td>${escapeHtml(row.insured || "Not available")}</td><td>${escapeHtml(row.brokerage_group || row.brokerage || "Unknown / Unmapped")}</td><td>${escapeHtml(row.handler || "Unassigned")}</td><td>${escapeHtml(asArray(row.section_amounts).map((section) => `Section ${section.section}: ${formatCurrency(section.outstanding)}`).join("; "))}</td><td>${escapeHtml(formatCurrency(row.largest_section))}</td><td>${escapeHtml(row.reason)}</td></tr>`).join("");
+  return `<div class="exception-block"><h3>High value (outstanding)</h3><p>${escapeHtml(formatInteger(detail.open_claims.length))} open high-value claims; ${escapeHtml(formatInteger(detail.new_this_period.length))} registered this period.</p>${highValueSummaryTable(detail.open_claims)}<p class="method-note">High value means known Outstanding greater than or equal to ${escapeHtml(formatCurrency(detail.threshold))}. The Mandate column is not used.</p>${unresolved.length ? `<h4>High-value items requiring review</h4><table class="management-table high-value-review-table">${tableHeader(["Claim", "Insured", "Broker / Brokerage", "Handler", "Section amounts (not summed)", "Largest section", "Reason"])}<tbody>${unresolvedRows}</tbody></table>` : excluded.length ? `<p class="method-note">Excluded multi-row claims: ${escapeHtml(excluded.join(", "))}.</p>` : ""}</div>`;
+}
+
+function closureReviewTable(rows) {
+  const body = asArray(rows)
+    .map(
+      (row) =>
+        `<tr><th scope="row">${escapeHtml(row.claim_number || "Not available")}</th><td>${escapeHtml(row.insured || "Not available")}</td><td>${escapeHtml(row.handler || "Unassigned")}</td><td>${escapeHtml(row.status || "Not available")}</td><td class="numeric">${escapeHtml(formatCurrency(row.estimate))}</td><td class="numeric">${escapeHtml(formatCurrency(row.outstanding))}</td><td class="numeric">${escapeHtml(formatCurrency(row.paid))}</td><td>${escapeHtml(row.last_known_activity ? dateLabel(row.last_known_activity) : "Not available")}</td><td>${escapeHtml(warningText(row.reason_flagged || "closure_review"))}</td></tr>`,
+    )
+    .join("");
+  return `<table class="management-table closure-review-table">${tableHeader(["Claim", "Insured", "Handler", "Status", "Estimate", "Outstanding", "Paid", "Last activity", "Reason flagged"])}<tbody>${body || emptyRow(9, "No zero-estimate claims met the deterministic closure-review rule.")}</tbody></table>`;
+}
+
+function renderOtherOperationalExceptions(view) {
+  const rows = view.operationalRows
+    .filter(([key, value]) => key !== "high_value" && (value === null || Number(value) > 0))
+    .map(
+      ([key, value]) =>
+        `<tr><th scope="row">${escapeHtml(OPERATIONAL_LABELS[key] || key)}</th><td class="numeric">${escapeHtml(formatInteger(value))}</td></tr>`,
+    )
+    .join("");
+  return rows
+    ? `<div class="exception-block"><h3>Other operational exceptions</h3><table class="simple-table compact-exception-table">${tableHeader(["Category", "Open claims"])}<tbody>${rows}</tbody></table></div>`
+    : "";
+}
+
+function renderManagementExceptions(view) {
+  const closureMetric = metric(view.snapshot, "zero_estimate_closure_review");
+  const excluded = asArray(asObject(closureMetric?.details).excluded_multi_row_claim_numbers);
+  return `<section class="report-section management-page exceptions-page"><div class="section-kicker">Management exceptions</div><h2>What requires attention, and who owns it?</h2>${renderOwnershipIssues(view)}${renderHighValueDetail(view)}<div class="exception-block"><h3>Zero-estimate claims requiring review</h3><h4>Ready-to-close candidates</h4>${closureReviewTable(view.zeroEstimateClosureReview)}<h4>Estimate / reserve review</h4>${zeroEstimateReserveTable(view.zeroEstimateReserveReview)}<p class="method-note">Payment status plus a zero Own Damage Original Estimate alone is not closure evidence. A claim is a candidate only when outstanding is zero or an existing deterministic ready-to-close rule supports it. No claim is mutated by this report.${excluded.length ? ` Excluded ambiguous multi-row claims: ${escapeHtml(excluded.join(", "))}.` : ""}</p></div>${renderOtherOperationalExceptions(view)}</section>`;
+}
+
+function renderManagementWorkflow(view) {
+  if (!view.attentionItems.length && !view.actionItems.length) return "";
+  const attentionRows = view.attentionItems.map(attentionRowHtml).join("");
+  const actionRows = view.actionItems.map(actionRowHtml).join("");
+  return `<section class="report-section management-page workflow-page"><div class="section-kicker">Claims queries and action plan</div><h2>What needs follow-through?</h2>${attentionRows ? `<div class="workflow-block"><h3>Claims queries and management attention</h3><table class="management-table attention-table">${tableHeader(ATTENTION_HEADERS)}<tbody>${attentionRows}</tbody></table></div>` : ""}${actionRows ? `<div class="workflow-block"><h3>Agreed actions</h3><table class="management-table action-table">${tableHeader(ACTION_HEADERS)}<tbody>${actionRows}</tbody></table></div>` : ""}</section>`;
+}
+
+function renderCompactMovement(view) {
+  const activity = asObject(metric(view.snapshot, "assignment_activity")?.details);
+  const rows = [
+    ["Claims with assignment activity", "assignment_activity"],
+    ["No movement over 14 days", "no_movement_over_14"],
+    ["No movement over 30 days", "no_movement_over_30"],
+    ["Ready to close", "ready_to_close"],
+  ]
+    .map(
+      ([label, id]) =>
+        `<tr><th scope="row">${escapeHtml(label)}</th><td class="numeric">${escapeHtml(metricValue(view.snapshot, id).text)}</td></tr>`,
+    )
+    .join("");
+  return `<div class="supporting-block"><h3>Movement indicators</h3><table class="simple-table compact-supporting-table">${tableHeader(["Indicator", "Claims"])}<tbody>${rows}</tbody></table><p class="method-note">Observed reassignments in: ${escapeHtml(formatInteger(activity.reassignments_in))}; out: ${escapeHtml(formatInteger(activity.reassignments_out))}.</p></div>`;
+}
+
+function renderCompactFinancial(view) {
+  const rows = [
+    ["Open outstanding exposure", "financial_open_outstanding"],
+    ["Open estimate total", "financial_estimate_total"],
+    ["Paid total", "financial_paid_total"],
+  ]
+    .map(
+      ([label, id]) =>
+        `<tr><th scope="row">${escapeHtml(label)}</th><td class="numeric">${escapeHtml(metricValue(view.snapshot, id, formatCurrency).text)}</td></tr>`,
+    )
+    .join("");
+  return `<div class="supporting-block"><h3>Financial position</h3><table class="simple-table compact-supporting-table">${tableHeader(["Known financial value", "Amount"])}<tbody>${rows}</tbody></table><p class="method-note">Deterministic sums from the frozen open population.${escapeHtml(financialExclusionNote(view))}</p></div>`;
+}
+
+function renderSupportingIntelligence(view) {
+  return `<section class="management-page supporting-page"><div class="section-kicker">Supporting intelligence</div><h2>What changed, and what explains it?</h2>${renderAgeing(view)}<div class="supporting-bottom-grid">${renderCompactMovement(view)}${renderCompactFinancial(view)}</div></section>`;
+}
+
+function renderSlaMethodologyPage(view) {
+  return `<section class="management-page methodology-page"><div class="section-kicker">SLA and methodology</div><h2>Supporting indicator and evidence controls</h2>${renderSla(view)}${renderCoverage(view)}</section>`;
+}
+
 function renderAgeing(view) {
   const rows = view.ageingRows
     .map(([key, value]) => {
@@ -756,7 +1000,11 @@ function renderHeader(view) {
 export function renderClaimsReportHtml(run = {}, workflow = {}) {
   const view = buildClaimsReportPdfViewModel(run, workflow);
   const type = view.reportType === "monthly" ? "Monthly" : "Weekly";
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Scout ${escapeHtml(type)} Claims Report - ${escapeHtml(view.periodLabel)}</title><style>${PDF_CSS}</style></head><body><main${view.scorecards ? ' class="scorecard-layout"' : ""}>${renderHeader(view)}${view.scorecards ? "" : `<section class="report-section executive"><div class="section-kicker">Executive summary</div><h2>Executive Summary</h2><p class="lead">A deterministic ${escapeHtml(type.toLowerCase())} management view of the accepted historical claim population for <strong>${escapeHtml(view.periodLabel)}</strong>. This report is frozen at finalisation and is suitable for management circulation.</p><div class="kpi-grid">${metricCard(view, "closing_inventory")}${metricCard(view, "new_claims_registered")}${metricCard(view, "claims_closed")}${metricCard(view, "sla_compliance", formatPercent)}</div></section>`}${view.scorecards ? `${renderScorecards(view)}${renderAttention(view)}${renderActions(view)}${renderSupportingIntro()}${renderAgeing(view)}${renderFinancial(view)}${renderActivity(view)}${renderOperational(view)}${renderSla(view)}` : `${renderAgeing(view)}${renderSla(view)}${renderOperational(view)}${renderHandlers(view)}${renderActivity(view)}${renderFinancial(view)}${renderAttention(view)}${renderActions(view)}`}${renderCoverage(view)}</main></body></html>`;
+  const body =
+    view.managementLayout && view.scorecards
+      ? `${renderScorecards(view)}${renderPortfolioDistribution(view)}${renderManagementExceptions(view)}${renderManagementWorkflow(view)}${renderSupportingIntelligence(view)}${renderSlaMethodologyPage(view)}`
+      : `${view.scorecards ? "" : `<section class="report-section executive"><div class="section-kicker">Executive summary</div><h2>Executive Summary</h2><p class="lead">A deterministic ${escapeHtml(type.toLowerCase())} management view of the accepted historical claim population for <strong>${escapeHtml(view.periodLabel)}</strong>. This report is frozen at finalisation and is suitable for management circulation.</p><div class="kpi-grid">${metricCard(view, "closing_inventory")}${metricCard(view, "new_claims_registered")}${metricCard(view, "claims_closed")}${metricCard(view, "sla_compliance", formatPercent)}</div></section>`}${view.scorecards ? `${renderScorecards(view)}${renderAttention(view)}${renderActions(view)}${renderSupportingIntro()}${renderAgeing(view)}${renderFinancial(view)}${renderActivity(view)}${renderOperational(view)}${renderSla(view)}` : `${renderAgeing(view)}${renderSla(view)}${renderOperational(view)}${renderHandlers(view)}${renderActivity(view)}${renderFinancial(view)}${renderAttention(view)}${renderActions(view)}`}${renderCoverage(view)}`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Scout ${escapeHtml(type)} Claims Report - ${escapeHtml(view.periodLabel)}</title><style>${PDF_CSS}</style></head><body><main${view.scorecards ? ' class="scorecard-layout"' : ""}>${renderHeader(view)}${body}</main></body></html>`;
 }
 
 export function renderClaimsReportPdfHeaderTemplate(run = {}, workflow = {}) {
@@ -777,10 +1025,11 @@ body { padding: 0; }
 .report-header { display: grid; grid-template-columns: 28mm 1fr 58mm; gap: 7mm; align-items: center; border-bottom: 3px solid var(--teal); padding-bottom: 6mm; margin-bottom: 7mm; }
 .brand-mark { color: #fff; background: var(--ink); border-radius: 4px; font-weight: 700; letter-spacing: .14em; padding: 8mm 3mm; text-align: center; font-size: 14px; }
 .eyebrow, .section-kicker { color: var(--teal); font-size: 8px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
-h1, h2, h3, p { margin-top: 0; }
+h1, h2, h3, h4, p { margin-top: 0; }
 h1 { margin-bottom: 1mm; font-size: 24px; line-height: 1.1; letter-spacing: -.02em; }
 h2 { margin-bottom: 3mm; font-size: 16px; line-height: 1.15; break-after: avoid; page-break-after: avoid; }
 h3 { margin: 5mm 0 2mm; font-size: 11px; }
+h4 { margin: 3mm 0 1.5mm; font-size: 9px; break-after: avoid; page-break-after: avoid; }
 .period { color: var(--muted); font-size: 13px; margin: 0; }
 .header-meta { display: grid; gap: 2mm; justify-items: end; text-align: right; color: var(--muted); font-size: 9px; }
 .report-section { break-inside: auto; margin: 0 0 5mm; }
@@ -889,11 +1138,65 @@ small { display: block; color: var(--muted); font-size: 8px; font-weight: 400; m
 .ownership-issues { margin-bottom: 4mm; }
 .ownership-issues h3 { margin: 0 0 1.5mm; font-size: 11px; break-after: avoid; page-break-after: avoid; }
 .ownership-table th:nth-child(1) { width: 14%; } .ownership-table th:nth-child(2) { width: 64%; } .ownership-table th:nth-child(3) { width: 22%; }
+.management-page { break-before: page; page-break-before: always; }
+.management-page > h2 { margin-bottom: 4mm; }
+.portfolio-block, .exception-block, .workflow-block { break-inside: auto; margin-bottom: 5mm; }
+.portfolio-grid { display: grid; grid-template-columns: 58mm 1fr; gap: 7mm; align-items: center; }
+.donut-wrap { display: grid; place-items: center; }
+.donut { width: 49mm; height: 49mm; border-radius: 50%; display: grid; place-items: center; }
+.donut-hole { width: 28mm; height: 28mm; border-radius: 50%; background: #fff; display: grid; place-content: center; text-align: center; border: 1px solid var(--line); }
+.donut-hole strong { display: block; font-size: 18px; line-height: 1; }
+.donut-hole span { color: var(--muted); font-size: 7.5px; margin-top: 1mm; }
+.legend-dot { display: inline-block; width: 2.4mm; height: 2.4mm; border-radius: 50%; margin-right: 1.5mm; vertical-align: middle; }
+.portfolio-table { font-size: 8.5px; }
+.portfolio-table th, .portfolio-table td { padding: 1.3mm 1.5mm; }
+.portfolio-table th:nth-child(1) { width: 34%; }
+.portfolio-table th:nth-child(2), .portfolio-table th:nth-child(3) { width: 14%; text-align: right; }
+.portfolio-table th:nth-child(4) { width: 38%; text-align: right; }
+.portfolio-table tfoot th, .portfolio-table tfoot td { background: var(--wash); font-weight: 700; border-top: 2px solid var(--line); }
+.portfolio-table tfoot, .brokerage-table tfoot { display: table-row-group; }
+.portfolio-block > h3, .exception-block > h3 { break-after: avoid; page-break-after: avoid; }
+.brokerage-block { break-before: page; page-break-before: always; }
+.portfolio-block, .exception-block { orphans: 3; widows: 3; }
+.brokerage-table { font-size: 7.4px; }
+.brokerage-table th:nth-child(1) { width: 35%; }
+.brokerage-table th:nth-child(n+2) { text-align: right; }
+.brokerage-table th:nth-child(2) { width: 11%; }
+.brokerage-table th:nth-child(3), .brokerage-table th:nth-child(4), .brokerage-table th:nth-child(5) { width: 12%; }
+.brokerage-table th:nth-child(6) { width: 18%; }
+.brokerage-table th, .brokerage-table td { padding: 1.2mm 1.5mm; }
+.brokerage-table tfoot th, .brokerage-table tfoot td { background: var(--wash); font-weight: 700; border-top: 2px solid var(--line); }
+.evidence-gap { border: 1px solid var(--amber); background: #fff8eb; border-radius: 3px; padding: 3mm 4mm; color: #6b4410; }
+.evidence-gap strong { display: block; text-transform: uppercase; letter-spacing: .08em; font-size: 8px; margin-bottom: 1mm; }
+.evidence-gap p { margin: 0; }
+.claim-detail-table, .closure-review-table { font-size: 7.4px; table-layout: fixed; }
+.claim-detail-table th, .claim-detail-table td, .closure-review-table th, .closure-review-table td { padding: 1.5mm 1.3mm; }
+.claim-detail-table th:nth-child(1) { width: 8%; } .claim-detail-table th:nth-child(2) { width: 14%; } .claim-detail-table th:nth-child(3), .claim-detail-table th:nth-child(4) { width: 10%; } .claim-detail-table th:nth-child(5) { width: 15%; } .claim-detail-table th:nth-child(6), .claim-detail-table th:nth-child(7) { width: 10%; } .claim-detail-table th:nth-child(8) { width: 10%; } .claim-detail-table th:nth-child(9) { width: 13%; }
+.closure-review-table th:nth-child(1) { width: 9%; } .closure-review-table th:nth-child(2) { width: 12%; } .closure-review-table th:nth-child(3) { width: 11%; } .closure-review-table th:nth-child(4) { width: 14%; } .closure-review-table th:nth-child(5), .closure-review-table th:nth-child(6), .closure-review-table th:nth-child(7) { width: 9%; } .closure-review-table th:nth-child(8) { width: 11%; } .closure-review-table th:nth-child(9) { width: 16%; }
+.compact-exception-table { max-width: 125mm; }
+.high-value-review-table { font-size: 7px; }
+.high-value-review-table th, .high-value-review-table td { padding: 1.1mm; }
+.high-value-summary-table, .zero-estimate-review-table { font-size: 7.3px; table-layout: fixed; }
+.high-value-summary-table th, .high-value-summary-table td, .zero-estimate-review-table th, .zero-estimate-review-table td { padding: 1.1mm 1.2mm; }
+.zero-estimate-review-table th, .zero-estimate-review-table td { padding: .6mm 1mm; }
+.high-value-summary-table th:nth-child(1) { width: 14%; } .high-value-summary-table th:nth-child(2) { width: 16%; } .high-value-summary-table th:nth-child(3) { width: 18%; } .high-value-summary-table th:nth-child(4) { width: 16%; } .high-value-summary-table th:nth-child(5) { width: 16%; } .high-value-summary-table th:nth-child(6) { width: 11%; } .high-value-summary-table th:nth-child(7) { width: 9%; }
+.zero-estimate-review-table th:nth-child(1) { width: 14%; } .zero-estimate-review-table th:nth-child(2) { width: 16%; } .zero-estimate-review-table th:nth-child(3) { width: 18%; } .zero-estimate-review-table th:nth-child(4) { width: 16%; } .zero-estimate-review-table th:nth-child(5) { width: 16%; } .zero-estimate-review-table th:nth-child(6) { width: 12%; } .zero-estimate-review-table th:nth-child(7) { width: 8%; }
+.exceptions-page .ownership-issues { margin-bottom: 5mm; }
+.supporting-page > .report-section, .methodology-page > .report-section { margin-bottom: 5mm; }
+.supporting-bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7mm; align-items: start; }
+.supporting-block { break-inside: avoid; page-break-inside: avoid; }
+.supporting-block h3 { margin-top: 0; }
+.compact-supporting-table th, .compact-supporting-table td { padding: 1.8mm 2mm; }
+.compact-supporting-table th:first-child { width: 68%; }
+.supporting-block .method-note { margin: 1.5mm 0 0; }
+.methodology-page .methodology { break-inside: auto; }
 .methodology { break-before: auto; }
 @media print {
   .two-column, .kpi-grid { break-inside: auto; }
   .callout, .sla-panel, .kpi-card { break-inside: avoid; }
   .report-section > h2, .report-section > .section-intro { break-after: avoid; page-break-after: avoid; }
   .handler-table, .attention-table, .action-table { break-inside: auto; }
+  .management-page { break-before: page; page-break-before: always; }
+  .portfolio-grid, .donut, .donut-hole, .evidence-gap { break-inside: avoid; page-break-inside: avoid; }
 }
 `;

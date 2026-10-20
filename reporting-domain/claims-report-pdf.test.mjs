@@ -273,6 +273,8 @@ test("PDF pagination reserves header and footer areas for table rows", () => {
 test("PDF pagination repeats table headers at page breaks and keeps section headings with content", () => {
   const html = renderClaimsReportHtml(fixtureRun(), { available: true });
   assert.match(html, /thead \{ display: table-header-group; \}/);
+  assert.match(html, /\.portfolio-table tfoot, \.brokerage-table tfoot \{ display: table-row-group; \}/);
+  assert.match(html, /\.brokerage-block \{ break-before: page; page-break-before: always; \}/);
   assert.match(
     html,
     /thead tr \{ break-inside: avoid; page-break-inside: avoid; \}/,
@@ -286,6 +288,7 @@ test("PDF pagination repeats table headers at page breaks and keeps section head
     /h2 \{ margin-bottom: 3mm; font-size: 16px; line-height: 1\.15; break-after: avoid; page-break-after: avoid; \}/,
   );
   assert.match(html, /\.report-section \{ break-inside: auto;/);
+  assert.match(html, /\.portfolio-block > h3, \.exception-block > h3 \{ break-after: avoid; page-break-after: avoid; \}/);
   assert.doesNotMatch(
     html,
     /@media print \{ \.report-section \{ break-inside: avoid;/,
@@ -305,7 +308,7 @@ test("PDF running header and footer use native print-margin templates", () => {
   assert.match(header, /height:8mm;padding:2mm 12mm 0;box-sizing:border-box/);
   assert.match(header, /line-height:10px/);
   assert.match(header, /<table style="width:100%;border-collapse:collapse">/);
-  assert.match(footer, /claims-management-pdf-v9/);
+  assert.match(footer, /claims-management-pdf-v12/);
   assert.match(footer, /padding:0 12mm;box-sizing:border-box/);
   assert.match(footer, /class="pageNumber"/);
   assert.match(footer, /class="totalPages"/);
@@ -428,6 +431,13 @@ test("scorecard report leads with handler cards in the manual report's three fig
   assert.deepEqual([...order].sort((a, b) => a - b), order);
   assert.doesNotMatch(html, /<table class="management-table handler-table"/);
   assert.match(html, /not a measure of handler performance/);
+});
+
+test("synthetic handler fixture never reports a 91+ population with an oldest age below 91", () => {
+  const cards = scorecardRun().metrics_snapshot.metrics.handler_scorecards.value.cards;
+  for (const card of cards) {
+    if (card.over_91 > 0) assert.ok(card.oldest_open_age_days >= 91, card.label);
+  }
 });
 
 test("scorecard report shows a red allocation alert and lists non-handler holders in a table", () => {
@@ -660,10 +670,8 @@ test("renamed metrics: payment status with zero estimate and High value on Outst
     { details: { high_value_basis: "outstanding", high_value_threshold: 100000, high_value_excluded_multi_row_claim_count: 2 } },
   );
   const html = renderClaimsReportHtml(run, { available: true });
-  assert.match(html, /<div class="kpi-label">Payment status with zero estimate<\/div>/);
   assert.match(html, /<th scope="row">High value \(outstanding\)<\/th><td class="numeric">4<\/td>/);
   assert.match(html, /High value is based on Outstanding of R\s100\s000 or more; the Mandate column is not used\. 2 multi-row claims whose sections straddle the threshold are excluded\./);
-  assert.match(html, /payment status with zero estimate|Payment status with zero estimate counts open claims whose status is payment-related and whose estimate is exactly zero; a missing estimate is not zero/);
   assert.doesNotMatch(html, /High value \/ mandate attention/);
   assert.doesNotMatch(html, /Payment request with zero estimate/);
 });

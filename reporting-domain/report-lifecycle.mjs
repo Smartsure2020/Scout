@@ -4,13 +4,16 @@ export const REPORT_STATUSES = Object.freeze([
   "archived",
 ]);
 
-export const REPORT_ENGINE_VERSION = "claims-report-engine-v3";
+export const REPORT_ENGINE_VERSION = "claims-report-engine-v4";
 
 const REPORT_GENERATIONS = Object.freeze({
   "claims-reporting-metrics-v2|scout-report-v2": Object.freeze({
     compatibleUpgradeTo: ["claims-reporting-metrics-v3|scout-report-v3"],
   }),
   "claims-reporting-metrics-v3|scout-report-v3": Object.freeze({
+    compatibleUpgradeTo: ["claims-reporting-metrics-v4|scout-report-v4"],
+  }),
+  "claims-reporting-metrics-v4|scout-report-v4": Object.freeze({
     compatibleUpgradeTo: [],
   }),
 });

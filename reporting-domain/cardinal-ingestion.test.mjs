@@ -53,6 +53,62 @@ test("CSV and XLSX worksheet fixtures produce the same canonical Scout claim", (
   assert.equal(fromCsv[0].estimate, 2000);
   assert.equal(fromCsv[0].outstanding, 1234.5);
   assert.equal(fromCsv[0].paid, 0);
+  assert.equal(fromCsv[0].broker, "HRS");
+  assert.equal(fromXlsx[0].broker, "HRS");
+});
+
+test("Cardinal Broker preserves spelling and case, trims surrounding whitespace, and maps blank to null", () => {
+  const [exact, blank] = mapCardinalRows([
+    { "Claim No.": "BR-1", "Claims Status": "Registered", "Claim Handler": "Handler One", Age: 1, Insurer: "I", Broker: "  D&A Insurance Broker cc  " },
+    { "Claim No.": "BR-2", "Claims Status": "Registered", "Claim Handler": "Handler One", Age: 1, Insurer: "I", Broker: " \t " },
+  ], normalizers);
+  assert.equal(exact.broker, "D&A Insurance Broker cc");
+  assert.equal(blank.broker, null);
+});
+
+test("missing Broker header is a non-blocking ingestion warning that remains visible after save", async () => {
+  const html = await readFile(new URL("../scout-smartsure/claims/index.html", import.meta.url), "utf8");
+  const qaHtml = await readFile(new URL("../scout-smartsure/claims/qa-preview-index.html", import.meta.url), "utf8");
+  assert.match(html, /Broker column not found; brokerage distribution will be unavailable for this extract/);
+  assert.match(html, /broker_column_present: brokerCaptured/);
+  assert.match(html, /broker_capture_status: brokerCaptured \? "captured" : "not_captured"/);
+  assert.match(qaHtml, /Broker column not found; brokerage distribution will be unavailable for this extract/);
+  assert.match(qaHtml, /broker_column_present: brokerCaptured/);
+  assert.match(qaHtml, /broker_capture_status: brokerCaptured \? "captured" : "not_captured"/);
+  assert.match(html, /Warning: \$\{uploadWarnings\.join\("; "\)\}/);
+  assert.doesNotMatch(html, /if \(!brokerCaptured\)[\s\S]{0,150}throw/);
+});
+
+test("Broker capture is derived from worksheet headers even when the first data row omits Broker", async () => {
+  const headers = ["Claim No.", "Broker"];
+  const noBrokerHeaders = ["Claim No.", "Age"];
+  const rows = [{ "Claim No.": "FIRST" }, { "Claim No.": "SECOND", Broker: "HRS" }];
+  const isCaptured = headers.some((column) => String(column).trim().toLowerCase() === "broker");
+  const isCapturedWithoutBroker = noBrokerHeaders.some((column) => String(column).trim().toLowerCase() === "broker");
+  assert.equal(isCaptured, true);
+  assert.equal(isCapturedWithoutBroker, false);
+  assert.equal(Object.hasOwn(rows[0], "Broker"), false);
+  assert.equal(rows[1].Broker, "HRS");
+
+  const [mainHtml, qaHtml] = await Promise.all([
+    readFile(new URL("../scout-smartsure/claims/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../scout-smartsure/claims/qa-preview-index.html", import.meta.url), "utf8"),
+  ]);
+  const headerRowExtraction = /const fileColumns = XLSX\.utils\.sheet_to_json\(ws, \{ header: 1 \}\)\[0\] \|\| \[\]/;
+  assert.match(mainHtml, headerRowExtraction);
+  assert.match(qaHtml, headerRowExtraction);
+  assert.doesNotMatch(mainHtml, /Object\.keys\(json\[0\]\)/);
+  assert.doesNotMatch(qaHtml, /Object\.keys\(json\[0\]\)/);
+});
+
+test("QA preview keeps fileColumns in upload scope and maps Broker values", async () => {
+  const html = await readFile(new URL("../scout-smartsure/claims/qa-preview-index.html", import.meta.url), "utf8");
+  assert.match(html, /const fileColumns = XLSX\.utils\.sheet_to_json\(ws, \{ header: 1 \}\)\[0\] \|\| \[\]/);
+  assert.match(html, /const missingCols = REQUIRED_COLS\.filter\(c => !fileColumns\.includes\(c\)\)/);
+  assert.match(html, /const brokerCaptured = fileColumns\.some/);
+  assert.match(html, /broker: String\(row\["Broker"\] \?\? ""\)\.trim\(\) \|\| null/);
+  assert.match(html, /const backendResult = await saveExtractToBackend\(processed, file\.name, historyResult\.entry, \{/);
+  assert.match(html, /Warning: \$\{uploadWarnings\.join\("; "\)\}/);
 });
 
 test("required-column validation uses canonical alias groups and knows every consumed column", () => {
@@ -143,6 +199,7 @@ test("Cardinal fields without dedicated history columns remain in immutable sour
   const evidence = normalized.snapshots[0].source_evidence;
   assert.equal(evidence.nettClaim, 1100);
   assert.equal(evidence.sumInsured, 500000);
+  assert.equal(normalized.snapshots[0].broker, "HRS");
   assert.deepEqual(evidence.ingestionQualityFlags, []);
 });
 
@@ -211,6 +268,7 @@ test("current-state mapping preserves operational dates, values, and source warn
   const mapped = buildCurrentStateClaimRecord(
     {
       claimNo: "CUR-1",
+      broker: "  HRS  ",
       handlerRaw: "One Handler",
       handler: "Handler One",
       registeredDate: "2026-09-29",
@@ -232,6 +290,7 @@ test("current-state mapping preserves operational dates, values, and source warn
   );
   assert.equal(mapped.handlerResolution, "resolved");
   assert.equal(mapped.record.handler_email, "handler.one@example.test");
+  assert.equal(mapped.record.broker, "HRS");
   assert.equal(mapped.record.registered_date, "2026-09-29");
   assert.equal(mapped.record.dol, "2026-09-28");
   assert.equal(mapped.record.age_days, 7);

@@ -4,6 +4,7 @@ const FIELD_ALIASES = Object.freeze({
   handler: Object.freeze(["Claim Handler"]),
   age: Object.freeze(["Age"]),
   insurer: Object.freeze(["Insurer"]),
+  broker: Object.freeze(["Broker"]),
   registeredDate: Object.freeze(["Claim Registered"]),
   dol: Object.freeze(["DOL"]),
   description: Object.freeze(["Description of Loss"]),
@@ -233,6 +234,7 @@ export function mapCardinalRow(
       settledValue === true ||
       ["true", "yes", "y", "1"].includes(String(settledValue ?? "").trim().toLowerCase()),
     insurer: String(firstSourceValue(row, FIELD_ALIASES.insurer) ?? ""),
+    broker: String(firstSourceValue(row, FIELD_ALIASES.broker) ?? "").trim() || null,
     comments: String(firstSourceValue(row, FIELD_ALIASES.comments) ?? ""),
     ingestionQualityFlags: [...new Set(quality)],
   };

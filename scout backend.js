@@ -62,6 +62,7 @@ import {
   validateActionInput,
   validateAttentionInput,
   workflowSnapshot,
+  workflowMembershipPayload,
 } from "./reporting-domain/management-workflow.mjs";
 import {
   buildClaimNoteNotification,
@@ -643,6 +644,17 @@ async function preserveHistoricalExtract(
     quality.warnings = [...(quality.warnings || []), "invalid_effective_at"];
     quality.quality_state = quality.hard_rejection ? "rejected" : "warning";
   }
+  if (sourceMetadata?.broker_column_present !== true && sourceMetadata?.broker_capture_status !== "captured") {
+    quality.warnings = [...(quality.warnings || []), "broker_column_missing"];
+    quality.quality_state = quality.hard_rejection ? "rejected" : "warning";
+    quality.broker_capture_status = "not_captured";
+    quality.broker_populated_row_count = 0;
+  } else {
+    quality.broker_capture_status = "captured";
+    quality.broker_populated_row_count = Number.isInteger(sourceMetadata?.broker_populated_row_count)
+      ? sourceMetadata.broker_populated_row_count
+      : null;
+  }
   if (users.unavailable)
     quality.warnings = [...(quality.warnings || []), "user_lookup_unavailable"];
   if (users.unavailable)
@@ -1008,7 +1020,6 @@ async function getWorkflowClaimContext(
         consensus("handler_source") || consensus("handler_email") || null,
       claim_status_snapshot: consensus("status_normalized"),
       insurer_snapshot: consensus("insurer"),
-      evidence_row_count: rows.length,
     };
   } catch {
     return {};
@@ -1023,8 +1034,10 @@ async function workflowSnapshotForReport(env, item, type, run, options = {}) {
     item.source_claim_number_snapshot || item.source_claim_number || null,
   );
   return {
-    ...workflowSnapshot(item, type, run.id, options),
-    ...claimContext,
+    ...workflowMembershipPayload({
+      ...workflowSnapshot(item, type, run.id, options),
+      ...claimContext,
+    }, type),
   };
 }
 
@@ -1921,6 +1934,7 @@ export function buildCurrentStateClaimRecord(
       peril: claim?.peril || "",
       peril_type: claim?.perilType || "",
       insurer: claim?.insurer || "",
+      broker: nullableCurrentText(claim?.broker),
       outstanding: nullableCurrentNumber(claim?.outstanding),
       estimate: nullableCurrentNumber(claim?.estimate),
       paid: nullableCurrentNumber(claim?.paid),
