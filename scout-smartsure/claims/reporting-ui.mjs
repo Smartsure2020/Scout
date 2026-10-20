@@ -5,6 +5,7 @@ const STATUS_LABELS = {
   draft: "Draft",
   finalised: "Finalised",
   archived: "Archived",
+  in_progress: "In progress",
 };
 
 const COVERAGE_LABELS = {
@@ -209,6 +210,14 @@ export function defaultReportPeriodStart(reportType, now = new Date()) {
   throw new RangeError(`Unsupported report type: ${reportType}`);
 }
 
+export function reportPeriodStartForDate(reportType, value) {
+  const date = typeof value === "string" ? value.slice(0, 10) : dateOnly(value);
+  if (!parseLocalDate(date)) return null;
+  if (reportType === "weekly") return startOfWeek(date);
+  if (reportType === "monthly") return monthStart(date);
+  throw new RangeError(`Unsupported report type: ${reportType}`);
+}
+
 export function shiftReportPeriod(reportType, periodStart, direction) {
   const amount = Number(direction) || 0;
   if (reportType === "weekly") return addDays(periodStart, amount * 7);
@@ -230,6 +239,24 @@ export function isFutureReportPeriod(
   const start =
     reportType === "weekly" ? startOfWeek(today) : monthStart(today);
   return String(periodStart || "") > String(start || "");
+}
+
+export function isReportPeriodInProgress(
+  reportType,
+  periodStart,
+  now = new Date(),
+) {
+  const today = todayInReportingZone(now);
+  const endExclusive =
+    reportType === "weekly"
+      ? addDays(periodStart, 5)
+      : shiftReportPeriod("monthly", periodStart, 1);
+  return Boolean(
+    parseLocalDate(periodStart) &&
+      endExclusive &&
+      today >= periodStart &&
+      today < endExclusive,
+  );
 }
 
 export function reportSnapshot(run) {
@@ -602,12 +629,18 @@ export function createReportingApi({
 }
 
 export function createReportState(now = new Date()) {
+  const weekly = defaultReportPeriodStart("weekly", now);
+  const monthly = defaultReportPeriodStart("monthly", now);
   return {
     activeTab: "weekly",
     reportOriginTab: null,
     periodStarts: {
-      weekly: defaultReportPeriodStart("weekly", now),
-      monthly: defaultReportPeriodStart("monthly", now),
+      weekly,
+      monthly,
+    },
+    primaryPeriodStarts: {
+      weekly,
+      monthly,
     },
     reports: [],
     selected: null,
@@ -707,6 +740,8 @@ function errorMessage(error) {
       return "This report changed before the action completed. Refresh the report and try again.";
     case "NETWORK_ERROR":
       return "The reporting service could not be reached. Try again shortly.";
+    case "REQUEST_FAILED":
+      return "The report action could not be completed. No report was changed. Try again.";
     default:
       return "Scout could not load Claims Reports right now. Try again shortly.";
   }
@@ -738,6 +773,33 @@ export function latestReportPeriodStart(reports, reportType, now = new Date()) {
     )
     .map(reportPeriodKey)
     .sort((a, b) => b.localeCompare(a))[0] || null;
+}
+
+export function resolveReportLifecycle({
+  reports = [],
+  reportType,
+  freshness = null,
+  now = new Date(),
+} = {}) {
+  const extractPeriodStart = reportPeriodStartForDate(
+    reportType,
+    freshness?.state === "unavailable" ? null : freshness?.extractDate,
+  );
+  const periodStart =
+    (extractPeriodStart &&
+    !isFutureReportPeriod(reportType, extractPeriodStart, now)
+      ? extractPeriodStart
+      : null) ||
+    latestReportPeriodStart(reports, reportType, now) ||
+    defaultReportPeriodStart(reportType, now);
+  const report = recordByPeriod(reports, reportType, periodStart);
+  return {
+    periodStart,
+    report,
+    state: report?.status || "not_generated",
+    inProgress: isReportPeriodInProgress(reportType, periodStart, now),
+    extractDate: freshness?.extractDate || null,
+  };
 }
 
 function pdfFilename(run) {
@@ -845,9 +907,14 @@ export class ReportsController {
         ? response.reports
         : [];
       for (const type of ["weekly", "monthly"]) {
-        this.state.periodStarts[type] =
-          latestReportPeriodStart(this.state.reports, type, this.now()) ||
-          defaultReportPeriodStart(type, this.now());
+        const lifecycle = resolveReportLifecycle({
+          reports: this.state.reports,
+          reportType: type,
+          freshness: this.getContext?.()?.freshness,
+          now: this.now(),
+        });
+        this.state.periodStarts[type] = lifecycle.periodStart;
+        this.state.primaryPeriodStarts[type] = lifecycle.periodStart;
       }
       this.state.historyLoaded = true;
       this.state.error = null;
@@ -918,6 +985,12 @@ export class ReportsController {
       if (run?.id) {
         const detail = await this.api.getReport(run.id);
         this.state.selected = normalizeReport(detail?.report).run;
+        const type = this.state.selected.report_type;
+        const periodStart = reportPeriodKey(this.state.selected);
+        if (periodStart && ["weekly", "monthly"].includes(type)) {
+          this.state.periodStarts[type] = periodStart;
+          this.state.primaryPeriodStarts[type] = periodStart;
+        }
       }
       this.state.error = successMessage
         ? { code: "SUCCESS", message: successMessage }
@@ -941,9 +1014,15 @@ export class ReportsController {
 
   async generate() {
     const type = this.state.activeTab;
-    if (!this.api || !["weekly", "monthly"].includes(type)) return;
+    if (
+      this.state.loading ||
+      !this.api ||
+      !["weekly", "monthly"].includes(type)
+    )
+      return;
     if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     const existing = recordByPeriod(this.state.reports, type, this.state.periodStarts[type]);
+    if (existing && existing.status !== "draft") return;
     const upgrade = isUpgradeableDraft(existing);
     if (upgrade && !(await this.confirm("upgrade"))) return;
     await this.perform("Generating report…", () =>
@@ -955,7 +1034,12 @@ export class ReportsController {
 
   async regenerate() {
     const id = this.state.selected?.id;
-    if (!id) return;
+    if (
+      this.state.loading ||
+      !id ||
+      this.state.selected?.status !== "draft"
+    )
+      return;
     if (this.isSyntheticQa()) return this.blockSyntheticMutation();
     const upgrade = isUpgradeableDraft(this.state.selected);
     if (!(await this.confirm(upgrade ? "upgrade" : "regenerate"))) return;
@@ -1538,13 +1622,21 @@ export class ReportsController {
     const periodStart = this.state.periodStarts[type];
     const report = this.state.selected;
     const syntheticQa = this.isSyntheticQa();
+    const freshness = this.getContext?.()?.freshness;
+    const inProgress = isReportPeriodInProgress(type, periodStart, this.now());
+    const extractNote = freshness?.extractDateLabel
+      ? `<span>Latest accepted extract: ${escapeHtml(freshness.extractDateLabel)}</span>`
+      : "";
+    const progressNote = inProgress
+      ? `${statusBadge("in_progress")}<span>Period still in progress</span>`
+      : "";
     if (!report) {
       return `<section class="report-period-shell">
         <div class="report-period-header">
-          <div><div class="report-period-label">${type === "weekly" ? "Weekly" : "Monthly"}</div><h2>${escapeHtml(formatPeriodLabel({ report_type: type, period_start_local_date: periodStart, period_end_local_date: type === "weekly" ? addDays(periodStart, 5) : addDays(shiftReportPeriod("monthly", periodStart, 1), 0) }))}</h2></div>
+          <div><div class="report-period-label">${type === "weekly" ? "Weekly" : "Monthly"}</div><h2>${escapeHtml(formatPeriodLabel({ report_type: type, period_start_local_date: periodStart, period_end_local_date: type === "weekly" ? addDays(periodStart, 5) : addDays(shiftReportPeriod("monthly", periodStart, 1), 0) }))}</h2>${progressNote || extractNote ? `<div class="report-meta-line">${progressNote}${extractNote}</div>` : ""}</div>
           <div class="report-period-actions"><button class="btn-secondary" data-report-action="period" data-direction="-1">Previous ${type === "weekly" ? "Week" : "Month"}</button><button class="btn-secondary" data-report-action="period" data-direction="1" ${isFutureReportPeriod(type, shiftReportPeriod(type, periodStart, 1)) ? "disabled" : ""}>Next ${type === "weekly" ? "Week" : "Month"}</button></div>
         </div>
-        <div class="report-empty-card"><div class="report-empty-icon">↗</div><h3>No ${type} report yet</h3><p>${syntheticQa ? "Report generation is disabled in the synthetic QA preview." : "Generate the Claims Report for this period when you are ready."}</p><button class="btn-primary" data-report-action="generate" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Generate Report"}</button></div>
+        <div class="report-empty-card"><div class="report-empty-icon">↗</div><h3>No report generated yet</h3><p>${syntheticQa ? "Report generation is disabled in the synthetic QA preview." : inProgress ? `Generate an in-progress ${type} Draft from the latest accepted extract. It will not be authoritative until it is finalised.` : `Generate the ${type} Claims Report for this period when you are ready.`}</p><button class="btn-primary" data-report-action="generate" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : `Generate ${type === "weekly" ? "Weekly" : "Monthly"} Report`}</button></div>
         ${type === "weekly" && this.state.workflowForm?.type === "attention" ? `<section class="report-section workflow-section workflow-standalone">${this.renderExistingClaimAttention()}<div class="section-header"><div><div class="section-title">Add Management Attention</div><p class="section-help">Create a live attention item now; add it to a Draft report later if needed.</p></div></div>${this.workflowForm(this.state.workflowForm)}</section>` : ""}
       </section>`;
     }
@@ -1564,10 +1656,13 @@ export class ReportsController {
     const canExportPdf =
       (isFinalised || isArchived) && coverage !== "insufficient";
     const canArchive = this.getContext?.()?.user?.role === "admin";
+    const inProgress =
+      isDraft &&
+      isReportPeriodInProgress(type, reportPeriodKey(run), this.now());
     return `<section class="report-period-shell">
       <div class="report-period-header">
-        <div><div class="report-period-label">${type === "weekly" ? "Weekly" : "Monthly"} Claims Report</div><h2>${escapeHtml(formatPeriodLabel(snapshot, type))}</h2><div class="report-meta-line">${statusBadge(run.status)} <span>Generated ${escapeHtml(this.formatDateTime(run.generated_at))}</span>${run.finalised_at ? `<span>· Finalised ${escapeHtml(this.formatDateTime(run.finalised_at))}</span>` : ""}</div></div>
-        <div class="report-period-actions">${isDraft ? `<button class="btn-secondary" data-report-action="regenerate" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Regenerate"}</button><button class="btn-primary" data-report-action="finalise" ${coverage === "insufficient" || this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Finalise"}</button>` : ""}${canExportPdf ? `<button class="btn-primary" data-report-action="export-pdf" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Export PDF"}</button>` : ""}${isFinalised && canArchive ? `<button class="btn-secondary" data-report-action="archive" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Archive"}</button>` : ""}${isArchived ? `<span class="report-action-note">Historical snapshot</span>` : ""}</div>
+        <div><div class="report-period-label">${type === "weekly" ? "Weekly" : "Monthly"} Claims Report</div><h2>${escapeHtml(formatPeriodLabel(snapshot, type))}</h2><div class="report-meta-line">${statusBadge(run.status)}${inProgress ? `${statusBadge("in_progress")}<span>This is an in-progress Draft and is not yet authoritative.</span>` : ""}<span>Generated ${escapeHtml(this.formatDateTime(run.generated_at))}</span>${run.finalised_at ? `<span>· Finalised ${escapeHtml(this.formatDateTime(run.finalised_at))}</span>` : ""}</div></div>
+        <div class="report-period-actions">${isDraft ? `<button class="btn-secondary" data-report-action="regenerate" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Regenerate Draft"}</button><button class="btn-primary" data-report-action="finalise" ${coverage === "insufficient" || this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Finalise"}</button>` : ""}${canExportPdf ? `<button class="btn-primary" data-report-action="export-pdf" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Export PDF"}</button>` : ""}${isFinalised && canArchive ? `<button class="btn-secondary" data-report-action="archive" ${this.state.loading || syntheticQa ? "disabled" : ""}>${syntheticQa ? "Unavailable in preview" : "Archive"}</button>` : ""}${isArchived ? `<span class="report-action-note">Historical snapshot</span>` : ""}</div>
       </div>
       <div class="report-coverage-banner ${coverage === "complete" ? "is-complete" : coverage === "insufficient" ? "is-insufficient" : "is-warning"}"><div><strong>Coverage</strong> ${coverageBadge(coverage, warnings.length)}</div><span>${escapeHtml(this.coverageCopy(coverage, snapshot))}</span></div>
       ${!isDraft && this.state.workflowForm?.type === "attention" ? `<section class="report-section workflow-section workflow-standalone">${this.renderExistingClaimAttention()}<div class="section-header"><div><div class="section-title">Add Management Attention</div><p class="section-help">This creates a live item without changing the historical report snapshot.</p></div></div>${this.workflowForm(this.state.workflowForm)}</section>` : ""}
@@ -1992,15 +2087,10 @@ export class ReportsController {
       "all";
     const current = {};
     for (const reportType of ["weekly", "monthly"]) {
-      const latestPeriod = latestReportPeriodStart(
-        this.state.reports,
-        reportType,
-        this.now(),
-      );
       current[reportType] = recordByPeriod(
         this.state.reports,
         reportType,
-        latestPeriod,
+        this.state.primaryPeriodStarts[reportType],
       )?.id;
     }
     const reports = this.state.reports
