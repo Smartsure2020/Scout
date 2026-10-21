@@ -6,12 +6,43 @@ import {
 } from "./date-periods.mjs";
 import { normalizeSourceStatus } from "./claims-qa.mjs";
 
-export const CLAIMS_RULE_VERSION = "claims-operations-rules-v1";
+export const CLAIMS_RULE_VERSION = "claims-operations-rules-v2";
 export const MANDATE_THRESHOLD = 100000;
 export const REPUDIATION_EXPIRY_DAYS = 270;
 
 export function normalizeStatus(status) {
   return normalizeSourceStatus(status);
+}
+
+export const POST_SETTLEMENT_OPERATIONAL_STATUSES = Object.freeze({
+  "awaiting recovery": Object.freeze({
+    key: "recovery_in_progress",
+    label: "Recovery in Progress",
+    sourceStatus: "AWAITING RECOVERY",
+  }),
+  "pending approach": Object.freeze({
+    key: "pending_third_party_approach",
+    label: "Pending Third-Party Approach",
+    sourceStatus: "PENDING APPROACH",
+  }),
+});
+
+/**
+ * Exact Cardinal statuses where the main indemnity may be settled while
+ * operational recovery / third-party work remains open. This classification
+ * deliberately does not inspect the source Settled flag: the protection applies
+ * to these statuses whether Settled is true or false.
+ */
+export function postSettlementOperationalCategory(status) {
+  return POST_SETTLEMENT_OPERATIONAL_STATUSES[normalizeStatus(status)] ?? null;
+}
+
+export function isPostSettlementOperationalStatus(status) {
+  return Boolean(postSettlementOperationalCategory(status));
+}
+
+export function isPostSettlementOperationalClaim(claim) {
+  return isPostSettlementOperationalStatus(claim?.status);
 }
 
 const STATUS_RULE_ENTRIES = [
@@ -330,6 +361,7 @@ export function getStatusRule(status) {
 }
 
 export function isTerminalStatus(status) {
+  if (isPostSettlementOperationalStatus(status)) return false;
   return TERMINAL_STATUSES.has(normalizeStatus(status));
 }
 
@@ -344,6 +376,7 @@ export const REPORTING_TERMINAL_STATUS_OVERRIDES = Object.freeze(
 
 export function isReportingTerminalStatus(status) {
   const normalized = normalizeStatus(status);
+  if (isPostSettlementOperationalStatus(normalized)) return false;
   return (
     TERMINAL_STATUSES.has(normalized) ||
     REPORTING_TERMINAL_STATUS_OVERRIDES.has(normalized)
@@ -360,6 +393,7 @@ export function isPaymentRelatedStatus(status) {
  * known and exactly zero. A missing estimate is not a zero estimate.
  */
 export function isPaymentZeroEstimate(claim) {
+  if (isPostSettlementOperationalClaim(claim)) return false;
   if (isTerminalStatus(claim?.status)) return false;
   if (!isPaymentRelatedStatus(claim?.status)) return false;
   const estimate = claim?.estimate;
@@ -537,6 +571,7 @@ export function hasRecoveryPending(claim) {
 
 export function getReadyToCloseCandidate(claim) {
   const status = normalizeStatus(claim?.status);
+  if (isPostSettlementOperationalClaim(claim)) return null;
   if (isTerminalStatus(claim?.status) && !status.startsWith("settled"))
     return null;
   const age = finiteNumber(claim?.workingAge ?? claim?.age) ?? 0;
@@ -612,6 +647,7 @@ export function getReadyToCloseCandidate(claim) {
 }
 
 export function isZeroEstimateAnomaly(claim) {
+  if (isPostSettlementOperationalClaim(claim)) return false;
   if (isTerminalStatus(claim?.status)) return false;
   const rule = getStatusRule(claim?.status);
   const estimate = finiteNumber(claim?.estimate);
@@ -719,6 +755,7 @@ function priorityFlag(code, level, score) {
 export function evaluatePriority(claim) {
   const status = getStatusEvaluation(claim?.status);
   const normalized = status.normalizedStatus;
+  const postSettlementOperational = isPostSettlementOperationalClaim(claim);
   if (status.terminal && !normalized.startsWith("settled")) {
     return {
       score: 0,
@@ -757,19 +794,21 @@ export function evaluatePriority(claim) {
   }
   const payment = rule?.category === "payment";
   const activeOrAssessor = ["active", "assessor"].includes(rule?.category);
-  if (payment && estimate === 0) {
-    flags.push(priorityFlag("payment_zero_estimate", "red", 95));
-    score += 95;
-  } else if (activeOrAssessor && estimate === 0 && age > 14) {
-    flags.push(priorityFlag("active_zero_estimate", "amber", 45));
-    score += 45;
-  }
-  if (outstanding > 0 && estimate === 0) {
-    flags.push(priorityFlag("outstanding_without_estimate", "amber", 50));
-    score += 50;
-  } else if (estimate === 0 && outstanding === 0 && !payment) {
-    flags.push(priorityFlag("zero_value_claim", "amber", 35));
-    score += 35;
+  if (!postSettlementOperational) {
+    if (payment && estimate === 0) {
+      flags.push(priorityFlag("payment_zero_estimate", "red", 95));
+      score += 95;
+    } else if (activeOrAssessor && estimate === 0 && age > 14) {
+      flags.push(priorityFlag("active_zero_estimate", "amber", 45));
+      score += 45;
+    }
+    if (outstanding > 0 && estimate === 0) {
+      flags.push(priorityFlag("outstanding_without_estimate", "amber", 50));
+      score += 50;
+    } else if (estimate === 0 && outstanding === 0 && !payment) {
+      flags.push(priorityFlag("zero_value_claim", "amber", 35));
+      score += 35;
+    }
   }
   if (rule && rule.category !== "repudiated") {
     if (rule.critical !== null && age >= rule.critical) {

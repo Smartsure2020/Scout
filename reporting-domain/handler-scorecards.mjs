@@ -3,8 +3,9 @@
  *
  * Mirrors the management "Claims Performance" cards:
  *   - Total Gross Registered: the current open book held by the handler at the
- *     closing boundary. Settled / terminal claims are excluded. (The label is
- *     kept from the manual report for familiarity.)
+ *     closing boundary. Exact terminal statuses are excluded; post-settlement
+ *     operational work remains included. (The label is kept from the manual
+ *     report for familiarity.)
  *   - New Allocated Claims: open claims whose `Claim Registered` date falls
  *     inside the report period, attributed to the handler shown on the accepted
  *     closing Cardinal extract. Scout does not know the original allocation
@@ -62,11 +63,11 @@ const ROLE_RANK = {
 
 export const SCORECARD_DEFINITIONS = Object.freeze({
   gross_registered:
-    "The current open book held by the handler at the closing extract: open claims only. Settled and other terminal claims (for example repudiated, rejected or duplicated) are excluded. The label is kept from the manual report.",
+    "The current operationally open book held by the handler at the closing extract. AWAITING RECOVERY and PENDING APPROACH remain included even when Cardinal's Settled flag is true; claims with an exact terminal status are excluded. The label is kept from the manual report.",
   new_allocated:
     "Open claims whose Claim Registered date falls inside the report period, attributed to the handler shown on the accepted closing Cardinal extract. Scout does not hold the original allocation event, so a claim moved between handlers during the period counts under the handler on the closing extract.",
   over_60:
-    "Open claims registered more than 60 calendar days before the closing extract (Cardinal Age greater than 60). Settled and other terminal claims are excluded. Scout derives this from the registration date and compares it with Cardinal's own Age as a QA check.",
+    "Operationally open claims registered more than 60 calendar days before the closing extract (Cardinal Age greater than 60). AWAITING RECOVERY and PENDING APPROACH remain eligible even when Cardinal's Settled flag is true; exact terminal statuses are excluded. Scout derives this from the registration date and compares it with Cardinal's own Age as a QA check.",
 });
 
 function text(value) {
@@ -384,7 +385,8 @@ export function buildHandlerScorecards({
     if (!card.handler_email && identity.handlerEmail)
       card.handler_email = identity.handlerEmail;
 
-    // Settled / terminal claims are outside every headline figure.
+    // Exact terminal claims are outside every headline figure. Post-settlement
+    // operational statuses are deliberately open and therefore remain included.
     if (!claim.open || claim.terminal) continue;
 
     const registered = claim.registeredDate;

@@ -7,6 +7,7 @@ do $$
 declare
   v3_id uuid;
   v2_id uuid;
+  v4_id uuid;
   historical_id uuid;
   report_row public.scout_report_runs%rowtype;
 begin
@@ -30,7 +31,7 @@ begin
     raise exception 'Expected v3 downgrade rejection';
   exception when others then
     if sqlerrm = 'Expected v3 downgrade rejection' or
-       sqlerrm not like 'A v3 report draft cannot be overwritten%' then
+       sqlerrm not like 'A v3 draft cannot be overwritten%' then
       raise;
     end if;
   end;
@@ -89,6 +90,40 @@ begin
     raise exception 'Known compatible upgrade did not persist';
   end if;
 
+  -- The application requires explicit permission for the v4-to-v5 draft
+  -- upgrade; once granted, the database permits that forward transition and
+  -- requires v5 engine attestation at finalisation.
+  insert into public.scout_report_runs (
+    report_type, period_start, period_end, scope_key, coverage_status,
+    metric_definition_version, claims_rule_version, quality_rule_version,
+    report_schema_version
+  ) values (
+    'weekly', '2026-10-19', '2026-10-24', 'guard-test-v5-upgrade', 'complete',
+    'claims-reporting-metrics-v4', 'claims-operations-rules-v1', 'quality-rule-v2',
+    'scout-report-v4'
+  ) returning id into v4_id;
+  update public.scout_report_runs
+  set metric_definition_version = 'claims-reporting-metrics-v5',
+      report_schema_version = 'scout-report-v5',
+      claims_rule_version = 'claims-operations-rules-v2'
+  where id = v4_id;
+  begin
+    update public.scout_report_runs
+    set status = 'finalised', finalised_at = now(),
+        finalised_engine_version = 'claims-report-engine-v4'
+    where id = v4_id;
+    raise exception 'Expected v5 finalise attestation rejection';
+  exception when others then
+    if sqlerrm = 'Expected v5 finalise attestation rejection' or
+       sqlerrm not like 'A v5 draft requires the v5 report engine%' then
+      raise;
+    end if;
+  end;
+  update public.scout_report_runs
+  set status = 'finalised', finalised_at = now(),
+      finalised_engine_version = 'claims-report-engine-v5'
+  where id = v4_id;
+
   -- Existing v2 finalised reports remain readable with no new engine field.
   insert into public.scout_report_runs (
     report_type, period_start, period_end, scope_key, coverage_status,
@@ -107,7 +142,7 @@ begin
     raise exception 'Historical finalised v2 report was not readable';
   end if;
 
-  raise notice 'PASS: downgrade, same-version, compatible upgrade, finalise, historical v2';
+  raise notice 'PASS: downgrade, same-version, compatible upgrades through v5, finalise, historical v2';
 end;
 $$;
 

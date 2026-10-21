@@ -19,8 +19,12 @@ import {
   getReadyToCloseCandidate,
   hasRecoveryPending,
   isPaymentZeroEstimate,
+  isPostSettlementOperationalClaim,
+  isPostSettlementOperationalStatus,
   isReportingTerminalStatus,
   MANDATE_THRESHOLD,
+  POST_SETTLEMENT_OPERATIONAL_STATUSES,
+  postSettlementOperationalCategory,
   REPUDIATION_EXPIRY_DAYS,
 } from "./claims-rules.mjs";
 import {
@@ -35,11 +39,11 @@ import {
   parentIdentityKey,
 } from "./claim-parent.mjs";
 
-export const REPORTING_METRIC_VERSION = "claims-reporting-metrics-v4";
-export const REPORT_SCHEMA_VERSION = "scout-report-v4";
+export const REPORTING_METRIC_VERSION = "claims-reporting-metrics-v5";
+export const REPORT_SCHEMA_VERSION = "scout-report-v5";
 export const REPORTING_QUALITY_VERSION = "scout-reporting-quality-v2";
 export const REPORTING_STATUS_CLASSIFICATION_VERSION =
-  "reporting-status-classification-v1";
+  "reporting-status-classification-v2";
 export const REPORTING_DOMAIN = "claims";
 export const REPORTING_TIME_ZONE = BUSINESS_TIME_ZONE;
 
@@ -378,18 +382,30 @@ export function previousReportingPeriod(
 /**
  * Apply the CURRENT reporting status classification to snapshot rows at report
  * time. Stored history is immutable and keeps whatever classification it was
- * written with; reports copy a row only when the reporting override list says
- * it is terminal (for example "Repudiated"), so every period is judged by one
- * rule and the change can never masquerade as a wave of closures between two
- * extracts.
+ * written with. Reports apply the current exact-status rule in their in-memory
+ * projection, so every period is judged consistently without rewriting the
+ * accepted history rows or manufacturing movement between extracts.
  */
 function applyReportingStatusClassification(snapshotsByExtract) {
   const reclassify = (rows) =>
     asArray(rows).map((row) => {
+      const status = row?.status_raw ?? row?.status_normalized;
+      // These exact operational statuses are protected open under v2 even if
+      // an older stored row was terminalised. History remains immutable; only
+      // the newly generated report projection is reclassified.
+      if (isPostSettlementOperationalStatus(status)) {
+        if (row?.open === true && row?.terminal !== true) return row;
+        return {
+          ...row,
+          terminal: false,
+          open: true,
+          stored_terminal: row?.terminal === true,
+        };
+      }
       // Only ever UPGRADE an open row to terminal (the reporting override list).
       // A row already stored as terminal is never touched.
       if (row?.terminal) return row;
-      if (!isReportingTerminalStatus(row?.status_raw ?? row?.status_normalized))
+      if (!isReportingTerminalStatus(status))
         return row;
       return { ...row, terminal: true, open: false, stored_terminal: false };
     });
@@ -709,6 +725,12 @@ function mapSnapshotToClaim(snapshot, manifest, timeZone) {
     insured: snapshot?.insured ?? null,
     description: snapshot?.description ?? null,
     comments: snapshot?.comments ?? null,
+    settled:
+      snapshot?.source_evidence?.settled === true
+        ? true
+        : snapshot?.source_evidence?.settled === false
+          ? false
+          : null,
     dataQualityFlags: asArray(snapshot?.data_quality_flags),
     sourceEvidence: snapshot?.source_evidence ?? null,
     snapshotExtractId: manifest?.id ?? null,
@@ -968,6 +990,7 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
   const parentMovementClass = childState(movementClass);
   const parentReadyClass = childState(readyClass);
   const parentZeroEstimateClass = childState(zeroEstimateClass);
+  const parentSettledState = childState((claim) => claim.settled);
   return {
     id: parentId,
     claim_id: parentCanonicalClaimId(parent, canonicalByKey),
@@ -1005,6 +1028,7 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
     insurer: consensusScalar(parent, "insurer"),
     broker: exactTextConsensus(parent, "broker"),
     insured: consensusScalar(parent, "insured"),
+    settled: parentSettledState,
     dataQualityFlags: parent.quality_flags,
     snapshotExtractId: manifest?.id ?? null,
     snapshotEffectiveDate: asOfDate,
@@ -1869,6 +1893,7 @@ function zeroEstimateClosureReviewMetric(closingOpen, evidence) {
   const included = [];
   const excludedMultiRow = [];
   for (const claim of closingOpen) {
+    if (isPostSettlementOperationalClaim(claim)) continue;
     if (
       claim.multiRow &&
       (claim.financialResolution?.estimate === "unresolved" ||
@@ -1918,6 +1943,7 @@ function zeroEstimateClosureReviewMetric(closingOpen, evidence) {
 
 function zeroEstimateReserveReviewMetric(closingOpen, evidence) {
   const selected = closingOpen.filter((claim) => {
+    if (isPostSettlementOperationalClaim(claim)) return false;
     if (knownFiniteNumber(claim.estimate) !== 0) return false;
     if (claim.multiRow && (claim.financialResolution?.estimate === "unresolved" || claim.parentMetricStates?.readyToClose === null)) return false;
     const ready = knownFiniteNumber(claim.outstanding) === 0 || (claim.multiRow
@@ -1934,6 +1960,109 @@ function zeroEstimateReserveReviewMetric(closingOpen, evidence) {
     evidence,
     details: { mutation_behavior: "report_only_no_claim_state_mutation", closure_inference: "not_from_payment_status_or_zero_estimate_alone" },
   });
+}
+
+function postSettlementOpenWorkMetric(closingOpen, scorecards, evidence) {
+  const definitions = Object.values(POST_SETTLEMENT_OPERATIONAL_STATUSES);
+  const categories = new Map(
+    definitions.map((definition) => [
+      definition.key,
+      {
+        key: definition.key,
+        category: definition.label,
+        source_status: definition.sourceStatus,
+        claims: [],
+      },
+    ]),
+  );
+  const protectedClaims = closingOpen.filter(isPostSettlementOperationalClaim);
+  const included = protectedClaims.filter((claim) => claim.settled === true);
+  for (const claim of included) {
+    const definition = postSettlementOperationalCategory(claim.status);
+    if (definition) categories.get(definition.key)?.claims.push(claim);
+  }
+
+  const holderByClaimId = new Map();
+  const cardsByKey = new Map(
+    asArray(scorecards?.value?.cards).map((card) => [card.key, card]),
+  );
+  for (const [cardKey, claimIds] of Object.entries(
+    asObject(scorecards?.populations?.gross_registered),
+  )) {
+    const card = cardsByKey.get(cardKey);
+    for (const claimId of asArray(claimIds)) {
+      holderByClaimId.set(String(claimId), {
+        key: cardKey,
+        label: card?.label || "Unassigned",
+        role: card?.role || "unassigned",
+      });
+    }
+  }
+
+  const claimIdsByCategory = {};
+  const valueCategories = [...categories.values()].map((entry) => {
+    const handlerCounts = new Map();
+    for (const claim of entry.claims) {
+      const holder = holderByClaimId.get(String(claim.id)) || {
+        key: "unassigned",
+        label: "No handler allocated",
+        role: "unassigned",
+      };
+      const current = handlerCounts.get(holder.key) || { ...holder, open_claim_count: 0 };
+      current.open_claim_count += 1;
+      handlerCounts.set(holder.key, current);
+    }
+    const ages = entry.claims
+      .map((claim) => knownFiniteNumber(claim.calendarAge))
+      .filter((age) => age !== null);
+    const claimIds = entry.claims.map((claim) => claim.id);
+    claimIdsByCategory[entry.key] = claimIds;
+    return {
+      key: entry.key,
+      category: entry.category,
+      source_status: entry.source_status,
+      open_claim_count: entry.claims.length,
+      over_60_days: ages.filter((age) => age > 60).length,
+      oldest_open_age_days: ages.length ? Math.max(...ages) : null,
+      handler_distribution: [...handlerCounts.values()].sort(
+        (left, right) =>
+          right.open_claim_count - left.open_claim_count ||
+          left.label.localeCompare(right.label),
+      ),
+    };
+  });
+  const unsettledProtected = protectedClaims.filter(
+    (claim) => claim.settled === false,
+  );
+  const unknownSettled = protectedClaims.filter(
+    (claim) => claim.settled === null,
+  );
+  return metric(
+    "post_settlement_open_work",
+    {
+      total_open_claim_count: included.length,
+      categories: valueCategories,
+    },
+    {
+      precision: "snapshot_exact",
+      claimIds: included.map((claim) => claim.id),
+      warnings: unknownSettled.length
+        ? ["post_settlement_settled_flag_unavailable"]
+        : [],
+      definition:
+        "Operationally open claims whose exact status is AWAITING RECOVERY or PENDING APPROACH and whose frozen Cardinal Settled flag is true.",
+      evidence,
+      details: {
+        claim_ids_by_category: claimIdsByCategory,
+        status_matching: "exact_normalized_status_only",
+        settled_requirement: "source_evidence.settled_exactly_true",
+        settled_false_open_claim_count: unsettledProtected.length,
+        settled_unavailable_open_claim_count: unknownSettled.length,
+        double_counting_policy:
+          "Explanatory subset of closing inventory and Total Gross Registered; never added to headline totals.",
+      },
+    },
+  );
 }
 
 function financialMetrics(closingOpen, evidence) {
@@ -2185,19 +2314,22 @@ function buildReportClaimRows(
       entry.membership_reasons[metricId] = value.definition || metricId;
       membership.set(String(claimId), entry);
     }
-    if (value?.details?.claim_ids_by_band) {
-      for (const [band, ids] of Object.entries(
-        value.details.claim_ids_by_band,
-      )) {
-        for (const claimId of ids) {
-          const entry = membership.get(String(claimId)) || {
-            metric_ids: [],
-            membership_reasons: {},
-          };
-          if (!entry.metric_ids.includes(metricId))
-            entry.metric_ids.push(metricId);
-          entry.membership_reasons[metricId] = band;
-          membership.set(String(claimId), entry);
+    for (const grouping of [
+      value?.details?.claim_ids_by_band,
+      value?.details?.claim_ids_by_category,
+    ]) {
+      if (grouping) {
+        for (const [band, ids] of Object.entries(grouping)) {
+          for (const claimId of ids) {
+            const entry = membership.get(String(claimId)) || {
+              metric_ids: [],
+              membership_reasons: {},
+            };
+            if (!entry.metric_ids.includes(metricId))
+              entry.metric_ids.push(metricId);
+            entry.membership_reasons[metricId] = band;
+            membership.set(String(claimId), entry);
+          }
         }
       }
     }
@@ -2608,6 +2740,11 @@ export function buildReportSnapshot({
     scorecards.value,
     scorecardState,
   );
+  metrics.post_settlement_open_work = postSettlementOpenWorkMetric(
+    closingOpen,
+    scorecards,
+    closingEvidence,
+  );
   // Each headline figure is also a numeric team metric whose population is
   // tagged per handler card, so the web page can drill from a card number to
   // its claims and the engine gives previous-period comparison for free.
@@ -2656,6 +2793,7 @@ export function buildReportSnapshot({
       "financial_estimate_total",
       "financial_paid_total",
       "handler_scorecards",
+      "post_settlement_open_work",
       "scorecard_gross_registered",
       "scorecard_new_allocated",
       "scorecard_over_60",
@@ -2711,7 +2849,7 @@ export function buildReportSnapshot({
     coverage_status: coverage.status,
     coverage,
     management_reporting: {
-      version: "claims-management-report-v1",
+      version: "claims-management-report-v2",
       frozen_at_generation: true,
       pdf_reads_snapshot_only: true,
       portfolio_distribution: {
@@ -2732,6 +2870,15 @@ export function buildReportSnapshot({
         estimate_comparison: "known_exactly_zero",
         automatic_closure: false,
         closure_candidate_requires: "outstanding_zero_or_existing_ready_to_close_rule",
+      },
+      post_settlement_open_work: {
+        operational_statuses: Object.values(
+          POST_SETTLEMENT_OPERATIONAL_STATUSES,
+        ).map((definition) => definition.sourceStatus),
+        settled_requirement: "source_evidence.settled_exactly_true",
+        included_in_closing_inventory: true,
+        included_in_total_gross_registered: true,
+        automatic_closure: false,
       },
       broker_grouping_rule: "Claims whose claim number begins REN0002 are grouped as Renault; Scout retains the original Cardinal Broker value for source evidence and drill-down.",
     },

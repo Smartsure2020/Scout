@@ -123,7 +123,7 @@ test("Repudiated claims leave the open book and Total Gross Registered, even fro
   assert.equal(report.metrics.opening_inventory.value, 1);
   assert.equal(report.metrics.closing_inventory.value, 3);
   assert.equal(report.metrics.handler_scorecards.value.totals.gross_registered, 3);
-  assert.equal(report.status_classification_version, "reporting-status-classification-v1");
+  assert.equal(report.status_classification_version, "reporting-status-classification-v2");
 });
 
 test("changing the classification does not fake a wave of closures", () => {

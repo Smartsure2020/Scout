@@ -758,9 +758,9 @@ function recordByPeriod(reports, reportType, periodStart) {
 
 function isUpgradeableDraft(run) {
   return run?.status === "draft" &&
-    run.metric_definition_version === "claims-reporting-metrics-v2" &&
-    run.report_schema_version === "scout-report-v2" &&
-    run.serving_report_engine_version === "claims-report-engine-v3";
+    run.metric_definition_version === "claims-reporting-metrics-v4" &&
+    run.report_schema_version === "scout-report-v4" &&
+    run.serving_report_engine_version === "claims-report-engine-v5";
 }
 
 export function latestReportPeriodStart(reports, reportType, now = new Date()) {
@@ -824,6 +824,11 @@ function claimRowMatchesFilter(row, filter, metricId = "") {
     return (
       String(row.membership_reasons?.ageing_distribution || "") ===
       filter.slice(7)
+    );
+  if (filter.startsWith("post-settlement:"))
+    return (
+      String(row.membership_reasons?.post_settlement_open_work || "") ===
+      filter.slice(16)
     );
   return true;
 }
@@ -1831,6 +1836,40 @@ export class ReportsController {
     return `<section class="report-section scorecards"><div class="section-header"><div><div class="section-title">Claims Performance</div><p class="section-help">${escapeHtml(formatPeriodLabel(snapshot))}. Open claims only. New Allocated Claims: registered in the period. Over 60 Days: registered more than 60 days before close. Full definitions are under Report details.</p></div></div>${alertBox(alerts.critical, "critical")}${alertBox(alerts.confirm, "warning")}<div class="scorecard-team"><strong>Team total</strong><span>Total Gross Registered ${metricDrillButton("team gross registered", "scorecard_gross_registered", metricState(snapshot, "scorecard_gross_registered"), `<b>${escapeHtml(formatInteger(totals.gross_registered))}</b>`)}${scorecardDelta(totals.gross_registered, previousTotals ? previousTotals.gross_registered : null)}</span><span>New Allocated Claims ${metricDrillButton("team new allocated", "scorecard_new_allocated", metricState(snapshot, "scorecard_new_allocated"), `<b>${escapeHtml(formatInteger(totals.new_allocated))}</b>`)}${scorecardDelta(totals.new_allocated, previousTotals ? previousTotals.new_allocated : null)}</span><span>Over 60 Days ${metricDrillButton("team over 60", "scorecard_over_60", metricState(snapshot, "scorecard_over_60"), `<b>${escapeHtml(formatInteger(totals.over_60))}</b>`)}${scorecardDelta(totals.over_60, previousTotals ? previousTotals.over_60 : null, true)}</span><span>Terminal closures <b>${escapeHtml(renderMetricValue(closed, "integer"))}</b></span><span>Left the extract <b>${escapeHtml(renderMetricValue(left, "integer"))}</b> <small>not closures</small></span></div><div class="scorecard-grid">${primary.map(card).join("") || `<div class="report-unavailable">— <span>No handler data in the frozen snapshot.</span></div>`}</div>${holders}</section>`;
   }
 
+  renderPostSettlementOpenWork(snapshot) {
+    const state = metricState(snapshot, "post_settlement_open_work");
+    if (!state.available || !state.value) return "";
+    const categories = Array.isArray(state.value.categories)
+      ? state.value.categories
+      : [];
+    const rows = categories
+      .map((category) => {
+        const handlers = Array.isArray(category.handler_distribution)
+          ? category.handler_distribution
+              .map(
+                (handler) =>
+                  `${handler.label || "Unassigned"} (${formatInteger(handler.open_claim_count)})`,
+              )
+              .join(", ")
+          : "";
+        const count = metricDrillButton(
+          `${category.category || "Post-settlement"} claims`,
+          "post_settlement_open_work",
+          state,
+          formatInteger(category.open_claim_count),
+          `post-settlement:${category.key}`,
+        );
+        const oldest =
+          category.oldest_open_age_days === null ||
+          category.oldest_open_age_days === undefined
+            ? "—"
+            : `${formatInteger(category.oldest_open_age_days)} days`;
+        return `<tr><th scope="row">${escapeHtml(category.category || "Operational follow-up")}</th><td>${escapeHtml(category.source_status || "Not available")}</td><td>${count}</td><td>${escapeHtml(formatInteger(category.over_60_days))}</td><td>${escapeHtml(oldest)}</td><td>${escapeHtml(handlers || "No claims")}</td></tr>`;
+      })
+      .join("");
+    return `<section class="report-section post-settlement-section"><div class="section-header"><div><div class="section-title">Post-Settlement Open Work</div><p class="section-help">Main claim settled; operational recovery / third-party work remains open. This is an explanatory subset of Total Gross Registered and is not added to headline totals again.</p></div><span class="section-badge amber">${escapeHtml(formatInteger(state.value.total_open_claim_count))} open</span></div><div class="report-table-scroll"><table class="report-handler-table"><thead><tr><th scope="col">Category</th><th scope="col">Exact source status</th><th scope="col">Open claims</th><th scope="col">Over 60 Days</th><th scope="col">Oldest open age</th><th scope="col">Handler ownership</th></tr></thead><tbody>${rows || `<tr><td colspan="6" class="report-table-empty">No post-settlement operational claims in this frozen snapshot.</td></tr>`}</tbody></table></div><p class="report-footnote">Only claims with Cardinal Settled = True and exact normalized status AWAITING RECOVERY or PENDING APPROACH appear here. Settled = False claims with those statuses remain operationally open in the ordinary open book.</p></section>`;
+  }
+
   renderSupporting(snapshot) {
     return `<div class="report-supporting-head"><div class="report-period-label">Supporting intelligence</div><h2>Supporting Intelligence</h2><p class="page-sub">The context behind the headline figures. SLA status is a supporting indicator, not a handler-performance measure.</p></div>
     <div class="report-two-col"><section class="report-section"><div class="section-header"><div class="section-title">Claims Movement</div></div>${this.renderMovement(snapshot, true)}</section><section class="report-section"><div class="section-header"><div class="section-title">Management Ageing</div></div>${this.renderAgeing(snapshot)}</section></div>
@@ -1841,7 +1880,7 @@ export class ReportsController {
 
   renderReportBody(run, snapshot) {
     if (this.hasScorecards(snapshot))
-      return `${this.renderScorecards(snapshot)}${this.renderWorkflow(run)}${this.renderSupporting(snapshot)}`;
+      return `${this.renderScorecards(snapshot)}${this.renderPostSettlementOpenWork(snapshot)}${this.renderWorkflow(run)}${this.renderSupporting(snapshot)}`;
     return `${this.renderReportSections(snapshot)}${this.renderWorkflow(run)}`;
   }
 
@@ -2152,6 +2191,16 @@ export class ReportsController {
       return AGEING_LABELS[filter.slice(7)] || "Ageing claims";
     if (metricId === "operational_health")
       return OPERATIONAL_LABELS[filter.slice(9)] || "Operational health";
+    if (metricId === "post_settlement_open_work") {
+      const key = filter.startsWith("post-settlement:") ? filter.slice(16) : "";
+      return (
+        {
+          recovery_in_progress: "Post-Settlement Open Work · Recovery in Progress",
+          pending_third_party_approach:
+            "Post-Settlement Open Work · Pending Third-Party Approach",
+        }[key] || "Post-Settlement Open Work"
+      );
+    }
     if (metricId === "handler_performance") return "Handler claim population";
     return (
       {
