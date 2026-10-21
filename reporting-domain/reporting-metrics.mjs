@@ -23,7 +23,7 @@ import {
   isPostSettlementOperationalStatus,
   isReportingTerminalStatus,
   MANDATE_THRESHOLD,
-  POST_SETTLEMENT_OPERATIONAL_STATUSES,
+  POST_SETTLEMENT_OPERATIONAL_CATEGORIES,
   postSettlementOperationalCategory,
   REPUDIATION_EXPIRY_DAYS,
 } from "./claims-rules.mjs";
@@ -1963,7 +1963,7 @@ function zeroEstimateReserveReviewMetric(closingOpen, evidence) {
 }
 
 function postSettlementOpenWorkMetric(closingOpen, scorecards, evidence) {
-  const definitions = Object.values(POST_SETTLEMENT_OPERATIONAL_STATUSES);
+  const definitions = POST_SETTLEMENT_OPERATIONAL_CATEGORIES;
   const categories = new Map(
     definitions.map((definition) => [
       definition.key,
@@ -1971,12 +1971,12 @@ function postSettlementOpenWorkMetric(closingOpen, scorecards, evidence) {
         key: definition.key,
         category: definition.label,
         source_status: definition.sourceStatus,
+        source_statuses: definition.sourceStatuses,
         claims: [],
       },
     ]),
   );
-  const protectedClaims = closingOpen.filter(isPostSettlementOperationalClaim);
-  const included = protectedClaims.filter((claim) => claim.settled === true);
+  const included = closingOpen.filter(isPostSettlementOperationalClaim);
   for (const claim of included) {
     const definition = postSettlementOperationalCategory(claim.status);
     if (definition) categories.get(definition.key)?.claims.push(claim);
@@ -2021,6 +2021,7 @@ function postSettlementOpenWorkMetric(closingOpen, scorecards, evidence) {
       key: entry.key,
       category: entry.category,
       source_status: entry.source_status,
+      source_statuses: entry.source_statuses,
       open_claim_count: entry.claims.length,
       over_60_days: ages.filter((age) => age > 60).length,
       oldest_open_age_days: ages.length ? Math.max(...ages) : null,
@@ -2031,12 +2032,6 @@ function postSettlementOpenWorkMetric(closingOpen, scorecards, evidence) {
       ),
     };
   });
-  const unsettledProtected = protectedClaims.filter(
-    (claim) => claim.settled === false,
-  );
-  const unknownSettled = protectedClaims.filter(
-    (claim) => claim.settled === null,
-  );
   return metric(
     "post_settlement_open_work",
     {
@@ -2046,18 +2041,13 @@ function postSettlementOpenWorkMetric(closingOpen, scorecards, evidence) {
     {
       precision: "snapshot_exact",
       claimIds: included.map((claim) => claim.id),
-      warnings: unknownSettled.length
-        ? ["post_settlement_settled_flag_unavailable"]
-        : [],
       definition:
-        "Operationally open claims whose exact status is AWAITING RECOVERY or PENDING APPROACH and whose frozen Cardinal Settled flag is true.",
+        "Operationally open claims whose exact normalized status is one of the approved recovery-in-progress or pending-third-party-approach statuses; the separate Cardinal Settled flag is not consulted for classification.",
       evidence,
       details: {
         claim_ids_by_category: claimIdsByCategory,
         status_matching: "exact_normalized_status_only",
-        settled_requirement: "source_evidence.settled_exactly_true",
-        settled_false_open_claim_count: unsettledProtected.length,
-        settled_unavailable_open_claim_count: unknownSettled.length,
+        settled_requirement: "not_consulted_exact_status_is_authoritative",
         double_counting_policy:
           "Explanatory subset of closing inventory and Total Gross Registered; never added to headline totals.",
       },
@@ -2872,10 +2862,10 @@ export function buildReportSnapshot({
         closure_candidate_requires: "outstanding_zero_or_existing_ready_to_close_rule",
       },
       post_settlement_open_work: {
-        operational_statuses: Object.values(
-          POST_SETTLEMENT_OPERATIONAL_STATUSES,
-        ).map((definition) => definition.sourceStatus),
-        settled_requirement: "source_evidence.settled_exactly_true",
+        operational_statuses: POST_SETTLEMENT_OPERATIONAL_CATEGORIES.flatMap(
+          (definition) => definition.sourceStatuses,
+        ),
+        settled_requirement: "not_consulted_exact_status_is_authoritative",
         included_in_closing_inventory: true,
         included_in_total_gross_registered: true,
         automatic_closure: false,

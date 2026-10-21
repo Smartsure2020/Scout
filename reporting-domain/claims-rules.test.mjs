@@ -26,6 +26,7 @@ import {
   isTerminalStatus,
   isZeroEstimateAnomaly,
   normalizeStatus,
+  postSettlementOperationalCategory,
 } from "./claims-rules.mjs";
 import { claimIdentity, normalizeClaim } from "./claims-contract.mjs";
 import {
@@ -56,8 +57,16 @@ test("status normalization, terminal/open, mapped, and unmapped states", () => {
 });
 
 test("post-settlement operational statuses stay open and protected regardless of Settled", () => {
-  for (const status of ["AWAITING RECOVERY", "PENDING APPROACH"]) {
-    for (const settled of [true, false]) {
+  const statuses = [
+    ["AWAITING RECOVERY", "recovery_in_progress"],
+    ["SETTLED - RECOVERY PENDING", "recovery_in_progress"],
+    ["SETTLED - AWAITING RECOVERY", "recovery_in_progress"],
+    ["PENDING APPROACH", "pending_third_party_approach"],
+    ["SETTLED - AWAITING APPROACH", "pending_third_party_approach"],
+    ["SETTLED - TP APPROACH PENDING", "pending_third_party_approach"],
+  ];
+  for (const [status, category] of statuses) {
+    for (const settled of [true, false, null]) {
       const claim = {
         status,
         settled,
@@ -68,9 +77,9 @@ test("post-settlement operational statuses stay open and protected regardless of
       };
       const evaluation = getStatusEvaluation(status);
       assert.equal(isPostSettlementOperationalClaim(claim), true);
+      assert.equal(postSettlementOperationalCategory(status)?.key, category);
       assert.equal(evaluation.open, true);
       assert.equal(evaluation.terminal, false);
-      assert.equal(evaluation.mapped, false, "no SLA is invented");
       assert.equal(getReadyToCloseCandidate(claim), null);
       assert.equal(isZeroEstimateAnomaly(claim), false);
       assert.equal(
@@ -88,15 +97,16 @@ test("post-settlement operational statuses stay open and protected regardless of
     }
   }
   assert.equal(
-    getStatusEvaluation("Settled - TP approach pending").terminal,
+    getStatusEvaluation("SETTLED").terminal,
     true,
-    "the separate exact terminal status remains terminal",
+    "plain SETTLED remains terminal",
   );
-  assert.equal(
-    getStatusEvaluation("Registered").open,
-    true,
-    "an ordinary status remains status-driven",
-  );
+  for (const nearMatch of [
+    "AWAITING RECOVERY REVIEW",
+    "PENDING APPROACH - ESCALATED",
+    "SETTLED - TP APPROACH PENDING REVIEW",
+  ])
+    assert.equal(isPostSettlementOperationalClaim({ status: nearMatch }), false);
 });
 
 test("Cardinal source status variants use the authoritative SLA taxonomy", () => {

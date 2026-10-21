@@ -14,17 +14,39 @@ export function normalizeStatus(status) {
   return normalizeSourceStatus(status);
 }
 
+const RECOVERY_IN_PROGRESS = Object.freeze({
+  key: "recovery_in_progress",
+  label: "Recovery in Progress",
+  sourceStatus: "AWAITING RECOVERY",
+  sourceStatuses: Object.freeze([
+    "AWAITING RECOVERY",
+    "SETTLED - RECOVERY PENDING",
+    "SETTLED - AWAITING RECOVERY",
+  ]),
+});
+
+const PENDING_THIRD_PARTY_APPROACH = Object.freeze({
+  key: "pending_third_party_approach",
+  label: "Pending Third-Party Approach",
+  sourceStatus: "PENDING APPROACH",
+  sourceStatuses: Object.freeze([
+    "PENDING APPROACH",
+    "SETTLED - AWAITING APPROACH",
+    "SETTLED - TP APPROACH PENDING",
+  ]),
+});
+
+export const POST_SETTLEMENT_OPERATIONAL_CATEGORIES = Object.freeze([
+  RECOVERY_IN_PROGRESS,
+  PENDING_THIRD_PARTY_APPROACH,
+]);
+
 export const POST_SETTLEMENT_OPERATIONAL_STATUSES = Object.freeze({
-  "awaiting recovery": Object.freeze({
-    key: "recovery_in_progress",
-    label: "Recovery in Progress",
-    sourceStatus: "AWAITING RECOVERY",
-  }),
-  "pending approach": Object.freeze({
-    key: "pending_third_party_approach",
-    label: "Pending Third-Party Approach",
-    sourceStatus: "PENDING APPROACH",
-  }),
+  "awaiting recovery": RECOVERY_IN_PROGRESS,
+  "settled - awaiting recovery": RECOVERY_IN_PROGRESS,
+  "pending approach": PENDING_THIRD_PARTY_APPROACH,
+  "settled - awaiting approach": PENDING_THIRD_PARTY_APPROACH,
+  "settled - tp approach pending": PENDING_THIRD_PARTY_APPROACH,
 });
 
 /**
@@ -330,8 +352,8 @@ const TERMINAL_STATUS_NAMES = [
   "Knock for Knock Settled",
   // Added 2026-10-05 after auditing every Claims Status string across the real Cardinal
   // workbooks. Exact strings only (no "contains closed" matching): each states a final
-  // outcome. PARITY: "Settled - TP approach pending" was already terminal on the claims page.
-  "Settled - TP approach pending",
+  // outcome. Post-settlement recovery / approach statuses are classified above
+  // and deliberately remain operationally open.
   "Settled repudiated",
   "Settled within excess",
   "Settled no claim from client/claim withdrawn/NTU",

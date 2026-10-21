@@ -509,6 +509,10 @@ function renderPostSettlementOpenWork(view) {
   if (!value) return "";
   const rows = asArray(value.categories)
     .map((category) => {
+      const sourceStatuses = asArray(category.source_statuses);
+      const sourceStatusLabel = sourceStatuses.length
+        ? sourceStatuses.join("; ")
+        : category.source_status || "Not available";
       const handlers = asArray(category.handler_distribution)
         .map(
           (handler) =>
@@ -520,10 +524,10 @@ function renderPostSettlementOpenWork(view) {
         category.oldest_open_age_days === undefined
           ? "Not available"
           : `${formatInteger(category.oldest_open_age_days)} days`;
-      return `<tr><th scope="row">${escapeHtml(category.category || "Operational follow-up")}</th><td>${escapeHtml(category.source_status || "Not available")}</td><td class="numeric">${escapeHtml(formatInteger(category.open_claim_count))}</td><td class="numeric">${escapeHtml(formatInteger(category.over_60_days))}</td><td class="numeric">${escapeHtml(oldest)}</td><td>${escapeHtml(handlers || "No claims")}</td></tr>`;
+      return `<tr><th scope="row">${escapeHtml(category.category || "Operational follow-up")}</th><td>${escapeHtml(sourceStatusLabel)}</td><td class="numeric">${escapeHtml(formatInteger(category.open_claim_count))}</td><td class="numeric">${escapeHtml(formatInteger(category.over_60_days))}</td><td class="numeric">${escapeHtml(oldest)}</td><td>${escapeHtml(handlers || "No claims")}</td></tr>`;
     })
     .join("");
-  return `<section class="report-section management-page post-settlement-page"><div class="section-kicker">Operationally open after settlement</div><h2>Post-Settlement Open Work</h2><p class="section-intro">Main claim settled; operational recovery / third-party work remains open. These claims remain in Total Gross Registered, handler scorecards, closing inventory and normal registration-date ageing. This section is an explanatory subset and is not added to those totals again.</p><div class="team-total"><strong>Post-settlement open total</strong><span>Open claims <b>${escapeHtml(formatInteger(value.total_open_claim_count))}</b></span></div><table class="management-table post-settlement-table">${tableHeader(["Category", "Exact source status", "Open claims", "Over 60 Days", "Oldest open age", "Handler ownership"])}<tbody>${rows || emptyRow(6)}</tbody></table><p class="method-note">Only frozen claims with Cardinal Settled = True and exact normalized status AWAITING RECOVERY or PENDING APPROACH appear here. Settled = False claims with those statuses remain protected operationally open but stay in the ordinary open book.</p></section>`;
+  return `<section class="report-section management-page post-settlement-page"><div class="section-kicker">Operationally open after settlement</div><h2>Post-Settlement Open Work</h2><p class="section-intro">Main claim settled; operational recovery / third-party work remains open. These claims remain in Total Gross Registered, handler scorecards, closing inventory and normal registration-date ageing. This section is an explanatory subset and is not added to those totals again.</p><div class="team-total"><strong>Post-settlement open total</strong><span>Open claims <b>${escapeHtml(formatInteger(value.total_open_claim_count))}</b></span></div><table class="management-table post-settlement-table">${tableHeader(["Category", "Approved exact statuses", "Open claims", "Over 60 Days", "Oldest open age", "Handler ownership"])}<tbody>${rows || emptyRow(6)}</tbody></table><p class="method-note">Classification uses only the six approved exact Cardinal status strings after normalization. The separate Cardinal Settled flag is retained as source evidence but is not consulted for this classification.</p></section>`;
 }
 
 function attentionRowHtml(item) {
