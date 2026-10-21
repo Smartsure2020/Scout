@@ -22,6 +22,7 @@ import {
   getReadyToCloseCandidate,
   getStatusEvaluation,
   getStatusRule,
+  isPostSettlementOperationalClaim,
   isTerminalStatus,
   isZeroEstimateAnomaly,
   normalizeStatus,
@@ -51,6 +52,50 @@ test("status normalization, terminal/open, mapped, and unmapped states", () => {
   assert.equal(
     getStatusEvaluation("A status added later").category,
     "unmapped",
+  );
+});
+
+test("post-settlement operational statuses stay open and protected regardless of Settled", () => {
+  for (const status of ["AWAITING RECOVERY", "PENDING APPROACH"]) {
+    for (const settled of [true, false]) {
+      const claim = {
+        status,
+        settled,
+        workingAge: 120,
+        estimate: 0,
+        outstanding: settled ? 0 : 1000,
+        paid: 5000,
+      };
+      const evaluation = getStatusEvaluation(status);
+      assert.equal(isPostSettlementOperationalClaim(claim), true);
+      assert.equal(evaluation.open, true);
+      assert.equal(evaluation.terminal, false);
+      assert.equal(evaluation.mapped, false, "no SLA is invented");
+      assert.equal(getReadyToCloseCandidate(claim), null);
+      assert.equal(isZeroEstimateAnomaly(claim), false);
+      assert.equal(
+        evaluatePriority(claim).flags.some((flag) =>
+          [
+            "payment_zero_estimate",
+            "active_zero_estimate",
+            "outstanding_without_estimate",
+            "zero_value_claim",
+            "ready_to_close",
+          ].includes(flag.code),
+        ),
+        false,
+      );
+    }
+  }
+  assert.equal(
+    getStatusEvaluation("Settled - TP approach pending").terminal,
+    true,
+    "the separate exact terminal status remains terminal",
+  );
+  assert.equal(
+    getStatusEvaluation("Registered").open,
+    true,
+    "an ordinary status remains status-driven",
   );
 });
 
@@ -515,7 +560,7 @@ test("contract keeps database identity, source number, and provenance separate",
 });
 
 test("parity guardrails protect current claims-page boundary behavior", () => {
-  assert.equal(CLAIMS_RULE_VERSION, "claims-operations-rules-v1");
+  assert.equal(CLAIMS_RULE_VERSION, "claims-operations-rules-v2");
   assert.equal(
     evaluatePriority({ status: "Registered", workingAge: 5 }).flags.some(
       ({ code }) => code === "critical_sla",

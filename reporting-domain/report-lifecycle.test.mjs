@@ -54,6 +54,14 @@ const v3 = {
   metric_definition_version: "claims-reporting-metrics-v3",
   report_schema_version: "scout-report-v3",
 };
+const v4 = {
+  metric_definition_version: "claims-reporting-metrics-v4",
+  report_schema_version: "scout-report-v4",
+};
+const v5 = {
+  metric_definition_version: "claims-reporting-metrics-v5",
+  report_schema_version: "scout-report-v5",
+};
 
 test("a v2 engine cannot regenerate a v3 draft, while same-version regeneration works", () => {
   assert.equal(reportRegenerationCompatibility(v3, v2).allowed, false);
@@ -66,11 +74,18 @@ test("a v2 engine cannot regenerate a v3 draft, while same-version regeneration 
 });
 
 test("a v3 Worker cannot regenerate or finalise a v4 management draft", () => {
-  const v4 = { ...v3, metric_definition_version: "claims-reporting-metrics-v4", report_schema_version: "scout-report-v4" };
   assert.equal(reportRegenerationCompatibility(v4, v3, true).allowed, false);
   assert.equal(reportFinalisationCompatibility(v4, v3).allowed, false);
   assert.equal(reportRegenerationCompatibility(v3, v4, false).allowed, false);
   assert.equal(reportRegenerationCompatibility(v3, v4, true).allowed, true);
+});
+
+test("a v4 draft upgrades to v5 only with explicit permission and never downgrades", () => {
+  assert.equal(reportRegenerationCompatibility(v4, v5, false).allowed, false);
+  assert.equal(reportRegenerationCompatibility(v4, v5, true).allowed, true);
+  assert.equal(reportRegenerationCompatibility(v5, v4, true).allowed, false);
+  assert.equal(reportFinalisationCompatibility(v4, v5).allowed, false);
+  assert.equal(reportFinalisationCompatibility(v5, v5).allowed, true);
 });
 
 test("v2 to v3 draft upgrade needs explicit permission and unknown pairs fail closed", () => {
@@ -95,9 +110,10 @@ test("v2 to v3 draft upgrade needs explicit permission and unknown pairs fail cl
 });
 
 test("Finalise requires this serving engine's exact metric/schema pair", () => {
-  assert.equal(REPORT_ENGINE_VERSION, "claims-report-engine-v4");
+  assert.equal(REPORT_ENGINE_VERSION, "claims-report-engine-v5");
   assert.equal(reportFinalisationCompatibility(v3, v3).allowed, true);
-  assert.equal(reportFinalisationCompatibility(v3, { ...v3, report_schema_version: "scout-report-v4", metric_definition_version: "claims-reporting-metrics-v4" }).allowed, false);
+  assert.equal(reportFinalisationCompatibility(v4, v5).allowed, false);
+  assert.equal(reportFinalisationCompatibility(v5, v5).allowed, true);
   assert.equal(reportFinalisationCompatibility(v2, v3).allowed, false);
   assert.equal(reportFinalisationCompatibility(v3, v2).allowed, false);
 });

@@ -308,7 +308,7 @@ test("PDF running header and footer use native print-margin templates", () => {
   assert.match(header, /height:8mm;padding:2mm 12mm 0;box-sizing:border-box/);
   assert.match(header, /line-height:10px/);
   assert.match(header, /<table style="width:100%;border-collapse:collapse">/);
-  assert.match(footer, /claims-management-pdf-v12/);
+  assert.match(footer, /claims-management-pdf-v13/);
   assert.match(footer, /padding:0 12mm;box-sizing:border-box/);
   assert.match(footer, /class="pageNumber"/);
   assert.match(footer, /class="totalPages"/);

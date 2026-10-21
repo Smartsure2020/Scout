@@ -126,7 +126,7 @@ test("first extract normalization preserves source fields and derived rule versi
   assert.equal(snapshot.resolved_scout_user_id, "user-a");
   assert.equal(snapshot.outstanding, 100000);
   assert.equal(snapshot.estimate, 120000);
-  assert.equal(snapshot.rule_version, "claims-operations-rules-v1");
+  assert.equal(snapshot.rule_version, "claims-operations-rules-v2");
   assert.equal(snapshot.source_evidence.claimNo, " C-001 ");
 });
 
@@ -333,6 +333,34 @@ test("recognized terminal statuses are not classified as unmapped", () => {
     true,
   );
   assert.equal(result.quality.unmapped_status_count, 1);
+});
+
+test("Settled is evidence only: exact operational statuses stay open while exact terminal status wins", () => {
+  const result = normalize([
+    { claimNo: "RECOVERY-TRUE", status: "AWAITING RECOVERY", settled: true },
+    { claimNo: "APPROACH-TRUE", status: "PENDING APPROACH", settled: true },
+    { claimNo: "RECOVERY-FALSE", status: "AWAITING RECOVERY", settled: false },
+    { claimNo: "APPROACH-FALSE", status: "PENDING APPROACH", settled: false },
+    { claimNo: "ORDINARY-TRUE", status: "Registered", settled: true },
+    { claimNo: "TERMINAL-TRUE", status: "Closed Paid", settled: true },
+  ]);
+  const byClaim = new Map(
+    result.snapshots.map((snapshot) => [snapshot.source_claim_number, snapshot]),
+  );
+  for (const claimNo of [
+    "RECOVERY-TRUE",
+    "APPROACH-TRUE",
+    "RECOVERY-FALSE",
+    "APPROACH-FALSE",
+    "ORDINARY-TRUE",
+  ]) {
+    assert.equal(byClaim.get(claimNo).open, true, claimNo);
+    assert.equal(byClaim.get(claimNo).terminal, false, claimNo);
+  }
+  assert.equal(byClaim.get("TERMINAL-TRUE").open, false);
+  assert.equal(byClaim.get("TERMINAL-TRUE").terminal, true);
+  assert.equal(byClaim.get("RECOVERY-TRUE").source_evidence.settled, true);
+  assert.equal(byClaim.get("RECOVERY-FALSE").source_evidence.settled, false);
 });
 
 test("the four corrected taxonomy labels stay mapped through history normalization", () => {

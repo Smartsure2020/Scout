@@ -278,9 +278,9 @@ test("older drafts require confirmation before the UI sends an upgrade flag", as
     report_type: "weekly",
     period_start_local_date: "2026-10-12",
     status: "draft",
-    metric_definition_version: "claims-reporting-metrics-v2",
-    report_schema_version: "scout-report-v2",
-    serving_report_engine_version: "claims-report-engine-v3",
+    metric_definition_version: "claims-reporting-metrics-v4",
+    report_schema_version: "scout-report-v4",
+    serving_report_engine_version: "claims-report-engine-v5",
   };
   const controller = new ReportsController({
     document: reportDocument(),
@@ -314,8 +314,8 @@ test("older drafts require confirmation before the UI sends an upgrade flag", as
 
   const currentDraft = {
     ...draft,
-    metric_definition_version: "claims-reporting-metrics-v3",
-    report_schema_version: "scout-report-v3",
+    metric_definition_version: "claims-reporting-metrics-v5",
+    report_schema_version: "scout-report-v5",
   };
   controller.state.selected = currentDraft;
   controller.state.reports = [currentDraft];
@@ -547,6 +547,50 @@ test("report details expose frozen versions and the serving engine", () => {
   assert.match(html, /scout-report-v3/);
   assert.match(html, /Serving report engine/);
   assert.match(html, /Finalised by engine/);
+});
+
+test("post-settlement open work renders as a distinct drillable management subset", () => {
+  const controller = new ReportsController({ document: reportDocument() });
+  const html = controller.renderPostSettlementOpenWork({
+    metrics: {
+      post_settlement_open_work: {
+        availability: "available",
+        claim_population: { count: 2, claim_ids: ["R", "P"] },
+        value: {
+          total_open_claim_count: 2,
+          categories: [
+            {
+              key: "recovery_in_progress",
+              category: "Recovery in Progress",
+              source_status: "AWAITING RECOVERY",
+              open_claim_count: 1,
+              over_60_days: 1,
+              oldest_open_age_days: 120,
+              handler_distribution: [
+                { label: "Lucky", open_claim_count: 1 },
+              ],
+            },
+            {
+              key: "pending_third_party_approach",
+              category: "Pending Third-Party Approach",
+              source_status: "PENDING APPROACH",
+              open_claim_count: 1,
+              over_60_days: 0,
+              oldest_open_age_days: 30,
+              handler_distribution: [
+                { label: "Naledi", open_claim_count: 1 },
+              ],
+            },
+          ],
+        },
+      },
+    },
+  });
+  assert.match(html, /Post-Settlement Open Work/);
+  assert.match(html, /Main claim settled; operational recovery \/ third-party work remains open/);
+  assert.match(html, /data-metric-id="post_settlement_open_work"/);
+  assert.match(html, /data-filter="post-settlement:recovery_in_progress"/);
+  assert.match(html, /Settled = False claims.*ordinary open book/);
 });
 
 test("latest report defaults use report periods, retain older history, and ignore future or archived runs", async () => {

@@ -213,10 +213,10 @@ function withStaleLegacyMetric(snapshot) {
   return stale;
 }
 
-test("a new v4 snapshot never carries the legacy handler_performance metric", () => {
+test("a new v5 snapshot never carries the legacy handler_performance metric", () => {
   const snapshot = build();
-  assert.equal(snapshot.metric_definition_version, "claims-reporting-metrics-v4");
-  assert.equal(snapshot.report_schema_version, "scout-report-v4");
+  assert.equal(snapshot.metric_definition_version, "claims-reporting-metrics-v5");
+  assert.equal(snapshot.report_schema_version, "scout-report-v5");
   assert.equal("handler_performance" in snapshot.metrics, false);
   assert.equal(snapshot.metrics.handler_scorecards.availability, "available");
   assert.equal("handler_performance" in snapshot.comparisons, false);

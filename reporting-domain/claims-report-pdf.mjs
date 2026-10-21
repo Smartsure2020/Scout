@@ -2,7 +2,7 @@ import { identityKey } from "./roles.mjs";
 
 const TIME_ZONE = "Africa/Johannesburg";
 
-export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v12";
+export const PDF_TEMPLATE_VERSION = "claims-management-pdf-v13";
 export const PDF_RENDERER_VERSION = "cloudflare-browser-run-quick-action";
 
 const MONTHS = [
@@ -334,6 +334,11 @@ export function buildClaimsReportPdfViewModel(run = {}, workflow = {}) {
   const zeroEstimateReserveReview = metricAvailable(metrics.zero_estimate_reserve_review)
     ? asArray(metrics.zero_estimate_reserve_review.value)
     : [];
+  const postSettlementOpenWork = metricAvailable(
+    metrics.post_settlement_open_work,
+  )
+    ? asObject(metrics.post_settlement_open_work.value)
+    : null;
   return {
     reportType: source.report_type || snapshot.report_type || "weekly",
     periodLabel: periodLabel(source, snapshot),
@@ -371,7 +376,9 @@ export function buildClaimsReportPdfViewModel(run = {}, workflow = {}) {
     actionItems,
     workflowAvailable: workflow.available !== false,
     managementLayout:
-      managementReporting.version === "claims-management-report-v1",
+      ["claims-management-report-v1", "claims-management-report-v2"].includes(
+        managementReporting.version,
+      ),
     managementReporting,
     insurerDistribution,
     brokerageDistribution: metricAvailable(metrics.brokerage_distribution)
@@ -380,6 +387,7 @@ export function buildClaimsReportPdfViewModel(run = {}, workflow = {}) {
     highValueDetail,
     zeroEstimateClosureReview,
     zeroEstimateReserveReview,
+    postSettlementOpenWork,
   };
 }
 
@@ -494,6 +502,28 @@ function renderScorecards(view) {
   const closed = metricValue(view.snapshot, "claims_closed");
   const left = metricValue(view.snapshot, "claims_left_extract");
   return `<section class="report-section scorecards-section"><div class="section-kicker">Claims performance</div><h2>Claims Performance</h2><p class="section-intro">${escapeHtml(view.periodLabel)}. Open claims only. New Allocated Claims: registered in the period. Over 60 Days: registered more than 60 days before close. Full definitions are under Coverage &amp; Methodology.</p>${criticalBox}${confirmBox}<div class="team-total"><strong>Team total</strong><span>Total Gross Registered <b>${escapeHtml(formatInteger(totals.gross_registered))}</b>${hasPrevious ? deltaLabel(totals.gross_registered, previous.gross_registered) : ""}</span><span>New Allocated Claims <b>${escapeHtml(formatInteger(totals.new_allocated))}</b>${hasPrevious ? deltaLabel(totals.new_allocated, previous.new_allocated) : ""}</span><span>Over 60 Days <b>${escapeHtml(formatInteger(totals.over_60))}</b>${hasPrevious ? deltaLabel(totals.over_60, previous.over_60, true) : ""}</span><span>Terminal closures <b>${escapeHtml(closed.text)}</b></span><span>Left the extract <b>${escapeHtml(left.text)}</b> <small>not closures</small></span></div><div class="handler-cards">${primary.map(renderHandlerCard).join("") || `<p class="empty-cell">No handler data in the frozen snapshot.</p>`}</div>${renderOtherHolders(others)}</section>`;
+}
+
+function renderPostSettlementOpenWork(view) {
+  const value = view.postSettlementOpenWork;
+  if (!value) return "";
+  const rows = asArray(value.categories)
+    .map((category) => {
+      const handlers = asArray(category.handler_distribution)
+        .map(
+          (handler) =>
+            `${handler.label || "Unassigned"} (${formatInteger(handler.open_claim_count)})`,
+        )
+        .join(", ");
+      const oldest =
+        category.oldest_open_age_days === null ||
+        category.oldest_open_age_days === undefined
+          ? "Not available"
+          : `${formatInteger(category.oldest_open_age_days)} days`;
+      return `<tr><th scope="row">${escapeHtml(category.category || "Operational follow-up")}</th><td>${escapeHtml(category.source_status || "Not available")}</td><td class="numeric">${escapeHtml(formatInteger(category.open_claim_count))}</td><td class="numeric">${escapeHtml(formatInteger(category.over_60_days))}</td><td class="numeric">${escapeHtml(oldest)}</td><td>${escapeHtml(handlers || "No claims")}</td></tr>`;
+    })
+    .join("");
+  return `<section class="report-section management-page post-settlement-page"><div class="section-kicker">Operationally open after settlement</div><h2>Post-Settlement Open Work</h2><p class="section-intro">Main claim settled; operational recovery / third-party work remains open. These claims remain in Total Gross Registered, handler scorecards, closing inventory and normal registration-date ageing. This section is an explanatory subset and is not added to those totals again.</p><div class="team-total"><strong>Post-settlement open total</strong><span>Open claims <b>${escapeHtml(formatInteger(value.total_open_claim_count))}</b></span></div><table class="management-table post-settlement-table">${tableHeader(["Category", "Exact source status", "Open claims", "Over 60 Days", "Oldest open age", "Handler ownership"])}<tbody>${rows || emptyRow(6)}</tbody></table><p class="method-note">Only frozen claims with Cardinal Settled = True and exact normalized status AWAITING RECOVERY or PENDING APPROACH appear here. Settled = False claims with those statuses remain protected operationally open but stay in the ordinary open book.</p></section>`;
 }
 
 function attentionRowHtml(item) {
@@ -1002,7 +1032,7 @@ export function renderClaimsReportHtml(run = {}, workflow = {}) {
   const type = view.reportType === "monthly" ? "Monthly" : "Weekly";
   const body =
     view.managementLayout && view.scorecards
-      ? `${renderScorecards(view)}${renderPortfolioDistribution(view)}${renderManagementExceptions(view)}${renderManagementWorkflow(view)}${renderSupportingIntelligence(view)}${renderSlaMethodologyPage(view)}`
+      ? `${renderScorecards(view)}${renderPostSettlementOpenWork(view)}${renderPortfolioDistribution(view)}${renderManagementExceptions(view)}${renderManagementWorkflow(view)}${renderSupportingIntelligence(view)}${renderSlaMethodologyPage(view)}`
       : `${view.scorecards ? "" : `<section class="report-section executive"><div class="section-kicker">Executive summary</div><h2>Executive Summary</h2><p class="lead">A deterministic ${escapeHtml(type.toLowerCase())} management view of the accepted historical claim population for <strong>${escapeHtml(view.periodLabel)}</strong>. This report is frozen at finalisation and is suitable for management circulation.</p><div class="kpi-grid">${metricCard(view, "closing_inventory")}${metricCard(view, "new_claims_registered")}${metricCard(view, "claims_closed")}${metricCard(view, "sla_compliance", formatPercent)}</div></section>`}${view.scorecards ? `${renderScorecards(view)}${renderAttention(view)}${renderActions(view)}${renderSupportingIntro()}${renderAgeing(view)}${renderFinancial(view)}${renderActivity(view)}${renderOperational(view)}${renderSla(view)}` : `${renderAgeing(view)}${renderSla(view)}${renderOperational(view)}${renderHandlers(view)}${renderActivity(view)}${renderFinancial(view)}${renderAttention(view)}${renderActions(view)}`}${renderCoverage(view)}`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Scout ${escapeHtml(type)} Claims Report - ${escapeHtml(view.periodLabel)}</title><style>${PDF_CSS}</style></head><body><main${view.scorecards ? ' class="scorecard-layout"' : ""}>${renderHeader(view)}${body}</main></body></html>`;
 }
