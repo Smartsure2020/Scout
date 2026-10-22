@@ -64,7 +64,10 @@ export function isPostSettlementOperationalStatus(status) {
 }
 
 export function isPostSettlementOperationalClaim(claim) {
-  return isPostSettlementOperationalStatus(claim?.status);
+  return (
+    claim?.postSettlementOperational === true ||
+    isPostSettlementOperationalStatus(claim?.status)
+  );
 }
 
 const STATUS_RULE_ENTRIES = [

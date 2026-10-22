@@ -924,6 +924,29 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
   const childClaims = parent.rows.map((row) =>
     mapSnapshotToClaim(row, manifest, timeZone),
   );
+  const postSettlementOperationalCategoryKeys = [
+    ...new Set(
+      childClaims
+        .map((claim) => postSettlementOperationalCategory(claim.status)?.key)
+        .filter(Boolean),
+    ),
+  ].sort();
+  const postSettlementOperational =
+    postSettlementOperationalCategoryKeys.length > 0;
+  const postSettlementOperationalCategoryConflict =
+    postSettlementOperationalCategoryKeys.length > 1;
+  const postSettlementOperationalCategoryKey =
+    postSettlementOperationalCategoryKeys.length === 1
+      ? postSettlementOperationalCategoryKeys[0]
+      : null;
+  const parentQualityFlags = postSettlementOperationalCategoryConflict
+    ? [
+        ...new Set([
+          ...parent.quality_flags,
+          "post_settlement_category_ambiguous",
+        ]),
+      ]
+    : parent.quality_flags;
   const movementClass = (claim) => {
     const result = evaluateMovement(claim, { asOfDate });
     if (result.over30) return "over30";
@@ -1029,14 +1052,18 @@ function mapParentToClaim(parent, manifest, timeZone, canonicalByKey) {
     broker: exactTextConsensus(parent, "broker"),
     insured: consensusScalar(parent, "insured"),
     settled: parentSettledState,
-    dataQualityFlags: parent.quality_flags,
+    postSettlementOperational,
+    postSettlementOperationalCategoryKey,
+    postSettlementOperationalCategoryKeys,
+    postSettlementOperationalCategoryConflict,
+    dataQualityFlags: parentQualityFlags,
     snapshotExtractId: manifest?.id ?? null,
     snapshotEffectiveDate: asOfDate,
     rowCount: parent.row_count,
     multiRow: true,
     financialSections: parent.rows.map((row) => ({ outstanding: knownFiniteNumber(row.outstanding), estimate: knownFiniteNumber(row.estimate) })),
     identityQuality: parent.identity_quality,
-    parentQualityFlags: parent.quality_flags,
+    parentQualityFlags,
     parentMetricStates: {
       sla: resolvedSlaClass,
       movement: parentMovementClass,
@@ -1964,6 +1991,9 @@ function zeroEstimateReserveReviewMetric(closingOpen, evidence) {
 
 function postSettlementOpenWorkMetric(closingOpen, scorecards, evidence) {
   const definitions = POST_SETTLEMENT_OPERATIONAL_CATEGORIES;
+  const definitionsByKey = new Map(
+    definitions.map((definition) => [definition.key, definition]),
+  );
   const categories = new Map(
     definitions.map((definition) => [
       definition.key,
@@ -1976,10 +2006,19 @@ function postSettlementOpenWorkMetric(closingOpen, scorecards, evidence) {
       },
     ]),
   );
-  const included = closingOpen.filter(isPostSettlementOperationalClaim);
-  for (const claim of included) {
-    const definition = postSettlementOperationalCategory(claim.status);
-    if (definition) categories.get(definition.key)?.claims.push(claim);
+  const protectedClaims = closingOpen.filter(isPostSettlementOperationalClaim);
+  const included = [];
+  const ambiguous = [];
+  for (const claim of protectedClaims) {
+    const definition = claim.postSettlementOperationalCategoryKey
+      ? definitionsByKey.get(claim.postSettlementOperationalCategoryKey)
+      : postSettlementOperationalCategory(claim.status);
+    if (definition && !claim.postSettlementOperationalCategoryConflict) {
+      categories.get(definition.key)?.claims.push(claim);
+      included.push(claim);
+    } else {
+      ambiguous.push(claim);
+    }
   }
 
   const holderByClaimId = new Map();
@@ -2041,11 +2080,25 @@ function postSettlementOpenWorkMetric(closingOpen, scorecards, evidence) {
     {
       precision: "snapshot_exact",
       claimIds: included.map((claim) => claim.id),
+      warnings: ambiguous.length
+        ? ["post_settlement_category_ambiguous"]
+        : [],
       definition:
         "Operationally open claims whose exact normalized status is one of the approved recovery-in-progress or pending-third-party-approach statuses; the separate Cardinal Settled flag is not consulted for classification.",
       evidence,
       details: {
         claim_ids_by_category: claimIdsByCategory,
+        protected_open_claim_count: protectedClaims.length,
+        category_counted_claim_count: included.length,
+        ambiguous_category_claim_numbers: excludedParentNumbers(ambiguous),
+        ambiguous_category_keys_by_claim: Object.fromEntries(
+          ambiguous
+            .map((claim) => [
+              claim.sourceClaimNumber ?? claim.id,
+              asArray(claim.postSettlementOperationalCategoryKeys),
+            ])
+            .sort(([left], [right]) => String(left).localeCompare(String(right))),
+        ),
         status_matching: "exact_normalized_status_only",
         settled_requirement: "not_consulted_exact_status_is_authoritative",
         double_counting_policy:
@@ -2419,7 +2472,8 @@ function buildReportClaimRows(
         operational: singleRow?.operational_flags ?? [],
         quality: singleRow?.data_quality_flags ?? [],
         row_count: parent?.row_count ?? 0,
-        parent_quality_flags: parent?.quality_flags ?? [],
+        parent_quality_flags:
+          parentClaim?.parentQualityFlags ?? parent?.quality_flags ?? [],
       },
     };
   });
