@@ -74,6 +74,7 @@ function extractDeclaration(source, name) {
 const FUNCTIONS = [
   "normaliseStatus",
   "hasSemanticStatus",
+  "isPostSettlementOperationalStatus",
   "getStatusRule",
   "isTerminalStatus",
   "isPayment",
@@ -83,6 +84,7 @@ const FUNCTIONS = [
   "getPreviousProcessedClaimsForCurrent",
   "loadExtractHistory",
   "getPriority",
+  "isZeroEstimateAnomaly",
   "getReadyToCloseCandidate",
   "hasRecoveryPending",
 ];
@@ -92,6 +94,7 @@ const DECLARATIONS = [
   "STATUS_RULES_LC",
   "TERMINAL_STATUSES",
   "TERMINAL_STATUSES_LC",
+  "POST_SETTLEMENT_OPERATIONAL_STATUSES_LC",
   "MANDATE_THRESHOLD",
   "REPUDIATION_EXPIRY_DAYS",
   "EXTRACT_HISTORY_KEY",
@@ -99,9 +102,9 @@ const DECLARATIONS = [
   "currentExtractId",
 ];
 
-async function loadClaimsPageStatusLogic() {
+async function loadClaimsPageStatusLogic(pageName = "index.html") {
   const html = await readFile(
-    new URL("../scout-smartsure/claims/index.html", import.meta.url),
+    new URL(`../scout-smartsure/claims/${pageName}`, import.meta.url),
     "utf8",
   );
   const scriptOpen = /\r?\n<script>\r?\n/.exec(html);
@@ -110,9 +113,12 @@ async function loadClaimsPageStatusLogic() {
   const scriptEnd = html.lastIndexOf("</script>");
   const inline = html.slice(scriptStart, scriptEnd);
 
+  const functionNames = pageName === "qa-preview-index.html"
+    ? FUNCTIONS.filter((name) => name !== "hasSemanticStatus")
+    : FUNCTIONS;
   const assembled = [
     ...DECLARATIONS.map((name) => extractDeclaration(inline, name)),
-    ...FUNCTIONS.map((name) => extractFunction(inline, name)),
+    ...functionNames.map((name) => extractFunction(inline, name)),
   ].join("\n\n");
 
   const store = new Map();
@@ -128,7 +134,7 @@ async function loadClaimsPageStatusLogic() {
   };
   vm.createContext(context);
   vm.runInContext(assembled, context, {
-    filename: "scout-smartsure/claims/index.html (extracted status logic)",
+    filename: `scout-smartsure/claims/${pageName} (extracted status logic)`,
   });
   return context;
 }
@@ -199,6 +205,72 @@ test("claims page: priority/action for a missing status avoids unmapped-taxonomy
   const unmappedPriority = page.getPriority(fixtureClaim({ status: "A status added later", workingAge: 100 }));
   assert.equal(unmappedPriority.action, "Review  -  status not yet mapped in Scout");
   assert.ok(unmappedPriority.flags.some((flag) => flag.label.includes("status not mapped")));
+});
+
+test("claims pages: exact post-settlement statuses stay open and bypass closure and zero-value classifications", async () => {
+  const protectedStatuses = [
+    "AWAITING RECOVERY",
+    "SETTLED - RECOVERY PENDING",
+    "SETTLED - AWAITING RECOVERY",
+    "PENDING APPROACH",
+    "SETTLED - AWAITING APPROACH",
+    "SETTLED - TP APPROACH PENDING",
+  ];
+  for (const pageName of ["index.html", "qa-preview-index.html"]) {
+    const page = await loadClaimsPageStatusLogic(pageName);
+    for (const status of protectedStatuses) {
+      const claim = fixtureClaim({
+        status,
+        estimate: 0,
+        outstanding: 0,
+        paid: 0,
+        workingAge: 90,
+        calendarAge: 90,
+        daysSinceMovement: 0,
+      });
+      assert.equal(page.isPostSettlementOperationalStatus(status), true, `${pageName}: ${status}`);
+      assert.equal(page.isTerminalStatus(status), false, `${pageName}: ${status} remains operationally open`);
+      assert.equal(page.getReadyToCloseCandidate(claim), null, `${pageName}: ${status} is not ready to close`);
+      assert.equal(page.isZeroEstimateAnomaly(claim), false, `${pageName}: ${status} is not a zero-estimate anomaly`);
+      const labels = page.getPriority(claim).flags.map((flag) => flag.label).join(" | ");
+      assert.doesNotMatch(
+        labels,
+        /Settlement complete|Zero estimate|Zero value claim|Estimate missing|No estimate captured/i,
+        `${pageName}: ${status} must not receive closure, NTU, or zero-value priority treatment`,
+      );
+    }
+  }
+});
+
+test("claims pages: plain Settled remains terminal and near matches remain unprotected", async () => {
+  const nearMatches = [
+    "AWAITING RECOVERY REVIEW",
+    "SETTLED - AWAITING RECOVERY REVIEW",
+    "PENDING APPROACH - ESCALATED",
+    "SETTLED - AWAITING APPROACH REVIEW",
+    "SETTLED - TP APPROACH PENDING REVIEW",
+  ];
+  for (const pageName of ["index.html", "qa-preview-index.html"]) {
+    const page = await loadClaimsPageStatusLogic(pageName);
+    assert.equal(page.isTerminalStatus("SETTLED"), true, `${pageName}: plain Settled stays terminal`);
+    assert.equal(page.isPostSettlementOperationalStatus("SETTLED"), false);
+    for (const status of nearMatches) {
+      assert.equal(
+        page.isPostSettlementOperationalStatus(status),
+        false,
+        `${pageName}: near match must not be protected: ${status}`,
+      );
+    }
+    const settledNearMatch = fixtureClaim({
+      status: "SETTLED - AWAITING APPROACH REVIEW",
+      workingAge: 90,
+    });
+    assert.equal(
+      page.getReadyToCloseCandidate(settledNearMatch)?.flag,
+      "Settlement complete — close claim",
+      `${pageName}: near-match behaviour proves protection is exact rather than fuzzy`,
+    );
+  }
 });
 
 // The frontend (scout-smartsure/claims/claims-qa.mjs, loaded by the browser)

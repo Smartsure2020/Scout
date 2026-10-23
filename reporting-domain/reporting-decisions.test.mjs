@@ -444,7 +444,6 @@ const ADDED_TERMINAL = [
   "Settled No TP claim made",
   "Settled – Ex Gratia",
   "Closed - Notification Only",
-  "SETTLED – TP APPROACH PENDING", // parity: already terminal on the claims page
 ];
 
 test("every evidenced closed-like Cardinal string is terminal, matched exactly", () => {

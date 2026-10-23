@@ -336,22 +336,31 @@ test("recognized terminal statuses are not classified as unmapped", () => {
 });
 
 test("Settled is evidence only: exact operational statuses stay open while exact terminal status wins", () => {
+  const targetStatuses = [
+    ["RECOVERY", "AWAITING RECOVERY"],
+    ["RECOVERY-PENDING", "SETTLED - RECOVERY PENDING"],
+    ["RECOVERY-AWAITING", "SETTLED - AWAITING RECOVERY"],
+    ["APPROACH", "PENDING APPROACH"],
+    ["APPROACH-AWAITING", "SETTLED - AWAITING APPROACH"],
+    ["APPROACH-TP-PENDING", "SETTLED - TP APPROACH PENDING"],
+  ];
+  const operationalRows = targetStatuses.flatMap(([key, status]) =>
+    [true, false, null].map((settled) => ({
+      claimNo: `${key}-${String(settled).toUpperCase()}`,
+      status,
+      settled,
+    })),
+  );
   const result = normalize([
-    { claimNo: "RECOVERY-TRUE", status: "AWAITING RECOVERY", settled: true },
-    { claimNo: "APPROACH-TRUE", status: "PENDING APPROACH", settled: true },
-    { claimNo: "RECOVERY-FALSE", status: "AWAITING RECOVERY", settled: false },
-    { claimNo: "APPROACH-FALSE", status: "PENDING APPROACH", settled: false },
+    ...operationalRows,
     { claimNo: "ORDINARY-TRUE", status: "Registered", settled: true },
-    { claimNo: "TERMINAL-TRUE", status: "Closed Paid", settled: true },
+    { claimNo: "TERMINAL-TRUE", status: "SETTLED", settled: true },
   ]);
   const byClaim = new Map(
     result.snapshots.map((snapshot) => [snapshot.source_claim_number, snapshot]),
   );
   for (const claimNo of [
-    "RECOVERY-TRUE",
-    "APPROACH-TRUE",
-    "RECOVERY-FALSE",
-    "APPROACH-FALSE",
+    ...operationalRows.map((row) => row.claimNo),
     "ORDINARY-TRUE",
   ]) {
     assert.equal(byClaim.get(claimNo).open, true, claimNo);
@@ -361,6 +370,7 @@ test("Settled is evidence only: exact operational statuses stay open while exact
   assert.equal(byClaim.get("TERMINAL-TRUE").terminal, true);
   assert.equal(byClaim.get("RECOVERY-TRUE").source_evidence.settled, true);
   assert.equal(byClaim.get("RECOVERY-FALSE").source_evidence.settled, false);
+  assert.equal(byClaim.get("RECOVERY-NULL").source_evidence.settled, null);
 });
 
 test("the four corrected taxonomy labels stay mapped through history normalization", () => {

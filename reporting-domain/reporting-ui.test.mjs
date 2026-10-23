@@ -563,6 +563,11 @@ test("post-settlement open work renders as a distinct drillable management subse
               key: "recovery_in_progress",
               category: "Recovery in Progress",
               source_status: "AWAITING RECOVERY",
+              source_statuses: [
+                "AWAITING RECOVERY",
+                "SETTLED - RECOVERY PENDING",
+                "SETTLED - AWAITING RECOVERY",
+              ],
               open_claim_count: 1,
               over_60_days: 1,
               oldest_open_age_days: 120,
@@ -574,6 +579,11 @@ test("post-settlement open work renders as a distinct drillable management subse
               key: "pending_third_party_approach",
               category: "Pending Third-Party Approach",
               source_status: "PENDING APPROACH",
+              source_statuses: [
+                "PENDING APPROACH",
+                "SETTLED - AWAITING APPROACH",
+                "SETTLED - TP APPROACH PENDING",
+              ],
               open_claim_count: 1,
               over_60_days: 0,
               oldest_open_age_days: 30,
@@ -590,7 +600,8 @@ test("post-settlement open work renders as a distinct drillable management subse
   assert.match(html, /Main claim settled; operational recovery \/ third-party work remains open/);
   assert.match(html, /data-metric-id="post_settlement_open_work"/);
   assert.match(html, /data-filter="post-settlement:recovery_in_progress"/);
-  assert.match(html, /Settled = False claims.*ordinary open book/);
+  assert.match(html, /SETTLED - TP APPROACH PENDING/);
+  assert.match(html, /Settled flag.*not consulted/);
 });
 
 test("latest report defaults use report periods, retain older history, and ignore future or archived runs", async () => {

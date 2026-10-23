@@ -4204,7 +4204,7 @@ const TERMINAL_STATUSES = new Set([
   "Settled, partial recovery made","Settled, repudiated","Settled, TP claim Paid",
   "Settled, Cash Payment","Settled, OD paid, TP claim repudiated","Settled & Recovery Abandoned",
   "Settled - TP Claim within Excess","Settled - Excess exceeds claim amount",
-  "Settled - Business decision","Settled - TP approach pending","Settled, no claim from client","Settled, Duplicated",
+  "Settled - Business decision","Settled, no claim from client","Settled, Duplicated",
   "Settled, no claim from client/claim withdrawn/NTU","Settled/Write Off",
   "Knock For Knock Settled","Recovery successful 100%","Recovery successful - apportionment",
   "Ex Gratia - Finalized","Not Taken Up","Knock for Knock Settled",
@@ -4230,7 +4230,21 @@ const TERMINAL_STATUSES = new Set([
 ]);
 const TERMINAL_STATUSES_LC = new Set([...TERMINAL_STATUSES].map(normaliseStatus));
 
+const POST_SETTLEMENT_OPERATIONAL_STATUSES_LC = new Set([
+  "AWAITING RECOVERY",
+  "SETTLED - RECOVERY PENDING",
+  "SETTLED - AWAITING RECOVERY",
+  "PENDING APPROACH",
+  "SETTLED - AWAITING APPROACH",
+  "SETTLED - TP APPROACH PENDING",
+].map(normaliseStatus));
+
+function isPostSettlementOperationalStatus(status) {
+  return POST_SETTLEMENT_OPERATIONAL_STATUSES_LC.has(normaliseStatus(status));
+}
+
 function isTerminalStatus(status) {
+  if (isPostSettlementOperationalStatus(status)) return false;
   return TERMINAL_STATUSES_LC.has(normaliseStatus(status));
 }
 
@@ -4303,6 +4317,7 @@ function getPriority(claim) {
   const flags = [];
   let score = 0;
   const stLc = normaliseStatus(claim.status);
+  const postSettlementOperational = isPostSettlementOperationalStatus(claim.status);
 
   if (isTerminalStatus(claim.status) && !stLc.startsWith("settled")) return { score: 0, flags: [], action: null };
 
@@ -4340,25 +4355,27 @@ function getPriority(claim) {
     score += agedMandate ? 90 : 60;
   }
 
-  if (isPaymentStatus && estimate === 0) {
-    flags.push({
-      label: stLc === "payment requested"
-        ? "Zero estimate — cannot pay without estimate"
-        : "Payment requested — zero estimate: review for closure or data error",
-      level: "red",
-    });
-    score += 95;
-  } else if (isActiveOrAssessor && estimate === 0 && age > 14) {
-    flags.push({ label: "No estimate captured — assessor update needed", level: "amber" });
-    score += 45;
-  }
+  if (!postSettlementOperational) {
+    if (isPaymentStatus && estimate === 0) {
+      flags.push({
+        label: stLc === "payment requested"
+          ? "Zero estimate — cannot pay without estimate"
+          : "Payment requested — zero estimate: review for closure or data error",
+        level: "red",
+      });
+      score += 95;
+    } else if (isActiveOrAssessor && estimate === 0 && age > 14) {
+      flags.push({ label: "No estimate captured — assessor update needed", level: "amber" });
+      score += 45;
+    }
 
-  if (outstanding > 0 && estimate === 0) {
-    flags.push({ label: "Estimate missing — outstanding value set, estimate not", level: "amber" });
-    score += 50;
-  } else if (estimate === 0 && outstanding === 0 && !isPaymentStatus) {
-    flags.push({ label: "Zero value claim — possible data error or NTU candidate", level: "amber" });
-    score += 35;
+    if (outstanding > 0 && estimate === 0) {
+      flags.push({ label: "Estimate missing — outstanding value set, estimate not", level: "amber" });
+      score += 50;
+    } else if (estimate === 0 && outstanding === 0 && !isPaymentStatus) {
+      flags.push({ label: "Zero value claim — possible data error or NTU candidate", level: "amber" });
+      score += 35;
+    }
   }
 
   if (rule) {
@@ -4603,6 +4620,7 @@ function deriveLastUpdatedFromPreviousExtract(rawClaims) {
 }
 
 function isZeroEstimateAnomaly(c) {
+  if (isPostSettlementOperationalStatus(c.status)) return false;
   if (isTerminalStatus(c.status)) return false;
   const rule = getStatusRule(c.status);
   const estimate = c.estimate === null || c.estimate === undefined || c.estimate === "" ? null : Number(c.estimate);
@@ -4649,6 +4667,7 @@ function hasRecoveryPending(c) {
 
 function getReadyToCloseCandidate(c) {
   const st = normaliseStatus(c.status);
+  if (isPostSettlementOperationalStatus(c.status)) return null;
   if (isTerminalStatus(c.status) && !st.startsWith("settled")) return null;
   const ageSource = c.workingAge ?? c.age;
   const age = ageSource === null || ageSource === undefined || ageSource === "" ? null : Number(ageSource);
@@ -4685,7 +4704,7 @@ function getReadyToCloseCandidate(c) {
       action: "Close unless excess outstanding",
     };
   }
-  if (st.startsWith("settled") && st !== "settled - awaiting recovery" && age > 14) {
+  if (st.startsWith("settled") && age > 14) {
     return {
       ruleNo: 4,
       level: "green",
