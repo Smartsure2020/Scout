@@ -13,6 +13,8 @@ import {
 } from "./date-periods.mjs";
 import {
   CLAIMS_RULE_VERSION,
+  POST_SETTLEMENT_OPERATIONAL_CATEGORIES,
+  POST_SETTLEMENT_OPERATIONAL_STATUSES,
   evaluateClaim,
   evaluateMandateAndRisk,
   evaluateMovement,
@@ -165,6 +167,56 @@ test("recovery-in-progress and awaiting-TP-approach are protected by exact match
     assert.ok(codes.includes("critical_sla"), `${status}: SLA attention retained`);
     assert.equal(codes.includes("outstanding_without_estimate"), false, status);
   }
+});
+
+// The exact-match lookup map and the per-category source-status lists are two
+// views of one taxonomy, and nothing else guards the map: a stray key would
+// silently widen the protected set and a missing key would shrink it. Pin them
+// to each other and to the approved list, so extending the taxonomy has to be a
+// deliberate edit here.
+test("protected-status lookup map is pinned to the category source statuses and the approved taxonomy", () => {
+  const sourceStatuses = POST_SETTLEMENT_OPERATIONAL_CATEGORIES.flatMap(
+    (category) => category.sourceStatuses,
+  );
+  assert.deepEqual(sourceStatuses, [
+    "AWAITING RECOVERY",
+    "SETTLED - RECOVERY PENDING",
+    "SETTLED - AWAITING RECOVERY",
+    "RECOVERY IN PROGRESS",
+    "PENDING APPROACH",
+    "SETTLED - AWAITING APPROACH",
+    "SETTLED - TP APPROACH PENDING",
+    "AWAITING TP APPROACH",
+  ]);
+
+  // Lookup keys are exactly the normalised source statuses. SETTLED - RECOVERY
+  // PENDING normalises onto SETTLED - AWAITING RECOVERY, so eight become seven.
+  assert.deepEqual(
+    Object.keys(POST_SETTLEMENT_OPERATIONAL_STATUSES).sort(),
+    [...new Set(sourceStatuses.map(normalizeStatus))].sort(),
+    "lookup keys must equal the normalised category source statuses (no stray or missing key)",
+  );
+
+  const ownerByKey = new Map();
+  for (const category of POST_SETTLEMENT_OPERATIONAL_CATEGORIES)
+    for (const status of category.sourceStatuses) {
+      const key = normalizeStatus(status);
+      assert.equal(
+        POST_SETTLEMENT_OPERATIONAL_STATUSES[key],
+        category,
+        `${status} must map to its own category`,
+      );
+      assert.equal(postSettlementOperationalCategory(status)?.key, category.key, status);
+      assert.ok(
+        !ownerByKey.has(key) || ownerByKey.get(key) === category.key,
+        `${status} is claimed by two categories`,
+      );
+      ownerByKey.set(key, category.key);
+    }
+
+  // A key that normalizeStatus would rewrite can never be matched.
+  for (const key of Object.keys(POST_SETTLEMENT_OPERATIONAL_STATUSES))
+    assert.equal(normalizeStatus(key), key, `lookup key is not in normalised form: ${key}`);
 });
 
 test("Cardinal source status variants use the authoritative SLA taxonomy", () => {
