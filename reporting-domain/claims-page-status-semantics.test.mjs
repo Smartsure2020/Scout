@@ -11,6 +11,10 @@ import { readFile } from "node:fs/promises";
 // exactly what production serves, not a substituted "corrected" copy.
 import { normalizeSourceStatus } from "../scout-smartsure/claims/claims-qa.mjs";
 import { normalizeSourceStatus as reportingNormalizeSourceStatus } from "./claims-qa.mjs";
+import {
+  normalizeStatus as backendNormalizeStatus,
+  POST_SETTLEMENT_OPERATIONAL_CATEGORIES,
+} from "./claims-rules.mjs";
 
 // This suite executes the ACTUAL claims-page logic (not a reimplementation)
 // by pulling the relevant function/const declarations out of the claims
@@ -212,9 +216,11 @@ test("claims pages: exact post-settlement statuses stay open and bypass closure 
     "AWAITING RECOVERY",
     "SETTLED - RECOVERY PENDING",
     "SETTLED - AWAITING RECOVERY",
+    "RECOVERY IN PROGRESS",
     "PENDING APPROACH",
     "SETTLED - AWAITING APPROACH",
     "SETTLED - TP APPROACH PENDING",
+    "AWAITING TP APPROACH",
   ];
   for (const pageName of ["index.html", "qa-preview-index.html"]) {
     const page = await loadClaimsPageStatusLogic(pageName);
@@ -249,11 +255,21 @@ test("claims pages: plain Settled remains terminal and near matches remain unpro
     "PENDING APPROACH - ESCALATED",
     "SETTLED - AWAITING APPROACH REVIEW",
     "SETTLED - TP APPROACH PENDING REVIEW",
+    "RECOVERY IN PROGRESS REVIEW",
+    "RECOVERY",
+    "AWAITING TP APPROACH - ESCALATED",
+    "AWAITING TP APPROACH REVIEW",
+    "AWAITING APPROACH",
   ];
   for (const pageName of ["index.html", "qa-preview-index.html"]) {
     const page = await loadClaimsPageStatusLogic(pageName);
     assert.equal(page.isTerminalStatus("SETTLED"), true, `${pageName}: plain Settled stays terminal`);
     assert.equal(page.isPostSettlementOperationalStatus("SETTLED"), false);
+    // Generic "recovery" must not leak protection onto terminal recovery outcomes.
+    for (const terminalRecovery of ["Recovery successful 100%", "Recovery successful - apportionment"]) {
+      assert.equal(page.isTerminalStatus(terminalRecovery), true, `${pageName}: ${terminalRecovery}`);
+      assert.equal(page.isPostSettlementOperationalStatus(terminalRecovery), false, `${pageName}: ${terminalRecovery}`);
+    }
     for (const status of nearMatches) {
       assert.equal(
         page.isPostSettlementOperationalStatus(status),
@@ -270,6 +286,21 @@ test("claims pages: plain Settled remains terminal and near matches remain unpro
       "Settlement complete — close claim",
       `${pageName}: near-match behaviour proves protection is exact rather than fuzzy`,
     );
+  }
+});
+
+test("claims pages: duplicated protected-status sets match the backend taxonomy exactly", async () => {
+  const rawStatuses = POST_SETTLEMENT_OPERATIONAL_CATEGORIES.flatMap((category) => category.sourceStatuses);
+  assert.equal(rawStatuses.length, 8, "the protected taxonomy is eight exact source statuses");
+  const expected = [...new Set(rawStatuses.map(backendNormalizeStatus))].sort();
+  for (const pageName of ["index.html", "qa-preview-index.html"]) {
+    const page = await loadClaimsPageStatusLogic(pageName);
+    const actual = Array.from(
+      vm.runInContext("[...POST_SETTLEMENT_OPERATIONAL_STATUSES_LC].sort()", page),
+    );
+    assert.deepEqual(actual, expected, `${pageName}: page set drifted from backend taxonomy`);
+    for (const status of rawStatuses)
+      assert.equal(page.isPostSettlementOperationalStatus(status), true, `${pageName}: ${status}`);
   }
 });
 

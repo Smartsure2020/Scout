@@ -567,6 +567,7 @@ test("post-settlement open work renders as a distinct drillable management subse
                 "AWAITING RECOVERY",
                 "SETTLED - RECOVERY PENDING",
                 "SETTLED - AWAITING RECOVERY",
+                "RECOVERY IN PROGRESS",
               ],
               open_claim_count: 1,
               over_60_days: 1,
@@ -583,6 +584,7 @@ test("post-settlement open work renders as a distinct drillable management subse
                 "PENDING APPROACH",
                 "SETTLED - AWAITING APPROACH",
                 "SETTLED - TP APPROACH PENDING",
+                "AWAITING TP APPROACH",
               ],
               open_claim_count: 1,
               over_60_days: 0,
@@ -601,6 +603,9 @@ test("post-settlement open work renders as a distinct drillable management subse
   assert.match(html, /data-metric-id="post_settlement_open_work"/);
   assert.match(html, /data-filter="post-settlement:recovery_in_progress"/);
   assert.match(html, /SETTLED - TP APPROACH PENDING/);
+  assert.match(html, /RECOVERY IN PROGRESS/);
+  assert.match(html, /AWAITING TP APPROACH/);
+  assert.doesNotMatch(html, /six approved/i, "wording must not hard-code the taxonomy size");
   assert.match(html, /Settled flag.*not consulted/);
 });
 

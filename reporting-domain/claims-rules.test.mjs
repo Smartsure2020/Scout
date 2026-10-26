@@ -61,9 +61,11 @@ test("post-settlement operational statuses stay open and protected regardless of
     ["AWAITING RECOVERY", "recovery_in_progress"],
     ["SETTLED - RECOVERY PENDING", "recovery_in_progress"],
     ["SETTLED - AWAITING RECOVERY", "recovery_in_progress"],
+    ["RECOVERY IN PROGRESS", "recovery_in_progress"],
     ["PENDING APPROACH", "pending_third_party_approach"],
     ["SETTLED - AWAITING APPROACH", "pending_third_party_approach"],
     ["SETTLED - TP APPROACH PENDING", "pending_third_party_approach"],
+    ["AWAITING TP APPROACH", "pending_third_party_approach"],
   ];
   for (const [status, category] of statuses) {
     for (const settled of [true, false, null]) {
@@ -105,8 +107,64 @@ test("post-settlement operational statuses stay open and protected regardless of
     "AWAITING RECOVERY REVIEW",
     "PENDING APPROACH - ESCALATED",
     "SETTLED - TP APPROACH PENDING REVIEW",
+    "RECOVERY IN PROGRESS REVIEW",
+    "AWAITING TP APPROACH REVIEW",
   ])
     assert.equal(isPostSettlementOperationalClaim({ status: nearMatch }), false);
+});
+
+test("recovery-in-progress and awaiting-TP-approach are protected by exact match only", () => {
+  for (const [variant, category] of [
+    ["recovery in progress", "recovery_in_progress"],
+    ["  Recovery   In  Progress ", "recovery_in_progress"],
+    ["Awaiting TP approach", "pending_third_party_approach"],
+    ["AWAITING  TP  APPROACH", "pending_third_party_approach"],
+  ])
+    assert.equal(postSettlementOperationalCategory(variant)?.key, category, variant);
+
+  for (const nearMatch of [
+    "RECOVERY",
+    "IN PROGRESS",
+    "RECOVERY IN PROGRESS - LEGAL",
+    "AWAITING APPROACH",
+    "AWAITING TP",
+    "AWAITING TP APPROACH - ESCALATED",
+    "AWAITING THIRD PARTY APPROACH",
+    "PENDING TP APPROACH",
+    "TP APPROACH",
+  ]) {
+    assert.equal(postSettlementOperationalCategory(nearMatch), null, nearMatch);
+    assert.equal(isPostSettlementOperationalClaim({ status: nearMatch }), false, nearMatch);
+  }
+
+  // Generic "recovery" must not leak protection onto terminal recovery outcomes.
+  for (const terminalRecovery of [
+    "Recovery successful 100%",
+    "Recovery successful - apportionment",
+    "Settled & Recovery Abandoned",
+    "Settled, partial recovery made",
+    "SETTLED",
+  ]) {
+    assert.equal(isTerminalStatus(terminalRecovery), true, terminalRecovery);
+    assert.equal(postSettlementOperationalCategory(terminalRecovery), null, terminalRecovery);
+  }
+
+  // Protection only strips closure / zero-value treatment; the existing legal
+  // SLA mapping and ordinary attention flags for these statuses are unchanged.
+  for (const status of ["RECOVERY IN PROGRESS", "AWAITING TP APPROACH"]) {
+    const evaluation = getStatusEvaluation(status);
+    assert.equal(evaluation.mapped, true, status);
+    assert.equal(evaluation.category, "legal", status);
+    assert.equal(evaluation.open, true, status);
+    const codes = evaluatePriority({
+      status,
+      workingAge: 40,
+      estimate: 0,
+      outstanding: 1000,
+    }).flags.map((flag) => flag.code);
+    assert.ok(codes.includes("critical_sla"), `${status}: SLA attention retained`);
+    assert.equal(codes.includes("outstanding_without_estimate"), false, status);
+  }
 });
 
 test("Cardinal source status variants use the authoritative SLA taxonomy", () => {
