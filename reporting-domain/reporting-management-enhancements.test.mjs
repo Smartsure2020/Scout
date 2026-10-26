@@ -427,6 +427,12 @@ test("post-settlement operational work is exact-status driven for every Settled 
       handler: "Lucky Mokgomo",
     },
     {
+      key: "RECOVERY-IN-PROGRESS",
+      status: "RECOVERY IN PROGRESS",
+      category: "recovery_in_progress",
+      handler: "Lucky Mokgomo",
+    },
+    {
       key: "APPROACH",
       status: "PENDING APPROACH",
       category: "pending_third_party_approach",
@@ -441,6 +447,12 @@ test("post-settlement operational work is exact-status driven for every Settled 
     {
       key: "APPROACH-TP-PENDING",
       status: "SETTLED - TP APPROACH PENDING",
+      category: "pending_third_party_approach",
+      handler: "Naledi Moletsane",
+    },
+    {
+      key: "APPROACH-AWAITING-TP",
+      status: "AWAITING TP APPROACH",
       category: "pending_third_party_approach",
       handler: "Naledi Moletsane",
     },
@@ -502,25 +514,25 @@ test("post-settlement operational work is exact-status driven for every Settled 
   ])
     assert.ok(closingIds.includes(id), `${id} remains operationally open`);
   assert.equal(closingIds.includes("TRUE-TERMINAL-uuid"), false);
-  assert.equal(report.metrics.closing_inventory.value, 25);
+  assert.equal(report.metrics.closing_inventory.value, 33);
   assert.equal(
     report.metrics.handler_scorecards.value.totals.gross_registered,
     report.metrics.closing_inventory.value,
   );
-  assert.equal(report.metrics.handler_scorecards.value.totals.gross_registered, 25);
-  assert.equal(report.metrics.handler_scorecards.value.totals.over_60, 24);
+  assert.equal(report.metrics.handler_scorecards.value.totals.gross_registered, 33);
+  assert.equal(report.metrics.handler_scorecards.value.totals.over_60, 32);
   assert.equal(report.metrics.ready_to_close.value, 0);
   assert.equal(report.metrics.zero_estimate_payment_request.value, 0);
   assert.deepEqual(report.metrics.zero_estimate_closure_review.value, []);
   assert.deepEqual(report.metrics.zero_estimate_reserve_review.value, []);
-  assert.equal(report.metrics.financial_open_outstanding.value, 2500);
+  assert.equal(report.metrics.financial_open_outstanding.value, 3300);
   assert.equal(
     report.metrics.financial_open_outstanding.details.total_open_claim_count,
-    25,
+    33,
   );
 
   const metric = report.metrics.post_settlement_open_work;
-  assert.equal(metric.value.total_open_claim_count, 24);
+  assert.equal(metric.value.total_open_claim_count, 32);
   assert.deepEqual(
     new Set(metric.claim_population.claim_ids),
     new Set(expectedClaims.map((claim) => claim.id)),
@@ -540,7 +552,7 @@ test("post-settlement operational work is exact-status driven for every Settled 
   );
   assert.equal(
     metric.value.categories.reduce((sum, category) => sum + category.open_claim_count, 0),
-    24,
+    32,
   );
   const recovery = metric.value.categories.find(
     (category) => category.key === "recovery_in_progress",
@@ -552,9 +564,10 @@ test("post-settlement operational work is exact-status driven for every Settled 
     "AWAITING RECOVERY",
     "SETTLED - RECOVERY PENDING",
     "SETTLED - AWAITING RECOVERY",
+    "RECOVERY IN PROGRESS",
   ]);
-  assert.equal(recovery.open_claim_count, 12);
-  assert.equal(recovery.over_60_days, 12);
+  assert.equal(recovery.open_claim_count, 16);
+  assert.equal(recovery.over_60_days, 16);
   assert.deepEqual(recovery.handler_distribution.map((handler) => handler.label), [
     "Lucky Mokgomo",
   ]);
@@ -563,9 +576,10 @@ test("post-settlement operational work is exact-status driven for every Settled 
     "PENDING APPROACH",
     "SETTLED - AWAITING APPROACH",
     "SETTLED - TP APPROACH PENDING",
+    "AWAITING TP APPROACH",
   ]);
-  assert.equal(approach.open_claim_count, 12);
-  assert.equal(approach.over_60_days, 12);
+  assert.equal(approach.open_claim_count, 16);
+  assert.equal(approach.over_60_days, 16);
   assert.deepEqual(approach.handler_distribution.map((handler) => handler.label), [
     "Naledi Moletsane",
   ]);
@@ -599,8 +613,9 @@ test("post-settlement operational work is exact-status driven for every Settled 
   assert.match(html, /Recovery in Progress/);
   assert.match(html, /Pending Third-Party Approach/);
   for (const { status } of statuses) assert.match(html, new RegExp(status));
-  assert.match(html, /Lucky Mokgomo \(12\)/);
-  assert.match(html, /Naledi Moletsane \(12\)/);
+  assert.match(html, /Lucky Mokgomo \(16\)/);
+  assert.match(html, /Naledi Moletsane \(16\)/);
+  assert.doesNotMatch(html, /six approved/i, "wording must not hard-code the taxonomy size");
   assert.match(html, /Settled flag.*not consulted/);
 });
 
@@ -614,6 +629,16 @@ test("same-category multi-row status variants retain one protected parent classi
     {
       claimNo: "MULTI-APPROACH",
       statuses: ["PENDING APPROACH", "SETTLED - TP APPROACH PENDING"],
+      category: "pending_third_party_approach",
+    },
+    {
+      claimNo: "MULTI-RECOVERY-IN-PROGRESS",
+      statuses: ["AWAITING RECOVERY", "RECOVERY IN PROGRESS"],
+      category: "recovery_in_progress",
+    },
+    {
+      claimNo: "MULTI-APPROACH-AWAITING-TP",
+      statuses: ["PENDING APPROACH", "AWAITING TP APPROACH"],
       category: "pending_third_party_approach",
     },
   ];
@@ -636,19 +661,23 @@ test("same-category multi-row status variants retain one protected parent classi
   assert.deepEqual(new Set(report.metrics.closing_inventory.claim_population.claim_ids), new Set(expectedIds));
   assert.deepEqual(new Set(report.metrics.scorecard_gross_registered.claim_population.claim_ids), new Set(expectedIds));
   assert.deepEqual(new Set(report.metrics.open_claims_60_plus.claim_population.claim_ids), new Set(expectedIds));
-  assert.equal(report.metrics.handler_scorecards.value.totals.gross_registered, 2);
-  assert.equal(report.metrics.handler_scorecards.value.totals.over_60, 2);
+  assert.equal(report.metrics.handler_scorecards.value.totals.gross_registered, 4);
+  assert.equal(report.metrics.handler_scorecards.value.totals.over_60, 4);
   assert.equal(report.metrics.ready_to_close.value, 0);
   assert.equal(report.metrics.zero_estimate_payment_request.value, 0);
   assert.deepEqual(report.metrics.zero_estimate_closure_review.value, []);
   assert.deepEqual(report.metrics.zero_estimate_reserve_review.value, []);
 
   const postSettlement = report.metrics.post_settlement_open_work;
-  assert.equal(postSettlement.value.total_open_claim_count, 2);
+  assert.equal(postSettlement.value.total_open_claim_count, 4);
   assert.deepEqual(new Set(postSettlement.claim_population.claim_ids), new Set(expectedIds));
   for (const fixture of fixtures) {
     const category = postSettlement.value.categories.find(({ key }) => key === fixture.category);
-    assert.equal(category.open_claim_count, 1, fixture.claimNo);
+    assert.equal(
+      category.open_claim_count,
+      fixtures.filter(({ category: key }) => key === fixture.category).length,
+      fixture.claimNo,
+    );
     const claimRow = report.claim_rows.find(({ source_claim_number }) => source_claim_number === fixture.claimNo);
     assert.equal(claimRow.status_snapshot, null, `${fixture.claimNo}: raw textual consensus remains unresolved`);
     assert.equal(claimRow.membership_reasons.post_settlement_open_work, fixture.category);
@@ -706,6 +735,93 @@ test("cross-category multi-row status conflict remains protected and is disclose
   assert.equal(claimRow.status_snapshot, null);
   assert.ok(claimRow.relevant_flags.parent_quality_flags.includes("post_settlement_category_ambiguous"));
   assert.equal("post_settlement_open_work" in claimRow.membership_reasons, false);
+});
+
+test("recovery-in-progress and awaiting-TP-approach stay out of closure and both zero-estimate reviews", () => {
+  const protectedRows = [
+    { claimNo: "RIP-ZERO-OUTSTANDING", status: "RECOVERY IN PROGRESS", outstanding: 0 },
+    { claimNo: "RIP-OUTSTANDING", status: "RECOVERY IN PROGRESS", outstanding: 66078.68 },
+    { claimNo: "ATA-ZERO-OUTSTANDING", status: "AWAITING TP APPROACH", outstanding: 0 },
+    { claimNo: "ATA-OUTSTANDING", status: "AWAITING TP APPROACH", outstanding: 20000 },
+  ];
+  const report = buildReportWithRows([
+    ...protectedRows.map(({ claimNo, status, outstanding }) =>
+      snapshot(claimNo, "x", {
+        status,
+        registeredDate: "2026-07-01",
+        estimate: 0,
+        outstanding,
+        paid: 0,
+      }),
+    ),
+    // Controls prove the reviews still fire for unprotected zero-estimate claims.
+    snapshot("TRUE-CLOSE", "x", { status: "Registered", estimate: 0, outstanding: 0 }),
+    snapshot("NEW-ZERO", "x", { status: "Registered", estimate: 0, outstanding: 5000, registeredDate: "2026-10-15" }),
+  ]);
+  const protectedIds = protectedRows.map(({ claimNo }) => `${claimNo}-uuid`);
+
+  assert.deepEqual(report.metrics.zero_estimate_closure_review.value.map((row) => row.claim_number), ["TRUE-CLOSE"]);
+  assert.deepEqual(report.metrics.zero_estimate_reserve_review.value.map((row) => row.claim_number), ["NEW-ZERO"]);
+  assert.equal(report.metrics.ready_to_close.value, 0);
+  for (const id of protectedIds) {
+    assert.ok(report.metrics.closing_inventory.claim_population.claim_ids.includes(id), `${id} in closing inventory`);
+    assert.ok(report.metrics.scorecard_gross_registered.claim_population.claim_ids.includes(id), `${id} in Total Gross Registered`);
+    assert.ok(report.metrics.open_claims_60_plus.claim_population.claim_ids.includes(id), `${id} in registration-date ageing`);
+  }
+  // Four protected claims plus the two unprotected controls.
+  assert.equal(report.metrics.handler_scorecards.value.totals.gross_registered, 6);
+
+  const postSettlement = report.metrics.post_settlement_open_work;
+  assert.equal(postSettlement.value.total_open_claim_count, 4);
+  assert.deepEqual(new Set(postSettlement.claim_population.claim_ids), new Set(protectedIds));
+  assert.deepEqual(postSettlement.coverage_warnings, []);
+  const counts = Object.fromEntries(
+    postSettlement.value.categories.map((category) => [category.key, category.open_claim_count]),
+  );
+  assert.deepEqual(counts, { recovery_in_progress: 2, pending_third_party_approach: 2 });
+  assert.deepEqual(
+    Object.fromEntries(
+      Object.entries(postSettlement.details.claim_ids_by_category).map(([key, ids]) => [key, [...ids].sort()]),
+    ),
+    {
+      recovery_in_progress: ["RIP-OUTSTANDING-uuid", "RIP-ZERO-OUTSTANDING-uuid"],
+      pending_third_party_approach: ["ATA-OUTSTANDING-uuid", "ATA-ZERO-OUTSTANDING-uuid"],
+    },
+  );
+  assert.equal(postSettlement.details.settled_requirement, "not_consulted_exact_status_is_authoritative");
+});
+
+test("cross-category conflict using the new statuses stays protected and is disclosed without category assignment", () => {
+  const claimNo = "MULTI-CROSS-NEW-STATUSES";
+  const claimId = `${claimNo}-uuid`;
+  const report = buildReportWithRows(
+    ["RECOVERY IN PROGRESS", "AWAITING TP APPROACH"].map((status, index) =>
+      snapshot(claimNo, "x", {
+        status,
+        rowId: `row-${claimNo}-${index}`,
+        registeredDate: "2026-07-01",
+        estimate: 0,
+        outstanding: 0,
+        paid: 0,
+      }),
+    ),
+  );
+
+  assert.deepEqual(report.metrics.closing_inventory.claim_population.claim_ids, [claimId]);
+  assert.deepEqual(report.metrics.scorecard_gross_registered.claim_population.claim_ids, [claimId]);
+  assert.deepEqual(report.metrics.zero_estimate_closure_review.value, []);
+  assert.deepEqual(report.metrics.zero_estimate_reserve_review.value, []);
+  assert.equal(report.metrics.ready_to_close.value, 0);
+
+  const postSettlement = report.metrics.post_settlement_open_work;
+  assert.equal(postSettlement.value.total_open_claim_count, 0);
+  assert.deepEqual(postSettlement.coverage_warnings, ["post_settlement_category_ambiguous"]);
+  assert.equal(postSettlement.details.protected_open_claim_count, 1);
+  assert.deepEqual(postSettlement.details.ambiguous_category_claim_numbers, [claimNo]);
+  assert.deepEqual(postSettlement.details.ambiguous_category_keys_by_claim[claimNo], [
+    "pending_third_party_approach",
+    "recovery_in_progress",
+  ]);
 });
 
 test("management data contract and detail values are frozen into the persisted snapshot shape", () => {

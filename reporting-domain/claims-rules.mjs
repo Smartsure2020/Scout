@@ -22,6 +22,7 @@ const RECOVERY_IN_PROGRESS = Object.freeze({
     "AWAITING RECOVERY",
     "SETTLED - RECOVERY PENDING",
     "SETTLED - AWAITING RECOVERY",
+    "RECOVERY IN PROGRESS",
   ]),
 });
 
@@ -33,6 +34,7 @@ const PENDING_THIRD_PARTY_APPROACH = Object.freeze({
     "PENDING APPROACH",
     "SETTLED - AWAITING APPROACH",
     "SETTLED - TP APPROACH PENDING",
+    "AWAITING TP APPROACH",
   ]),
 });
 
@@ -44,9 +46,11 @@ export const POST_SETTLEMENT_OPERATIONAL_CATEGORIES = Object.freeze([
 export const POST_SETTLEMENT_OPERATIONAL_STATUSES = Object.freeze({
   "awaiting recovery": RECOVERY_IN_PROGRESS,
   "settled - awaiting recovery": RECOVERY_IN_PROGRESS,
+  "recovery in progress": RECOVERY_IN_PROGRESS,
   "pending approach": PENDING_THIRD_PARTY_APPROACH,
   "settled - awaiting approach": PENDING_THIRD_PARTY_APPROACH,
   "settled - tp approach pending": PENDING_THIRD_PARTY_APPROACH,
+  "awaiting tp approach": PENDING_THIRD_PARTY_APPROACH,
 });
 
 /**

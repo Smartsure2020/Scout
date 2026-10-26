@@ -340,9 +340,11 @@ test("Settled is evidence only: exact operational statuses stay open while exact
     ["RECOVERY", "AWAITING RECOVERY"],
     ["RECOVERY-PENDING", "SETTLED - RECOVERY PENDING"],
     ["RECOVERY-AWAITING", "SETTLED - AWAITING RECOVERY"],
+    ["RECOVERY-IN-PROGRESS", "RECOVERY IN PROGRESS"],
     ["APPROACH", "PENDING APPROACH"],
     ["APPROACH-AWAITING", "SETTLED - AWAITING APPROACH"],
     ["APPROACH-TP-PENDING", "SETTLED - TP APPROACH PENDING"],
+    ["APPROACH-AWAITING-TP", "AWAITING TP APPROACH"],
   ];
   const operationalRows = targetStatuses.flatMap(([key, status]) =>
     [true, false, null].map((settled) => ({

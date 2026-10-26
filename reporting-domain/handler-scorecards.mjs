@@ -63,11 +63,11 @@ const ROLE_RANK = {
 
 export const SCORECARD_DEFINITIONS = Object.freeze({
   gross_registered:
-    "The current operationally open book held by the handler at the closing extract. The six approved exact recovery / third-party approach statuses remain included because the status itself proves residual operational work; Cardinal's separate Settled flag is not consulted. Claims with an exact terminal status are excluded. The label is kept from the manual report.",
+    "The current operationally open book held by the handler at the closing extract. The approved exact recovery / third-party approach statuses remain included because the status itself proves residual operational work; Cardinal's separate Settled flag is not consulted. Claims with an exact terminal status are excluded. The label is kept from the manual report.",
   new_allocated:
     "Open claims whose Claim Registered date falls inside the report period, attributed to the handler shown on the accepted closing Cardinal extract. Scout does not hold the original allocation event, so a claim moved between handlers during the period counts under the handler on the closing extract.",
   over_60:
-    "Operationally open claims registered more than 60 calendar days before the closing extract (Cardinal Age greater than 60). The six approved exact recovery / third-party approach statuses remain eligible without consulting Cardinal's separate Settled flag; exact terminal statuses are excluded. Scout derives this from the registration date and compares it with Cardinal's own Age as a QA check.",
+    "Operationally open claims registered more than 60 calendar days before the closing extract (Cardinal Age greater than 60). The approved exact recovery / third-party approach statuses remain eligible without consulting Cardinal's separate Settled flag; exact terminal statuses are excluded. Scout derives this from the registration date and compares it with Cardinal's own Age as a QA check.",
 });
 
 function text(value) {
