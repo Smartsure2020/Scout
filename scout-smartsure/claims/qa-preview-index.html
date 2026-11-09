@@ -5707,7 +5707,7 @@ function renderHandlerEmailMap() {
     return `<div class="handler-email-item">
       <div class="handler-email-label">${esc(name.toUpperCase())}</div>
       <input type="email" data-handler="${key}" data-handler-name="${esc(name)}" placeholder="handler\x40example.com"
-        value="${val}"
+        value="${esc(val)}"
         oninput="saveTeamsConfig()">
     </div>`;
   }).join("");
