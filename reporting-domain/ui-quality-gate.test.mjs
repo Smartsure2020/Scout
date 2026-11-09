@@ -63,6 +63,28 @@ test("portal sign-in and action cards fit narrow phone viewports", () => {
   assert.match(portalHtml, /\.portal-cards\s*\{[^}]*width:\s*100%/);
   assert.match(portalHtml, /\.portal-card\s*\{[^}]*max-width:\s*100%/);
 });
+test("operational filters and briefing settings have explicit accessible names", () => {
+  const required = [
+    ["priority-handler-filter", "Filter priority list by handler"],
+    ["stale-handler-filter", "Filter stale claims by handler"],
+    ["stale-category-filter", "Filter stale claims by workstream"],
+    ["stale-date-from", "Stale claims: registered or loss date from"],
+    ["stale-date-to", "Stale claims: registered or loss date to"],
+    ["stale-min-outstanding", "Stale claims: minimum outstanding amount"],
+    ["ready-close-handler-filter", "Filter closure candidates by handler"],
+    ["save-filter-name", "Saved filter name"],
+    ["teams-proxy", "Cloudflare Proxy URL"],
+    ["teams-mgr-email", "Manager email for briefings"],
+  ];
+  for (const { name, html } of claimPages) {
+    for (const [id, accessibleName] of required) {
+      const control = html.match(new RegExp("<(?:input|select)\\b[^>]*\\bid=\\"" + id + "\\"[^>]*>", "i"))?.[0];
+      assert.ok(control, `${name}: missing ${id}`);
+      assert.ok(control.includes(`aria-label="${accessibleName}"`), `${name}: ${id} lacks an accessible name`);
+    }
+    assert.match(html, /aria-label="Settings email for \$\{esc\(name\)\}"/);
+  }
+});
 test("production and QA reports allow coverage warnings to wrap on mobile", () => {
   for (const { name, html } of claimPages) {
     assert.match(
