@@ -709,8 +709,40 @@ body {
 }
 
 .grid-claims {
-  grid-template-columns: 88px 115px minmax(120px, 1.1fr) 106px 100px minmax(145px, 1.3fr) 112px 90px 80px;
-  gap: 8px;
+  /* Keep all nine operational columns separate; scroll this table when the
+     workspace is narrower than the information it needs to display. */
+  grid-template-columns: 100px 120px minmax(175px, 1.1fr) 125px 112px minmax(185px, 1.3fr) 165px 112px 80px;
+  min-width: 1320px;
+  gap: 10px;
+}
+.grid-claims > span { min-width: 0; overflow: hidden; }
+.grid-claims .claim-no,
+.grid-claims .insured-name,
+.grid-claims .action-meta {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.grid-claims .status-chip,
+.grid-claims .priority-category-badge {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claims-operational-table {
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+#view-all-claims > .page-header { flex-wrap: wrap; gap: 12px 18px; }
+#view-all-claims > .page-header > div:first-child { flex: 0 0 auto; }
+#view-all-claims .page-title { white-space: nowrap; }
+#view-all-claims .claims-filter-toolbar {
+  flex: 1 1 620px;
+  min-width: 0;
 }
 
 /* BADGES & CHIPS */
@@ -1072,6 +1104,12 @@ body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
+}
+
+/* Keep mandate reviews and the payment pipeline readable within the
+   manager workspace; two equal columns are too narrow on laptops. */
+@media (max-width: 1450px) {
+  .manager-finance-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* HANDLER CARDS */
@@ -1992,10 +2030,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   }
   .sidebar .nav-icon { margin: 0; }
   .main { padding: 18px 14px; }
-  .grid-claims {
-    grid-template-columns: 88px 115px 150px 106px 100px 180px 112px 90px 80px;
-    min-width: 1040px;
-  }
+  .grid-claims { min-width: 1320px; }
   .claims-table { overflow-x: auto; }
   .handler-filter { flex-wrap: wrap; justify-content: flex-start; }
   .claims-filter-toolbar { justify-content: flex-start; }
@@ -3368,7 +3403,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         </div>
         <button id="save-filter-trigger" class="save-filter-btn" onclick="openSaveFilterInput()" title="Save current filter combination">&#43; Save filter</button>
       </div>
-      <div class="claims-table" role="region" aria-label="Claims operational queue">
+      <div class="claims-table claims-operational-table" role="region" aria-label="Claims operational queue, horizontally scrollable" tabindex="0">
         <div class="claims-table-toolbar">
           <span class="table-context-label">Operational queue</span>
           <div class="density-control" role="group" aria-label="Claims table density">
@@ -3511,7 +3546,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         </div>
         <div class="claims-table" id="manager-workload-balance"></div>
       </div>
-      <div class="two-col">
+      <div class="two-col manager-finance-grid">
         <div>
           <div class="section-header">
             <div class="section-title">Mandate authority dashboard <span class="section-badge red">over R100k</span></div>
