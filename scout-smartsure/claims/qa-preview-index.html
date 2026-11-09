@@ -38,7 +38,7 @@
   --ws-border2:   #ccdbd8;
   --ws-text:      #1a2e2e;
   --ws-text-2:    #3a5b58;
-  --ws-text-muted:#5a7a77;
+  --ws-text-muted:#4f716d;
 
   /* Topnav */
   --nav-bg:       #ffffff;
@@ -2910,6 +2910,8 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
 }
 @media (max-width: 640px) {
   .report-period-header, .report-history-header, .report-coverage-banner { flex-direction: column; align-items: stretch; }
+  .report-coverage-banner > div { flex-wrap: wrap; white-space: normal; min-width: 0; }
+  .report-coverage-banner > span { min-width: 0; overflow-wrap: anywhere; }
   .report-period-actions, .report-history-filters { justify-content: flex-start; }
   .report-two-col, .reports-kpi-grid, .reports-kpi-grid-3, .report-health-grid { grid-template-columns: 1fr; }
   .report-details-grid { grid-template-columns: 1fr; }
