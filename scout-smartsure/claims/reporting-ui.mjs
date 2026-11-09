@@ -1611,7 +1611,13 @@ export class ReportsController {
   render() {
     const root = this.document?.getElementById(this.rootId);
     if (!root) return;
-    root.innerHTML = `${freshnessNotice(this.getContext?.()?.freshness)}<div class="reports-tabs" role="tablist" aria-label="Claims report type">
+    // The claims shell already displays the same extract freshness status.
+    // Keep this notice for standalone/preview mounts where the global banner is hidden.
+    const globalBanner = this.document?.getElementById("data-status-banner");
+    const localFreshnessNotice = globalBanner?.style?.display === "block"
+      ? ""
+      : freshnessNotice(this.getContext?.()?.freshness);
+    root.innerHTML = `${localFreshnessNotice}<div class="reports-tabs" role="tablist" aria-label="Claims report type">
       ${["weekly", "monthly", "history"].map((tab) => `<button type="button" class="tab ${this.state.activeTab === tab ? "active" : ""}" id="reports-tab-${tab}" role="tab" aria-selected="${this.state.activeTab === tab}" aria-controls="reports-tabpanel" data-report-action="tab" data-tab="${tab}">${tab[0].toUpperCase() + tab.slice(1)}</button>`).join("")}
     </div>
     ${this.state.operation ? `<div class="reports-operation" role="status"><span class="upload-spinner"></span>${escapeHtml(this.state.operation)}</div>` : ""}

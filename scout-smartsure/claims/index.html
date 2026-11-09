@@ -38,7 +38,7 @@
   --ws-border2:   #ccdbd8;
   --ws-text:      #1a2e2e;
   --ws-text-2:    #3a5b58;
-  --ws-text-muted:#5a7a77;
+  --ws-text-muted:#4f716d;
 
   /* Topnav */
   --nav-bg:       #ffffff;
@@ -709,8 +709,54 @@ body {
 }
 
 .grid-claims {
-  grid-template-columns: 88px 115px minmax(120px, 1.1fr) 106px 100px minmax(145px, 1.3fr) 112px 90px 80px;
-  gap: 8px;
+  /* Keep all nine operational columns separate; scroll this table when the
+     workspace is narrower than the information it needs to display. */
+  grid-template-columns: 100px 120px minmax(175px, 1.1fr) 125px 112px minmax(185px, 1.3fr) 165px 112px 80px;
+  min-width: 1320px;
+  gap: 10px;
+}
+.grid-claims > span { min-width: 0; overflow: hidden; }
+.grid-claims .claim-no,
+.grid-claims .insured-name,
+.grid-claims .action-meta {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.grid-claims .status-chip,
+.grid-claims .priority-category-badge {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.claims-operational-table { overflow: hidden; }
+.claims-operational-scroll {
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+}
+.claims-column-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+.claims-column-nav-label { color: var(--ws-text-muted); font-size: 11px; }
+.claims-column-nav .density-btn { min-width: 58px; }
+.claims-column-nav .density-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+#view-all-claims > .page-header { flex-wrap: wrap; gap: 12px 18px; }
+#view-all-claims > .page-header > div:first-child { flex: 0 0 auto; }
+#view-all-claims .page-title { white-space: nowrap; }
+#view-all-claims .claims-filter-toolbar {
+  flex: 1 1 620px;
+  min-width: 0;
 }
 
 /* BADGES & CHIPS */
@@ -1074,6 +1120,12 @@ body {
   gap: 16px;
 }
 
+/* Keep mandate reviews and the payment pipeline readable within the
+   manager workspace; two equal columns are too narrow on laptops. */
+@media (max-width: 1450px) {
+  .manager-finance-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* HANDLER CARDS */
 .handler-card {
   background: var(--ws-surface);
@@ -1271,7 +1323,7 @@ body {
 .active-filter-chip button { border: 0; background: transparent; color: inherit; cursor: pointer; padding: 0 2px; line-height: 1; font-size: 13px; }
 .active-filter-chip button:hover { color: var(--red); }
 .claims-table-toolbar {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   padding: 10px 18px; border-bottom: 1px solid var(--ws-border); background: var(--ws-surface);
 }
 .table-context-label { color: var(--ws-text-muted); font: 700 11px var(--mono); letter-spacing: .55px; text-transform: uppercase; }
@@ -1623,6 +1675,9 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   font-weight: 500;
 }
 
+/* The mobile scrim is only displayed when the menu is explicitly opened. */
+.sidebar-backdrop { display: none; }
+
 /* SIDEBAR COLLAPSE TOGGLE */
 .sidebar {
   transition: transform 0.25s cubic-bezier(0.4,0,0.2,1), margin-right 0.25s cubic-bezier(0.4,0,0.2,1);
@@ -1667,9 +1722,9 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
 .hamburger span:nth-child(2) { width: 11px; }
 .hamburger span:nth-child(3) { width: 14px; }
 
-.sidebar-toggle[aria-expanded="false"] .hamburger span:nth-child(1) { transform: translateY(6px) rotate(45deg); width: 16px; }
-.sidebar-toggle[aria-expanded="false"] .hamburger span:nth-child(2) { opacity: 0; transform: scaleX(0); }
-.sidebar-toggle[aria-expanded="false"] .hamburger span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); width: 16px; }
+.sidebar-toggle[aria-expanded="true"] .hamburger span:nth-child(1) { transform: translateY(6px) rotate(45deg); width: 16px; }
+.sidebar-toggle[aria-expanded="true"] .hamburger span:nth-child(2) { opacity: 0; transform: scaleX(0); }
+.sidebar-toggle[aria-expanded="true"] .hamburger span:nth-child(3) { transform: translateY(-6px) rotate(-45deg); width: 16px; }
 
 /* SCROLLBAR */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -1992,10 +2047,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
   }
   .sidebar .nav-icon { margin: 0; }
   .main { padding: 18px 14px; }
-  .grid-claims {
-    grid-template-columns: 88px 115px 150px 106px 100px 180px 112px 90px 80px;
-    min-width: 1040px;
-  }
+  .grid-claims { min-width: 1320px; }
   .claims-table { overflow-x: auto; }
   .handler-filter { flex-wrap: wrap; justify-content: flex-start; }
   .claims-filter-toolbar { justify-content: flex-start; }
@@ -2016,7 +2068,20 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
     z-index: 1200;
     transition: transform .18s ease;
   }
-  .sidebar:not(.sb-collapsed) { transform: translateX(0); }
+  .sidebar.mobile-open:not(.sb-collapsed) { transform: translateX(0); }
+  .sidebar-backdrop.is-open {
+    display: block;
+    position: fixed;
+    top: 58px;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 1100;
+    border: 0;
+    padding: 0;
+    background: rgba(4, 24, 24, .36);
+    cursor: pointer;
+  }
   .main { padding: 14px 10px; }
   .topnav { padding: 10px 12px; }
   .global-search { display: none; }
@@ -2930,6 +2995,8 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
 }
 @media (max-width: 640px) {
   .report-period-header, .report-history-header, .report-coverage-banner { flex-direction: column; align-items: stretch; }
+  .report-coverage-banner > div { flex-wrap: wrap; white-space: normal; min-width: 0; }
+  .report-coverage-banner > span { min-width: 0; overflow-wrap: anywhere; }
   .report-period-actions, .report-history-filters { justify-content: flex-start; }
   .report-two-col, .reports-kpi-grid, .reports-kpi-grid-3, .report-health-grid { grid-template-columns: 1fr; }
   .report-details-grid { grid-template-columns: 1fr; }
@@ -3074,6 +3141,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
 </div>
 
 <div class="app">
+  <button class="sidebar-backdrop" id="sidebar-backdrop" type="button" aria-label="Close mobile navigation" onclick="closeMobileSidebar(true)"></button>
 
   <!-- SIDEBAR -->
   <div class="sidebar" id="scout-sidebar">
@@ -3308,7 +3376,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         </div>
         <div class="handler-filter">
           <span class="filter-label">Filter:</span>
-          <select id="priority-handler-filter" onchange="priorityPage=1;renderPriorities()">
+          <select id="priority-handler-filter" aria-label="Filter priority list by handler" onchange="priorityPage=1;renderPriorities()">
             <option value="all">All handlers</option>
           </select>
           <select id="priority-category-filter" aria-label="Filter priority list by workstream" onchange="priorityPage=1;renderPriorities()">
@@ -3379,13 +3447,13 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         <span class="saved-filters-label">Saved:</span>
         <div id="saved-filter-chips" style="display:contents;"></div>
         <div id="save-filter-inline" class="save-filter-inline">
-          <input id="save-filter-name" type="text" maxlength="32" placeholder="Name this filter…" onkeydown="handleSaveFilterKey(event)">
+          <input id="save-filter-name" type="text" aria-label="Saved filter name" maxlength="32" placeholder="Name this filter…" onkeydown="handleSaveFilterKey(event)">
           <button class="save-filter-confirm" onclick="confirmSaveFilter()">Save</button>
           <button class="save-filter-cancel" onclick="cancelSaveFilter()">Cancel</button>
         </div>
         <button id="save-filter-trigger" class="save-filter-btn" onclick="openSaveFilterInput()" title="Save current filter combination">&#43; Save filter</button>
       </div>
-      <div class="claims-table" role="region" aria-label="Claims operational queue">
+      <div class="claims-table claims-operational-table">
         <div class="claims-table-toolbar">
           <span class="table-context-label">Operational queue</span>
           <div class="density-control" role="group" aria-label="Claims table density">
@@ -3393,7 +3461,13 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
             <button id="claims-density-comfortable" class="density-btn active" onclick="setClaimsDensity('comfortable')">Comfortable</button>
             <button id="claims-density-compact" class="density-btn" onclick="setClaimsDensity('compact')">Compact</button>
           </div>
+          <div class="claims-column-nav" role="group" aria-label="Navigate claims table columns">
+            <span class="claims-column-nav-label">9 columns · scroll sideways</span>
+            <button class="density-btn" type="button" onclick="scrollClaimsColumns(-1)" aria-label="Scroll claims table left" title="Scroll to earlier columns">← Left</button>
+            <button class="density-btn" type="button" onclick="scrollClaimsColumns(1)" aria-label="Scroll claims table right" title="Scroll to later columns">Right →</button>
+          </div>
         </div>
+        <div class="claims-operational-scroll" id="claims-operational-scroll" role="region" aria-label="Claims operational queue, horizontally scrollable" tabindex="0">
         <div class="table-head grid-claims">
           <button class="sort-btn active" id="sort-btn-age" onclick="setAllClaimsSort('age')" title="Sort by claim age">Age / movement <span id="sort-ind-age">↓</span></button>
           <span>Claim</span><span>Insured</span><span>Primary state</span>
@@ -3402,6 +3476,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           <span>Context</span>
         </div>
         <div id="all-claims-body"></div>
+        </div>
       </div>
       <div id="all-claims-pagination" style="display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:12px;"></div>
     </div>
@@ -3439,10 +3514,10 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           <div class="page-sub">Critical SLA breaches and SLA-at-risk claims, sorted by severity. Claim age and no movement are separate indicators.</div>
         </div>
         <div class="handler-filter">
-          <select id="stale-handler-filter" onchange="renderStale()">
+          <select id="stale-handler-filter" aria-label="Filter stale claims by handler" onchange="renderStale()">
             <option value="all">All handlers</option>
           </select>
-          <select id="stale-category-filter" onchange="renderStale()">
+          <select id="stale-category-filter" aria-label="Filter stale claims by workstream" onchange="renderStale()">
             <option value="all">All categories</option>
             <option value="payment">Payment</option>
             <option value="assessor">Assessor</option>
@@ -3452,9 +3527,9 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
             <option value="legal">Legal</option>
             <option value="repudiated">Repudiated</option>
           </select>
-          <input id="stale-date-from" type="date" onchange="renderStale()" title="Registered/DOL from">
-          <input id="stale-date-to" type="date" onchange="renderStale()" title="Registered/DOL to">
-          <input id="stale-min-outstanding" type="number" min="0" step="1000" placeholder="Min R" onchange="renderStale()" oninput="renderStale()" title="Minimum outstanding">
+          <input id="stale-date-from" type="date" aria-label="Stale claims: registered or loss date from" onchange="renderStale()" title="Registered/DOL from">
+          <input id="stale-date-to" type="date" aria-label="Stale claims: registered or loss date to" onchange="renderStale()" title="Registered/DOL to">
+          <input id="stale-min-outstanding" type="number" aria-label="Stale claims: minimum outstanding amount" min="0" step="1000" placeholder="Min R" onchange="renderStale()" oninput="renderStale()" title="Minimum outstanding">
           <button id="stale-zero-toggle" class="btn-ghost" onclick="toggleZeroFilter('stale')">Zero estimate</button>
           <button class="btn-ghost" onclick="applyMyClaimsFilter('stale')">My claims</button>
         </div>
@@ -3471,7 +3546,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           <div class="page-sub">Claims identified by payment, repudiation, recovery and dormant registered-claim rules. Some require management review before closure.</div>
         </div>
         <div class="handler-filter">
-          <select id="ready-close-handler-filter" onchange="renderReadyToClose()">
+          <select id="ready-close-handler-filter" aria-label="Filter closure candidates by handler" onchange="renderReadyToClose()">
             <option value="all">All handlers</option>
           </select>
         </div>
@@ -3528,7 +3603,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         </div>
         <div class="claims-table" id="manager-workload-balance"></div>
       </div>
-      <div class="two-col">
+      <div class="two-col manager-finance-grid">
         <div>
           <div class="section-header">
             <div class="section-title">Mandate authority dashboard <span class="section-badge red">over R100k</span></div>
@@ -3596,7 +3671,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           </div>
           <div>
             <div style="font-size:10.5px;color:var(--ws-text-muted);margin-bottom:4px;font-family:var(--mono);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">Cloudflare Proxy URL</div>
-            <input id="teams-proxy" type="text" placeholder="scout-teams-proxy.marketing-854.workers.dev" value="scout-teams-proxy.marketing-854.workers.dev" oninput="saveTeamsConfig()">
+            <input id="teams-proxy" type="text" aria-label="Cloudflare Proxy URL" placeholder="scout-teams-proxy.marketing-854.workers.dev" value="scout-teams-proxy.marketing-854.workers.dev" oninput="saveTeamsConfig()">
           </div>
           <div id="teams-cred-status" style="font-size: 12px;margin-top:10px;color:var(--ws-text-muted);font-weight:500;"></div>
         </div>
@@ -3617,7 +3692,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           </div>
           <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--ws-border);">
             <div style="font-size:10.5px;color:var(--ws-text-muted);margin-bottom:4px;font-family:var(--mono);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">Manager Email</div>
-            <input id="teams-mgr-email" type="email" placeholder="manager@example.com" value="" oninput="saveTeamsConfig()">
+            <input id="teams-mgr-email" type="email" aria-label="Manager email for briefings" placeholder="manager@example.com" value="" oninput="saveTeamsConfig()">
           </div>
           <div id="handler-email-map" style="margin-top:14px;"></div>
         </div>
@@ -5759,7 +5834,7 @@ function renderHandlerEmailMap() {
     return `<div class="handler-email-item">
       <div class="handler-email-label">${esc(name.toUpperCase())}</div>
       <input type="email" data-handler="${key}" data-handler-name="${esc(name)}" placeholder="handler\x40example.com"
-        value="${val}"
+        value="${esc(val)}"
         oninput="saveTeamsConfig()">
     </div>`;
   }).join("");
@@ -5855,7 +5930,7 @@ function renderSettingsHandlerEmails(settings = scoutSettings) {
     const val = emails[name] || getHandlerEmail(name, emails) || "";
     return `<div class="settings-field">
       <label class="settings-label">${esc(name)}</label>
-      <input class="settings-input" type="email" data-setting-handler="${esc(name)}" value="${esc(val)}" placeholder="handler@example.com">
+      <input class="settings-input" type="email" aria-label="Settings email for ${esc(name)}" data-setting-handler="${esc(name)}" value="${esc(val)}" placeholder="handler@example.com">
     </div>`;
   }).join("");
 }
@@ -8064,6 +8139,13 @@ function setClaimsSearchFilter(value) {
   renderAllClaims(getProcessedClaims());
 }
 
+function scrollClaimsColumns(direction) {
+  const table = document.getElementById("claims-operational-scroll");
+  if (!table) return;
+  const step = Math.max(300, Math.round(table.clientWidth * 0.82));
+  table.scrollBy({ left: direction < 0 ? -step : step, behavior: "smooth" });
+}
+
 function setClaimsDensity(mode) {
   claimsDensity = mode === "compact" ? "compact" : "comfortable";
   document.getElementById("claims-density-comfortable")?.classList.toggle("active", claimsDensity === "comfortable");
@@ -9843,18 +9925,71 @@ document.addEventListener("keydown", function(e) {
   }
 });
 
-function toggleSidebar() {
-  const sidebar = document.querySelector(".sidebar");
-  const btn = document.getElementById("sidebar-toggle");
-  const collapsed = sidebar.classList.toggle("sb-collapsed");
-  btn.setAttribute("aria-expanded", collapsed ? "false" : "true");
+const mobileSidebarMedia = window.matchMedia?.("(max-width: 640px)");
+
+function closeMobileSidebar(restoreFocus = false) {
+  if (!mobileSidebarMedia?.matches) return;
+  const sidebar = document.getElementById("scout-sidebar");
+  const button = document.getElementById("sidebar-toggle");
+  sidebar?.classList.remove("mobile-open");
+  sidebar?.classList.add("sb-collapsed");
+  if (sidebar) sidebar.inert = true;
+  document.getElementById("sidebar-backdrop")?.classList.remove("is-open");
+  button?.setAttribute("aria-expanded", "false");
+  if (restoreFocus) button?.focus();
 }
 
-loadTeamsConfig();
-if (window.matchMedia && window.matchMedia("(max-width: 640px)").matches) {
-  document.querySelector(".sidebar")?.classList.add("sb-collapsed");
-  document.getElementById("sidebar-toggle")?.setAttribute("aria-expanded", "false");
+function toggleSidebar() {
+  const sidebar = document.getElementById("scout-sidebar");
+  const button = document.getElementById("sidebar-toggle");
+  if (!sidebar || !button) return;
+  if (mobileSidebarMedia?.matches) {
+    if (sidebar.classList.contains("mobile-open")) return closeMobileSidebar(true);
+    sidebar.classList.remove("sb-collapsed");
+    sidebar.classList.add("mobile-open");
+    sidebar.inert = false;
+    document.getElementById("sidebar-backdrop")?.classList.add("is-open");
+    button.setAttribute("aria-expanded", "true");
+    return;
+  }
+  const collapsed = sidebar.classList.toggle("sb-collapsed");
+  button.setAttribute("aria-expanded", collapsed ? "false" : "true");
 }
+
+function syncSidebarViewport() {
+  if (mobileSidebarMedia?.matches) return closeMobileSidebar();
+  const sidebar = document.getElementById("scout-sidebar");
+  sidebar?.classList.remove("mobile-open");
+  sidebar?.classList.remove("sb-collapsed");
+  if (sidebar) sidebar.inert = false;
+  document.getElementById("sidebar-backdrop")?.classList.remove("is-open");
+  document.getElementById("sidebar-toggle")?.setAttribute("aria-expanded", "true");
+}
+
+// Selecting a destination closes the mobile menu, but expanding its
+// handler/insurer "Show more" section does not.
+const mobileSidebar = document.getElementById("scout-sidebar");
+function dismissMobileSidebarOnNav(event) {
+  if (!mobileSidebarMedia?.matches) return;
+  if (event.target.closest(".nav-item, .nav-subitem")) {
+    closeMobileSidebar(event.type === "keydown");
+  }
+}
+mobileSidebar?.addEventListener("click", dismissMobileSidebarOnNav);
+mobileSidebar?.addEventListener("keydown", event => {
+  if (event.key === "Enter" || event.key === " ") dismissMobileSidebarOnNav(event);
+});
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && mobileSidebarMedia?.matches &&
+      mobileSidebar?.classList.contains("mobile-open")) {
+    event.preventDefault();
+    closeMobileSidebar(true);
+  }
+});
+
+loadTeamsConfig();
+syncSidebarViewport();
+mobileSidebarMedia?.addEventListener?.("change", syncSidebarViewport);
 const hr = new Date().getHours();
   const greet = hr < 12 ? "Good morning" : hr < 17 ? "Good afternoon" : "Good evening";
   const greetEl = document.getElementById("greeting-title");
