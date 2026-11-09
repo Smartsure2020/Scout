@@ -38,7 +38,7 @@
   --ws-border2:   #ccdbd8;
   --ws-text:      #1a2e2e;
   --ws-text-2:    #3a5b58;
-  --ws-text-muted:#5a7a77;
+  --ws-text-muted:#4f716d;
 
   /* Topnav */
   --nav-bg:       #ffffff;
@@ -2910,6 +2910,8 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
 }
 @media (max-width: 640px) {
   .report-period-header, .report-history-header, .report-coverage-banner { flex-direction: column; align-items: stretch; }
+  .report-coverage-banner > div { flex-wrap: wrap; white-space: normal; min-width: 0; }
+  .report-coverage-banner > span { min-width: 0; overflow-wrap: anywhere; }
   .report-period-actions, .report-history-filters { justify-content: flex-start; }
   .report-two-col, .reports-kpi-grid, .reports-kpi-grid-3, .report-health-grid { grid-template-columns: 1fr; }
   .report-details-grid { grid-template-columns: 1fr; }
@@ -3291,7 +3293,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         </div>
         <div class="handler-filter">
           <span class="filter-label">Filter:</span>
-          <select id="priority-handler-filter" onchange="priorityPage=1;renderPriorities()">
+          <select id="priority-handler-filter" aria-label="Filter priority list by handler" onchange="priorityPage=1;renderPriorities()">
             <option value="all">All handlers</option>
           </select>
           <select id="priority-category-filter" aria-label="Filter priority list by workstream" onchange="priorityPage=1;renderPriorities()">
@@ -3362,7 +3364,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         <span class="saved-filters-label">Saved:</span>
         <div id="saved-filter-chips" style="display:contents;"></div>
         <div id="save-filter-inline" class="save-filter-inline">
-          <input id="save-filter-name" type="text" maxlength="32" placeholder="Name this filter…" onkeydown="handleSaveFilterKey(event)">
+          <input id="save-filter-name" type="text" aria-label="Saved filter name" maxlength="32" placeholder="Name this filter…" onkeydown="handleSaveFilterKey(event)">
           <button class="save-filter-confirm" onclick="confirmSaveFilter()">Save</button>
           <button class="save-filter-cancel" onclick="cancelSaveFilter()">Cancel</button>
         </div>
@@ -3422,10 +3424,10 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           <div class="page-sub">Critical SLA breaches and SLA-at-risk claims, sorted by severity. Claim age and no movement are separate indicators.</div>
         </div>
         <div class="handler-filter">
-          <select id="stale-handler-filter" onchange="renderStale()">
+          <select id="stale-handler-filter" aria-label="Filter stale claims by handler" onchange="renderStale()">
             <option value="all">All handlers</option>
           </select>
-          <select id="stale-category-filter" onchange="renderStale()">
+          <select id="stale-category-filter" aria-label="Filter stale claims by workstream" onchange="renderStale()">
             <option value="all">All categories</option>
             <option value="payment">Payment</option>
             <option value="assessor">Assessor</option>
@@ -3435,9 +3437,9 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
             <option value="legal">Legal</option>
             <option value="repudiated">Repudiated</option>
           </select>
-          <input id="stale-date-from" type="date" onchange="renderStale()" title="Registered/DOL from">
-          <input id="stale-date-to" type="date" onchange="renderStale()" title="Registered/DOL to">
-          <input id="stale-min-outstanding" type="number" min="0" step="1000" placeholder="Min R" onchange="renderStale()" oninput="renderStale()" title="Minimum outstanding">
+          <input id="stale-date-from" type="date" aria-label="Stale claims: registered or loss date from" onchange="renderStale()" title="Registered/DOL from">
+          <input id="stale-date-to" type="date" aria-label="Stale claims: registered or loss date to" onchange="renderStale()" title="Registered/DOL to">
+          <input id="stale-min-outstanding" type="number" aria-label="Stale claims: minimum outstanding amount" min="0" step="1000" placeholder="Min R" onchange="renderStale()" oninput="renderStale()" title="Minimum outstanding">
           <button id="stale-zero-toggle" class="btn-ghost" onclick="toggleZeroFilter('stale')">Zero estimate</button>
           <button class="btn-ghost" onclick="applyMyClaimsFilter('stale')">My claims</button>
         </div>
@@ -3454,7 +3456,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           <div class="page-sub">Claims identified by payment, repudiation, recovery and dormant registered-claim rules. Some require management review before closure.</div>
         </div>
         <div class="handler-filter">
-          <select id="ready-close-handler-filter" onchange="renderReadyToClose()">
+          <select id="ready-close-handler-filter" aria-label="Filter closure candidates by handler" onchange="renderReadyToClose()">
             <option value="all">All handlers</option>
           </select>
         </div>
@@ -3579,7 +3581,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           </div>
           <div>
             <div style="font-size:10.5px;color:var(--ws-text-muted);margin-bottom:4px;font-family:var(--mono);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">Cloudflare Proxy URL</div>
-            <input id="teams-proxy" type="text" placeholder="scout-teams-proxy.marketing-854.workers.dev" value="scout-teams-proxy.marketing-854.workers.dev" oninput="saveTeamsConfig()">
+            <input id="teams-proxy" type="text" aria-label="Cloudflare Proxy URL" placeholder="scout-teams-proxy.marketing-854.workers.dev" value="scout-teams-proxy.marketing-854.workers.dev" oninput="saveTeamsConfig()">
           </div>
           <div id="teams-cred-status" style="font-size: 12px;margin-top:10px;color:var(--ws-text-muted);font-weight:500;"></div>
         </div>
@@ -3600,7 +3602,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           </div>
           <div style="margin-top:14px;padding-top:12px;border-top:1px solid var(--ws-border);">
             <div style="font-size:10.5px;color:var(--ws-text-muted);margin-bottom:4px;font-family:var(--mono);font-weight:600;text-transform:uppercase;letter-spacing:0.5px;">Manager Email</div>
-            <input id="teams-mgr-email" type="email" placeholder="manager@example.com" value="" oninput="saveTeamsConfig()">
+            <input id="teams-mgr-email" type="email" aria-label="Manager email for briefings" placeholder="manager@example.com" value="" oninput="saveTeamsConfig()">
           </div>
           <div id="handler-email-map" style="margin-top:14px;"></div>
         </div>
@@ -5707,7 +5709,7 @@ function renderHandlerEmailMap() {
     return `<div class="handler-email-item">
       <div class="handler-email-label">${esc(name.toUpperCase())}</div>
       <input type="email" data-handler="${key}" data-handler-name="${esc(name)}" placeholder="handler\x40example.com"
-        value="${val}"
+        value="${esc(val)}"
         oninput="saveTeamsConfig()">
     </div>`;
   }).join("");
@@ -5842,7 +5844,7 @@ function renderSettingsHandlerEmails(settings = scoutSettings) {
     const val = emails[name] || getHandlerEmail(name, emails) || "";
     return `<div class="settings-field">
       <label class="settings-label">${esc(name)}</label>
-      <input class="settings-input" type="email" data-setting-handler="${esc(name)}" value="${esc(val)}" placeholder="handler@example.com">
+      <input class="settings-input" type="email" aria-label="Settings email for ${esc(name)}" data-setting-handler="${esc(name)}" value="${esc(val)}" placeholder="handler@example.com">
     </div>`;
   }).join("");
 }
