@@ -58,6 +58,11 @@ test("the Claims Operations portal card is a native, focus-visible link", () => 
   assert.match(portalHtml, /<div class="portal-card uw" aria-disabled="true">/);
 });
 
+test("portal sign-in and action cards fit narrow phone viewports", () => {
+  assert.match(portalHtml, /\.auth-card\s*\{[^}]*max-width:\s*calc\(100vw - 32px\)/);
+  assert.match(portalHtml, /\.portal-cards\s*\{[^}]*width:\s*100%/);
+  assert.match(portalHtml, /\.portal-card\s*\{[^}]*max-width:\s*100%/);
+});
 test("production and QA reports allow coverage warnings to wrap on mobile", () => {
   for (const { name, html } of claimPages) {
     assert.match(
