@@ -40,4 +40,19 @@ for (const [label, page] of targets) {
     assert.match(html, /<div class="table-head grid-claims">/);
     assert.match(html, /<div class="table-row grid-claims" data-claim-no=/);
   });
+  test(label + " manager finance panels stack before their cards are squeezed", () => {
+    const html = readFileSync(new URL("../scout-smartsure/claims/" + page, import.meta.url), "utf8");
+    assert.match(
+      html,
+      /<div class="two-col manager-finance-grid">\s*<div>\s*<div class="section-header">\s*<div class="section-title">Mandate authority dashboard/,
+    );
+    assert.match(
+      html,
+      /@media\s*\(max-width:\s*1450px\)\s*\{\s*\.manager-finance-grid\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\);/,
+    );
+    // Stacking is a presentation-only change; the source renderers retain their output.
+    assert.match(html, /function renderMandateDashboard\(active\)/);
+    assert.match(html, /function renderPaymentPipeline\(active\)/);
+  });
+
 }
