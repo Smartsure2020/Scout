@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 
 const targets = [
   ["production", "index.html"],
@@ -13,11 +14,31 @@ for (const [label, page] of targets) {
 
     assert.match(html, /\.grid-claims\s*\{[^}]*grid-template-columns:[^;]*;/);
     assert.match(html, /\.grid-claims\s*\{[^}]*min-width:\s*1320px/);
-    assert.match(html, /\.claims-operational-table\s*\{[^}]*overflow-x:\s*auto/);
+    assert.match(html, /\.claims-operational-scroll\s*\{[^}]*overflow-x:\s*auto/);
     assert.match(
       html,
-      /<div class="claims-table claims-operational-table" role="region" aria-label="Claims operational queue, horizontally scrollable" tabindex="0">/,
+      /<div class="claims-operational-scroll" id="claims-operational-scroll" role="region" aria-label="Claims operational queue, horizontally scrollable" tabindex="0">/,
     );
+
+
+    assert.match(html, /class="claims-column-nav" role="group" aria-label="Navigate claims table columns"/);
+    assert.match(html, /onclick="scrollClaimsColumns\(-1\)" aria-label="Scroll claims table left"/);
+    assert.match(html, /onclick="scrollClaimsColumns\(1\)" aria-label="Scroll claims table right"/);
+    const navIndex = html.indexOf('class="claims-column-nav"');
+    const scrollRegionIndex = html.indexOf('id="claims-operational-scroll"');
+    assert.ok(navIndex >= 0 && scrollRegionIndex > navIndex, "Navigation stays above the scrolling content");
+    const navFunction = html.match(/^function scrollClaimsColumns\(direction\)\s*\{[\s\S]*?^\}/m)?.[0];
+    assert.ok(navFunction, "Missing live claims table horizontal navigation handler");
+    const calls = [];
+    const sandbox = { document: { getElementById: () => ({
+      clientWidth: 700,
+      scrollBy: (options) => calls.push(options),
+    }) } };
+    runInNewContext(navFunction + "\nscrollClaimsColumns(-1);\nscrollClaimsColumns(1);", sandbox, { timeout: 1000 });
+    assert.equal(calls.length, 2);
+    assert.ok(calls[0].left < 0 && calls[1].left > 0);
+    assert.equal(calls[0].behavior, "smooth");
+    assert.equal(calls[1].behavior, "smooth");
 
     // Secondary metadata must occupy its own line and stay inside its grid cell.
     assert.match(
