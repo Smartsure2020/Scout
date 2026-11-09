@@ -78,7 +78,7 @@ test("operational filters and briefing settings have explicit accessible names",
   ];
   for (const { name, html } of claimPages) {
     for (const [id, accessibleName] of required) {
-      const control = html.match(new RegExp("<(?:input|select)\\b[^>]*\\bid=\\"" + id + "\\"[^>]*>", "i"))?.[0];
+      const control = html.split(`id="${id}"`)[1]?.split(">", 1)[0];
       assert.ok(control, `${name}: missing ${id}`);
       assert.ok(control.includes(`aria-label="${accessibleName}"`), `${name}: ${id} lacks an accessible name`);
     }
