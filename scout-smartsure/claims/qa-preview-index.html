@@ -733,9 +733,22 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.claims-operational-table {
+.claims-operational-table { overflow: hidden; }
+.claims-operational-scroll {
   overflow-x: auto;
   overscroll-behavior-inline: contain;
+}
+.claims-column-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.claims-column-nav-label { color: var(--ws-text-muted); font-size: 11px; }
+.claims-column-nav .density-btn { min-width: 58px; }
+.claims-column-nav .density-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 #view-all-claims > .page-header { flex-wrap: wrap; gap: 12px 18px; }
 #view-all-claims > .page-header > div:first-child { flex: 0 0 auto; }
@@ -3405,7 +3418,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         </div>
         <button id="save-filter-trigger" class="save-filter-btn" onclick="openSaveFilterInput()" title="Save current filter combination">&#43; Save filter</button>
       </div>
-      <div class="claims-table claims-operational-table" role="region" aria-label="Claims operational queue, horizontally scrollable" tabindex="0">
+      <div class="claims-table claims-operational-table">
         <div class="claims-table-toolbar">
           <span class="table-context-label">Operational queue</span>
           <div class="density-control" role="group" aria-label="Claims table density">
@@ -3413,7 +3426,13 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
             <button id="claims-density-comfortable" class="density-btn active" onclick="setClaimsDensity('comfortable')">Comfortable</button>
             <button id="claims-density-compact" class="density-btn" onclick="setClaimsDensity('compact')">Compact</button>
           </div>
+          <div class="claims-column-nav" role="group" aria-label="Navigate claims table columns">
+            <span class="claims-column-nav-label">9 columns · scroll sideways</span>
+            <button class="density-btn" type="button" onclick="scrollClaimsColumns(-1)" aria-label="Scroll claims table left" title="Scroll to earlier columns">← Left</button>
+            <button class="density-btn" type="button" onclick="scrollClaimsColumns(1)" aria-label="Scroll claims table right" title="Scroll to later columns">Right →</button>
+          </div>
         </div>
+        <div class="claims-operational-scroll" id="claims-operational-scroll" role="region" aria-label="Claims operational queue, horizontally scrollable" tabindex="0">
         <div class="table-head grid-claims">
           <button class="sort-btn active" id="sort-btn-age" onclick="setAllClaimsSort('age')" title="Sort by claim age">Age / movement <span id="sort-ind-age">↓</span></button>
           <span>Claim</span><span>Insured</span><span>Primary state</span>
@@ -3422,6 +3441,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
           <span>Context</span>
         </div>
         <div id="all-claims-body"></div>
+        </div>
       </div>
       <div id="all-claims-pagination" style="display:flex;align-items:center;justify-content:flex-end;gap:10px;margin-top:12px;"></div>
     </div>
@@ -8113,6 +8133,13 @@ function setClaimsSearchFilter(value) {
   const clearBtn = document.getElementById("search-clear-btn");
   if (clearBtn) clearBtn.style.display = searchTerm ? "block" : "none";
   renderAllClaims(getProcessedClaims());
+}
+
+function scrollClaimsColumns(direction) {
+  const table = document.getElementById("claims-operational-scroll");
+  if (!table) return;
+  const step = Math.max(300, Math.round(table.clientWidth * 0.82));
+  table.scrollBy({ left: direction < 0 ? -step : step, behavior: "smooth" });
 }
 
 function setClaimsDensity(mode) {
