@@ -1106,6 +1106,12 @@ body {
   gap: 16px;
 }
 
+/* Keep mandate reviews and the payment pipeline readable within the
+   manager workspace; two equal columns are too narrow on laptops. */
+@media (max-width: 1450px) {
+  .manager-finance-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* HANDLER CARDS */
 .handler-card {
   background: var(--ws-surface);
@@ -3559,7 +3565,7 @@ select:focus { border-color: var(--brand-teal); box-shadow: 0 0 0 3px rgba(30,99
         </div>
         <div class="claims-table" id="manager-workload-balance"></div>
       </div>
-      <div class="two-col">
+      <div class="two-col manager-finance-grid">
         <div>
           <div class="section-header">
             <div class="section-title">Mandate authority dashboard <span class="section-badge red">over R100k</span></div>
