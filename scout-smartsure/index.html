@@ -15,7 +15,7 @@
   --ws-surface: #ffffff;
   --ws-border: #e2ecea;
   --ws-text: #1a2e2e;
-  --ws-text-muted: #7a9b98;
+  --ws-text-muted: #4f716d;
   --accent-lt: #e8f5f2;
   --accent-mid: #b0d8d2;
   --red: #d94444;
@@ -52,8 +52,9 @@ body {
 .auth-card {
   background: white;
   border-radius: var(--r-xl);
-  padding: 48px;
+  padding: clamp(24px, 6vw, 48px);
   width: 420px;
+  max-width: calc(100vw - 32px);
   text-align: center;
   display: flex;
   flex-direction: column;
@@ -122,15 +123,20 @@ body {
   gap: 24px;
   justify-content: center;
   flex-wrap: wrap;
+  width: 100%;
 }
 
 .portal-card {
+  display: block;
   background: var(--ws-surface);
   border: 1px solid var(--ws-border);
   border-radius: var(--r-xl);
   padding: 40px 36px;
   width: 320px;
+  max-width: 100%;
   text-align: center;
+  text-decoration: none;
+  color: inherit;
   cursor: pointer;
   transition: all 0.2s;
   box-shadow: var(--shadow-sm);
@@ -147,6 +153,7 @@ body {
   opacity: 0;
   transition: opacity 0.2s;
 }
+.portal-card:focus-visible { outline: 3px solid var(--brand-teal); outline-offset: 3px; }
 .portal-card:hover {
   border-color: var(--accent-mid);
   box-shadow: var(--shadow-lg);
@@ -468,14 +475,14 @@ function renderPortal() {
 
   if (portal === "claims" || portal === "both") {
     html += `
-      <div class="portal-card claims" onclick="window.location.href='${CONFIG.claimsUrl}'">
+      <a class="portal-card claims" href="${CONFIG.claimsUrl}" aria-label="Open Claims Operations">
         <div class="portal-card-icon claims">
           <svg viewBox="0 0 24 24"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2h11"/></svg>
         </div>
         <div class="portal-card-title">Claims Operations</div>
         <div class="portal-card-desc">Daily claims prioritisation, SLA tracking, handler workloads, Teams briefings and manager reporting.</div>
         <div class="portal-card-btn">Open Claims Portal</div>
-      </div>`;
+      </a>`;
   }
 
   if (portal === "underwriting" || portal === "both") {
