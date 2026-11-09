@@ -35,6 +35,47 @@ function reportDocument() {
   };
 }
 
+test("Claims Reports does not repeat the visible global extract freshness banner", () => {
+  const freshness = {
+    state: "stale",
+    label: "Stale",
+    message: "Last accepted extract: 05 Nov 2026",
+    warningText: "549 data quality warnings",
+  };
+
+  const documentWithGlobalBanner = reportDocument();
+  const getElementById = documentWithGlobalBanner.getElementById.bind(documentWithGlobalBanner);
+  documentWithGlobalBanner.getElementById = (id) =>
+    id === "data-status-banner" ? { style: { display: "block" } } : getElementById(id);
+  const embeddedController = new ReportsController({
+    document: documentWithGlobalBanner,
+    getContext: () => ({ user: { role: "manager" }, freshness }),
+  });
+  embeddedController.render();
+  assert.doesNotMatch(documentWithGlobalBanner.root.innerHTML, /class="report-freshness/);
+  assert.match(documentWithGlobalBanner.root.innerHTML, /class="reports-tabs"/);
+
+  const standaloneDocument = reportDocument();
+  const standaloneController = new ReportsController({
+    document: standaloneDocument,
+    getContext: () => ({ user: { role: "manager" }, freshness }),
+  });
+  standaloneController.render();
+  assert.match(standaloneDocument.root.innerHTML, /class="report-freshness report-freshness-stale"/);
+  assert.match(standaloneDocument.root.innerHTML, /549 data quality warnings/);
+
+  const hiddenGlobalDocument = reportDocument();
+  const hiddenGetElementById = hiddenGlobalDocument.getElementById.bind(hiddenGlobalDocument);
+  hiddenGlobalDocument.getElementById = (id) =>
+    id === "data-status-banner" ? { style: { display: "none" } } : hiddenGetElementById(id);
+  const hiddenGlobalController = new ReportsController({
+    document: hiddenGlobalDocument,
+    getContext: () => ({ user: { role: "manager" }, freshness }),
+  });
+  hiddenGlobalController.render();
+  assert.match(hiddenGlobalDocument.root.innerHTML, /class="report-freshness report-freshness-stale"/);
+});
+
 function response(payload, status = 200) {
   return {
     ok: status >= 200 && status < 300,
